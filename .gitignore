@@ -1,0 +1,27 @@
+# Binary
+/orch-gateway
+*.exe
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Test / Build artifacts
+coverage.out
+coverage.html
+*.test
+
+# Runtime data
+*.log
+
+# Environment / real config (contains bot tokens, real endpoints)
+.env
+.envrc
+config.yaml

@@ -1,0 +1,24 @@
+# orch-gateway config. Mounted read-only at /etc/orch-gateway/config.yaml —
+# see docker-compose.snippet.yml. Fill in every REPLACE marker before use.
+
+listen_addr: ":8090"
+
+loki:
+  endpoint: "http://loki:3100"   # Loki's service name on the same docker network
+  lookback_sec: 300
+  limit: 200
+
+summarizer:
+  # OpenAI-compatible endpoint (LM Studio, Ollama, vLLM, etc.). If it's on a
+  # different host than this container, use its real LAN IP — it won't be
+  # reachable by container/service name unless it's on the same docker network.
+  endpoint: "http://REPLACE-llm-host:1234"
+  model: "REPLACE-model-name"
+
+telegram:
+  # Push each alert's LLM summary to this chat. Leave bot_token empty to
+  # disable — the summary is still computed either way, it just won't be
+  # pushed anywhere (only visible in the webhook's HTTP response body,
+  # which nothing reads in production).
+  bot_token: "REPLACE-bot-token"
+  chat_id: 0
