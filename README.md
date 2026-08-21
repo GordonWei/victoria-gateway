@@ -27,12 +27,45 @@ Alertmanager --webhook--> orch-gateway --query--> Loki
 that's what scopes the Loki query. Alerts without one are reported back as
 an error entry rather than failing the whole request.
 
+## Requirements
+
+- Go 1.25+ (see `go.mod`) to build from source
+- Docker, only if you're using the container path instead
+
 ## Config
 
-See `deploy/config.docker.yaml` for the full shape. Four things to fill in:
-Loki endpoint, LLM endpoint + model, Telegram bot token + chat ID. Leave
-`telegram.bot_token` empty to disable the push (the summary still gets
-computed, it just won't go anywhere).
+`config.yaml`, flat structure:
+
+```yaml
+listen_addr: ":8090"   # optional, defaults to :8090
+
+loki:
+  endpoint: "http://loki:3100"
+  lookback_sec: 300     # optional, defaults to 300
+  limit: 200             # optional, defaults to 200
+
+summarizer:
+  endpoint: "http://your-llm-host:1234"   # OpenAI-compatible /v1/chat/completions
+  model: "your-model-name"
+
+telegram:
+  bot_token: ""   # leave empty to disable the push
+  chat_id: 0
+```
+
+`loki.endpoint` and `summarizer.endpoint` are required — the process exits
+on startup if either is missing. Everything else has a default or is
+optional. See `deploy/config.docker.yaml` for the same shape with
+container-specific comments.
+
+### Getting a Telegram bot token and chat ID
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`,
+   follow the prompts. You get a token back that looks like
+   `123456789:AAExampleTokenNotReal`.
+2. Send any message to your new bot (DM it directly, or add it to a group).
+3. Hit `https://api.telegram.org/bot<token>/getUpdates` in a browser or with
+   curl. The `chat.id` field in the response is your `chat_id`.
 
 ## Running
 
@@ -40,6 +73,17 @@ computed, it just won't go anywhere).
 go build -o orch-gateway ./cmd/orch-gateway/
 ORCH_GATEWAY_CONFIG=./config.yaml ./orch-gateway
 ```
+
+Config path resolution: `--config <path>` flag, else `$ORCH_GATEWAY_CONFIG`,
+else `/etc/orch-gateway/config.yaml`. `--port <n>` overrides `listen_addr`
+from the config file if you need to override it without editing the file.
+
+```bash
+./orch-gateway --config ./config.yaml --port 9000
+```
+
+`GET /healthz` returns `200 ok` once the process is up — use it for a
+container healthcheck or a quick "is this running" check.
 
 Or via Docker — see `Dockerfile` and `deploy/`:
 
@@ -70,3 +114,7 @@ swapping the compose service's build source, which is a separate step.
 ```bash
 go test ./...
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
