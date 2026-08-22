@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
@@ -192,6 +193,59 @@ type handler struct {
 	ragEmbedder *rag.Embedder // nil if RAG is disabled
 	ragTopK     int
 	gitea       *gitea.Client // nil if Gitea capture isn't configured
+
+	dedupMu  sync.Mutex
+	recentFP map[string]time.Time // fingerprint -> last-processed time, see claimFingerprint
+}
+
+// dedupWindow bounds how long a fingerprint is considered "already
+// handled" after being claimed. It only needs to be longer than
+// Alertmanager's own retry cadence for one notification attempt (its
+// webhook timeout times a couple of retries, plus group_interval) — not
+// how long the alert might stay firing. A still-firing alert that
+// genuinely persists past this window and gets redelivered (e.g. a
+// repeat_interval re-notification) is treated as a fresh episode and
+// re-analyzed; that's an acceptable tradeoff for not needing an "is this
+// alert still active" signal from Alertmanager, which the webhook
+// payload alone doesn't reliably give.
+const dedupWindow = 10 * time.Minute
+
+// claimFingerprint reports whether this is the first time this alert
+// fingerprint has been seen within dedupWindow (and records it as seen
+// now) — false means the caller should skip it as a duplicate delivery
+// of an episode already being handled. An empty fingerprint always
+// claims true (defensive: real Alertmanager payloads always carry one,
+// but nothing here should silently drop an alert just because a
+// synthetic/test payload omitted it).
+func (h *handler) claimFingerprint(fp string) bool {
+	if fp == "" {
+		return true
+	}
+	h.dedupMu.Lock()
+	defer h.dedupMu.Unlock()
+	if h.recentFP == nil {
+		h.recentFP = make(map[string]time.Time)
+	}
+	now := time.Now()
+	if seenAt, ok := h.recentFP[fp]; ok && now.Sub(seenAt) < dedupWindow {
+		return false
+	}
+	h.recentFP[fp] = now
+	for k, t := range h.recentFP {
+		if now.Sub(t) >= dedupWindow {
+			delete(h.recentFP, k)
+		}
+	}
+	return true
+}
+
+// clearFingerprint drops the dedup entry for a fingerprint whose alert
+// just resolved, so if the same alert fires again later as a genuinely
+// new episode it isn't mistaken for a duplicate of the old one.
+func (h *handler) clearFingerprint(fp string) {
+	h.dedupMu.Lock()
+	defer h.dedupMu.Unlock()
+	delete(h.recentFP, fp)
 }
 
 // alertResult is one entry in the JSON array returned by
@@ -226,6 +280,32 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 
 	results := make([]alertResult, 0, len(payload.Alerts))
 	for _, alert := range payload.Alerts {
+		// A "resolved" delivery means the problem stopped, not that
+		// there's something new to diagnose — analyzing it would just
+		// waste an LLM call and file a second Gitea issue for the same
+		// episode. Alertmanager's own telegram_configs (in
+		// alertmanager.yml, separate from this webhook) already tells
+		// the human it resolved; this only clears the dedup entry so a
+		// later, genuinely new firing of the same alert isn't treated as
+		// a duplicate of the old episode.
+		if alert.Status == "resolved" {
+			h.clearFingerprint(alert.Fingerprint)
+			continue
+		}
+
+		// Alertmanager retries a notification attempt it considers
+		// failed (its own webhook timeout, or its dispatch loop
+		// superseding a still-in-flight attempt) by POSTing the same
+		// still-firing alert again — without this, each retry runs the
+		// full analysis again and files another Gitea issue for what is
+		// the same episode. claimFingerprint is a short-window dedup (see
+		// its doc comment), not permanent — the same alertname firing
+		// again as a genuinely new episode later still gets analyzed.
+		if !h.claimFingerprint(alert.Fingerprint) {
+			log.Printf("aiops: alert %q (fingerprint=%s) already processed recently, skipping duplicate delivery", alert.Labels["alertname"], alert.Fingerprint)
+			continue
+		}
+
 		res := h.summarizeOne(alert)
 		results = append(results, res)
 		h.notifyTelegram(res)

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -552,5 +554,180 @@ func TestSummarizeOne_GiteaCreateFails_StillCapturesPending(t *testing.T) {
 	}
 	if store.lastPending.GiteaIssueNumber != 0 {
 		t.Errorf("expected GiteaIssueNumber 0 when issue creation failed, got %d", store.lastPending.GiteaIssueNumber)
+	}
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Dedup (Alertmanager retry storms / resolved deliveries)
+// ══════════════════════════════════════════════════════════════════════════════
+
+func alertmanagerPayloadWithFingerprint(status, fingerprint string) []byte {
+	payload := map[string]any{
+		"version": "4",
+		"status":  status,
+		"alerts": []map[string]any{
+			{
+				"status":      status,
+				"labels":      map[string]string{"alertname": "cpu_high", "host": "test-host"},
+				"startsAt":    time.Now().Add(-2 * time.Minute).Format(time.RFC3339),
+				"fingerprint": fingerprint,
+			},
+		},
+	}
+	b, _ := json.Marshal(payload)
+	return b
+}
+
+// TestHandleAlertmanagerWebhook_DuplicateFingerprint_OnlyProcessedOnce
+// simulates the actual bug found in production: Alertmanager retrying a
+// notification it considers failed (its own webhook timeout/dispatch
+// loop, not anything wrong with the payload) by re-POSTing the same
+// still-firing alert. Without dedup this ran the full analysis — and
+// filed a new Gitea issue — once per retry, for what's a single episode.
+func TestHandleAlertmanagerWebhook_DuplicateFingerprint_OnlyProcessedOnce(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+
+	var llmCalls int32
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&llmCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"content": `{"summary":"ok","confidence":"high","escalate":false,"reason":"x"}`}}},
+		})
+	}))
+	defer llmSrv.Close()
+
+	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
+	body := alertmanagerPayloadWithFingerprint("firing", "dup-fp-001")
+
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.handleAlertmanagerWebhook(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("delivery %d: status = %d, want 200", i, rec.Code)
+		}
+	}
+
+	if got := atomic.LoadInt32(&llmCalls); got != 1 {
+		t.Errorf("LLM was called %d times for 3 deliveries of the same fingerprint, want 1 (the retries should have been deduped)", got)
+	}
+}
+
+// TestHandleAlertmanagerWebhook_DifferentFingerprints_BothProcessed
+// confirms dedup is scoped to the fingerprint, not e.g. the alertname —
+// two genuinely different alerts (even with the same alertname/host, as
+// can happen across separate episodes) must both go through.
+func TestHandleAlertmanagerWebhook_DifferentFingerprints_BothProcessed(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+
+	var llmCalls int32
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&llmCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"content": `{"summary":"ok","confidence":"high","escalate":false,"reason":"x"}`}}},
+		})
+	}))
+	defer llmSrv.Close()
+
+	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
+
+	for _, fp := range []string{"fp-a", "fp-b"} {
+		req := httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", bytes.NewReader(alertmanagerPayloadWithFingerprint("firing", fp)))
+		rec := httptest.NewRecorder()
+		h.handleAlertmanagerWebhook(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("fingerprint %s: status = %d, want 200", fp, rec.Code)
+		}
+	}
+
+	if got := atomic.LoadInt32(&llmCalls); got != 2 {
+		t.Errorf("LLM was called %d times for 2 distinct fingerprints, want 2", got)
+	}
+}
+
+// TestHandleAlertmanagerWebhook_ResolvedAlert_SkipsAnalysis confirms a
+// "resolved" delivery never reaches the LLM/capture path — there's
+// nothing new to diagnose about an alert that just stopped, and
+// Alertmanager's own telegram_configs already tells the human it
+// resolved (separately from this webhook).
+func TestHandleAlertmanagerWebhook_ResolvedAlert_SkipsAnalysis(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+
+	llmCalled := false
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCalled = true
+		w.WriteHeader(500)
+	}))
+	defer llmSrv.Close()
+
+	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", bytes.NewReader(alertmanagerPayloadWithFingerprint("resolved", "resolved-fp-001")))
+	rec := httptest.NewRecorder()
+	h.handleAlertmanagerWebhook(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if llmCalled {
+		t.Error("a resolved delivery should never reach the LLM")
+	}
+}
+
+// TestHandleAlertmanagerWebhook_ResolvedThenRefired_ProcessedAsNewEpisode
+// confirms resolving an alert clears its dedup entry, so the same
+// fingerprint firing again later (a genuinely new episode, not a retry
+// of the old one) still gets analyzed rather than being silently
+// swallowed by the dedup window.
+func TestHandleAlertmanagerWebhook_ResolvedThenRefired_ProcessedAsNewEpisode(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+
+	var llmCalls int32
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&llmCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"content": `{"summary":"ok","confidence":"high","escalate":false,"reason":"x"}`}}},
+		})
+	}))
+	defer llmSrv.Close()
+
+	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
+	fp := "recurring-fp-001"
+
+	post := func(status string) int {
+		req := httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", bytes.NewReader(alertmanagerPayloadWithFingerprint(status, fp)))
+		rec := httptest.NewRecorder()
+		h.handleAlertmanagerWebhook(rec, req)
+		return rec.Code
+	}
+
+	if code := post("firing"); code != http.StatusOK {
+		t.Fatalf("first firing: status = %d", code)
+	}
+	if code := post("resolved"); code != http.StatusOK {
+		t.Fatalf("resolved: status = %d", code)
+	}
+	if code := post("firing"); code != http.StatusOK {
+		t.Fatalf("second firing: status = %d", code)
+	}
+
+	if got := atomic.LoadInt32(&llmCalls); got != 2 {
+		t.Errorf("LLM was called %d times across fire->resolve->fire, want 2 (each firing analyzed once, resolve skipped)", got)
+	}
+}
+
+func TestClaimFingerprint_EmptyAlwaysClaims(t *testing.T) {
+	h := &handler{}
+	if !h.claimFingerprint("") {
+		t.Error("an empty fingerprint should always claim true (defensive default, not a dedup key)")
+	}
+	if !h.claimFingerprint("") {
+		t.Error("calling again with empty fingerprint should still claim true")
 	}
 }
