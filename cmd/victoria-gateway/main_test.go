@@ -12,6 +12,7 @@ import (
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
 	"github.com/gordonwei/victoria-gateway/pkg/config"
+	"github.com/gordonwei/victoria-gateway/pkg/gitea"
 	"github.com/gordonwei/victoria-gateway/pkg/model"
 	"github.com/gordonwei/victoria-gateway/pkg/rag"
 )
@@ -335,6 +336,10 @@ type fakeRAGStore struct {
 	// searchCalled records whether Search was actually invoked, so tests
 	// can confirm retrieval is skipped when RAG isn't wired up.
 	searchCalled bool
+	// insertPendingCalled/lastPending record whether/what captureIncident
+	// wrote, so tests can confirm auto-capture actually happens.
+	insertPendingCalled bool
+	lastPending         rag.Record
 }
 
 func (f *fakeRAGStore) Search(ctx context.Context, embedding []float32, topK int) ([]rag.Record, error) {
@@ -345,6 +350,17 @@ func (f *fakeRAGStore) Search(ctx context.Context, embedding []float32, topK int
 	return f.records, nil
 }
 func (f *fakeRAGStore) Insert(ctx context.Context, rec rag.Record, embedding []float32) error {
+	return fmt.Errorf("not implemented in fake")
+}
+func (f *fakeRAGStore) InsertPending(ctx context.Context, rec rag.Record, embedding []float32) (int64, error) {
+	f.insertPendingCalled = true
+	f.lastPending = rec
+	return 1, nil
+}
+func (f *fakeRAGStore) PendingWithGiteaIssue(ctx context.Context) ([]rag.Record, error) {
+	return nil, fmt.Errorf("not implemented in fake")
+}
+func (f *fakeRAGStore) Confirm(ctx context.Context, id int64, resolution string) error {
 	return fmt.Errorf("not implemented in fake")
 }
 func (f *fakeRAGStore) Close() error { return nil }
@@ -422,4 +438,119 @@ func TestSummarizeOne_RAGDisabled_NoSearchCalled(t *testing.T) {
 	// No assertion beyond "didn't panic / didn't error" — the real check
 	// is that retrieveRAGContext's nil guard is exercised, which the fake
 	// store in the other test proves is otherwise reachable.
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RAG capture (pending record + optional Gitea issue)
+// ══════════════════════════════════════════════════════════════════════════════
+
+func TestSummarizeOne_CapturesPendingRecord(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+	llmSrv := newFakeLLM(t, `{"summary":"CPU 過載","confidence":"high","escalate":false,"reason":"x"}`)
+	defer llmSrv.Close()
+	embedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1}}}})
+	}))
+	defer embedSrv.Close()
+
+	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
+	store := &fakeRAGStore{}
+	h.rag = store
+	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3")
+
+	alert := aiops.Alert{
+		Status:   "firing",
+		Labels:   map[string]string{"alertname": "cpu_high", "host": "test-host"},
+		StartsAt: time.Now().Add(-2 * time.Minute).Format(time.RFC3339),
+	}
+	h.summarizeOne(alert)
+
+	if !store.insertPendingCalled {
+		t.Fatal("expected InsertPending to be called after a successful analysis")
+	}
+	if store.lastPending.AlertName != "cpu_high" || store.lastPending.Summary != "CPU 過載" {
+		t.Errorf("unexpected pending record: %+v", store.lastPending)
+	}
+	if store.lastPending.GiteaIssueNumber != 0 {
+		t.Errorf("expected no Gitea issue number when Gitea isn't configured, got %d", store.lastPending.GiteaIssueNumber)
+	}
+}
+
+func TestSummarizeOne_CapturesWithGiteaIssue(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+	llmSrv := newFakeLLM(t, `{"summary":"CPU 過載","confidence":"high","escalate":false,"reason":"x"}`)
+	defer llmSrv.Close()
+	embedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1}}}})
+	}))
+	defer embedSrv.Close()
+	var createdTitle string
+	giteaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Title string `json:"title"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		createdTitle = body.Title
+		json.NewEncoder(w).Encode(gitea.Issue{Number: 7, State: "open"})
+	}))
+	defer giteaSrv.Close()
+
+	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
+	store := &fakeRAGStore{}
+	h.rag = store
+	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3")
+	h.gitea = gitea.NewClient(gitea.ClientConfig{Endpoint: giteaSrv.URL, Token: "t", Owner: "ops-team", Repo: "victoria-gateway-incidents"})
+
+	alert := aiops.Alert{
+		Status:   "firing",
+		Labels:   map[string]string{"alertname": "cpu_high", "host": "test-host"},
+		StartsAt: time.Now().Add(-2 * time.Minute).Format(time.RFC3339),
+	}
+	h.summarizeOne(alert)
+
+	if !strings.Contains(createdTitle, "cpu_high") {
+		t.Errorf("gitea issue title = %q, expected it to mention the alertname", createdTitle)
+	}
+	if store.lastPending.GiteaIssueNumber != 7 {
+		t.Errorf("pending record GiteaIssueNumber = %d, want 7", store.lastPending.GiteaIssueNumber)
+	}
+}
+
+func TestSummarizeOne_GiteaCreateFails_StillCapturesPending(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+	llmSrv := newFakeLLM(t, `{"summary":"CPU 過載","confidence":"high","escalate":false,"reason":"x"}`)
+	defer llmSrv.Close()
+	embedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1}}}})
+	}))
+	defer embedSrv.Close()
+
+	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
+	store := &fakeRAGStore{}
+	h.rag = store
+	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3")
+	h.gitea = gitea.NewClient(gitea.ClientConfig{Endpoint: "http://127.0.0.1:19999", Token: "t", Owner: "ops-team", Repo: "r"})
+
+	alert := aiops.Alert{
+		Status:   "firing",
+		Labels:   map[string]string{"alertname": "cpu_high", "host": "test-host"},
+		StartsAt: time.Now().Add(-2 * time.Minute).Format(time.RFC3339),
+	}
+	res := h.summarizeOne(alert)
+
+	if res.Error != "" {
+		t.Fatalf("a failed gitea issue creation must not fail the alert: %s", res.Error)
+	}
+	if !store.insertPendingCalled {
+		t.Fatal("expected the pending record to still be captured even though issue creation failed")
+	}
+	if store.lastPending.GiteaIssueNumber != 0 {
+		t.Errorf("expected GiteaIssueNumber 0 when issue creation failed, got %d", store.lastPending.GiteaIssueNumber)
+	}
 }

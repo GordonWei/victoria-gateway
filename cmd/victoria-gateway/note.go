@@ -12,12 +12,20 @@ import (
 )
 
 // runNote implements `victoria-gateway note`: an operator confirms what a
-// past alert actually turned out to be, and that gets embedded + stored
-// in the RAG database for future alerts to retrieve as reference. This is
-// the only way records get into the store — victoria-gateway itself never
-// writes one automatically, on purpose: an LLM's own guess about an
-// alert isn't confirmed truth, and seeding the store with unconfirmed
-// guesses risks reinforcing wrong ones. See pkg/rag and schema.sql.
+// past alert actually turned out to be. Two modes:
+//
+//   - `--id <n> --resolution "..."` confirms an existing Pending record
+//     (one auto-captured by the server when the alert fired — see
+//     captureIncident in main.go) — this is the common case now that
+//     capture is automatic.
+//   - `--alert-name ... --resolution ...` (no `--id`) creates a brand new
+//     Confirmed record from scratch, for an incident that predates RAG
+//     being enabled or was never auto-captured.
+//
+// Either way, victoria-gateway itself never marks anything Confirmed on
+// its own — an LLM's own guess isn't confirmed truth, and seeding the
+// store with unconfirmed guesses risks reinforcing wrong ones. See
+// pkg/rag and schema.sql.
 func runNote(args []string) {
 	fs := flag.NewFlagSet("victoria-gateway note", flag.ExitOnError)
 	configPath := os.Getenv("VICTORIA_GATEWAY_CONFIG")
@@ -25,15 +33,16 @@ func runNote(args []string) {
 		configPath = "/etc/victoria-gateway/config.yaml"
 	}
 	fs.StringVar(&configPath, "config", configPath, "path to config.yaml")
-	alertName := fs.String("alert-name", "", "the alertname this note is about (required)")
+	id := fs.Int64("id", 0, "confirm this existing pending record's id instead of creating a new one")
+	alertName := fs.String("alert-name", "", "the alertname this note is about (required unless --id is set)")
 	host := fs.String("host", "", "the host/instance the alert was about")
 	logExcerpt := fs.String("log-excerpt", "", "a relevant log excerpt, for your own future reference (optional)")
 	summary := fs.String("summary", "", "the AI-generated summary at the time, if you have it (optional)")
 	resolution := fs.String("resolution", "", "what it actually turned out to be and/or how it was fixed (required)")
 	fs.Parse(args)
 
-	if *alertName == "" || *resolution == "" {
-		fmt.Fprintln(os.Stderr, "❌ --alert-name and --resolution are required")
+	if *resolution == "" || (*id == 0 && *alertName == "") {
+		fmt.Fprintln(os.Stderr, "❌ --resolution is required, and either --id or --alert-name")
 		fs.Usage()
 		os.Exit(1)
 	}
@@ -59,6 +68,18 @@ func runNote(args []string) {
 	}
 	defer store.Close()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if *id != 0 {
+		if err := store.Confirm(ctx, *id, *resolution); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✅ confirmed: id=%d\n", *id)
+		return
+	}
+
 	embedder := rag.NewEmbedder(cfg.RAG.EmbeddingEndpoint, cfg.RAG.EmbeddingModel)
 	queryText := rag.BuildQueryText(*alertName, *host, *summary, []string{*logExcerpt})
 	embedding, err := embedder.Embed(queryText)
@@ -67,8 +88,6 @@ func runNote(args []string) {
 		os.Exit(1)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 	rec := rag.Record{
 		AlertName:  *alertName,
 		Host:       *host,

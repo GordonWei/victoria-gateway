@@ -68,6 +68,22 @@ type RAGConfig struct {
 	EmbeddingEndpoint string `yaml:"embedding_endpoint"` // OpenAI-compatible /v1/embeddings endpoint
 	EmbeddingModel    string `yaml:"embedding_model"`    // e.g. "bge-m3"
 	TopK              int    `yaml:"top_k"`              // how many past incidents to retrieve; defaults to 3
+
+	// Gitea, if set, makes every analyzed alert file a Gitea issue and
+	// captures a Pending record alongside it (see pkg/rag.Store). Without
+	// it, RAG still works for Search/the `note` CLI, there's just no
+	// automatic capture path — every record has to be added by hand.
+	Gitea *GiteaConfig `yaml:"gitea"`
+}
+
+// GiteaConfig points at the repo Victoria Gateway files one issue per
+// analyzed alert into, and that `victoria-gateway sync` later polls for
+// closed issues to pull resolutions back from.
+type GiteaConfig struct {
+	Endpoint string `yaml:"endpoint"` // e.g. "https://gitea.example.com"
+	Token    string `yaml:"token"`
+	Owner    string `yaml:"owner"` // repo owner, e.g. "ops-team"
+	Repo     string `yaml:"repo"`  // e.g. "victoria-gateway-incidents"
 }
 
 // TelegramConfig, if BotToken is set, makes the webhook handler push each

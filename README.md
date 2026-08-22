@@ -136,32 +136,86 @@ Setup, once, before turning this on:
    served (the same LM Studio/Ollama/vLLM instance `summarizer` uses is
    fine, as long as it also has an embedding model loaded).
 
-**The store starts empty on purpose.** victoria-gateway never writes to it
-automatically — an LLM's own guess about an alert isn't confirmed truth,
-and seeding the store with unconfirmed guesses risks a wrong guess getting
-retrieved and repeated later. The only way a record gets in is the `note`
-subcommand, run by a human after they've actually confirmed what an alert
-turned out to be:
+**Only Confirmed records are ever retrieved.** Every analyzed alert gets
+captured as a Pending record automatically (no config needed beyond `rag`
+itself) — but Pending records don't show up in Search, because an LLM's
+own guess about an alert isn't confirmed truth, and retrieving unconfirmed
+guesses risks a wrong one getting repeated later. A record only becomes
+Confirmed, and therefore retrievable, once a human attaches a real
+resolution. Two ways to do that:
+
+**Manually**, any time, for any record (whether or not it came from an
+auto-capture):
 
 ```bash
+victoria-gateway note --id 42 --resolution "舊測試機殘留的 scrape target，機器已下線，從 node.yml 拿掉了"
+
+# or, for an incident that predates capture / was never auto-captured:
 victoria-gateway note \
-  --alert-name "InstanceDown" \
-  --host "192.0.2.7" \
-  --resolution "舊測試機殘留的 scrape target，機器已下線，從 node.yml 拿掉了" \
-  --log-excerpt "optional: paste whatever log line mattered" \
-  --summary "optional: what the AI said at the time, for your own reference"
+  --alert-name "InstanceDown" --host "192.0.2.7" \
+  --resolution "舊測試機殘留的 scrape target，機器已下線，從 node.yml 拿掉了"
 ```
 
-`--alert-name` and `--resolution` are required; everything else is optional
-context. This reads the same `config.yaml` as the server (`--config` flag or
-`$VICTORIA_GATEWAY_CONFIG`) and needs `rag.enabled: true` with all three RAG
-fields set — it's meant to be run on whatever host can reach the Postgres
-and embedding endpoint, not necessarily the deployment host itself.
+`--resolution` is always required, and either `--id` (confirms an existing
+Pending record) or `--alert-name` (creates a new Confirmed one from
+scratch) must be given.
 
-Retrieval failures (embedding endpoint down, Postgres unreachable) are
-logged and treated as "no context found" rather than failing the alert —
-RAG is a prompt enhancement, not a dependency the core summarizer needs to
-stay up.
+**Automatically, via Gitea**, if you add a `gitea` block:
+
+```yaml
+rag:
+  enabled: true
+  postgres_dsn: "postgres://user:pass@host:5432/dbname"
+  embedding_endpoint: "http://your-llm-host:1234"
+  embedding_model: "bge-m3"
+  gitea:
+    endpoint: "https://your-gitea-instance"
+    token: "..."          # needs write:issue scope on the target repo
+    owner: "your-username"
+    repo: "victoria-gateway-incidents"   # a dedicated repo, not the code repo
+```
+
+With this set, every analyzed alert also files a Gitea issue (title = alert
+name + host, body = the analysis) alongside the Pending record it's linked
+to. Investigate as normal; before closing the issue, leave one comment
+describing what it actually was — that's what gets pulled back as the
+resolution. Then run:
+
+```bash
+victoria-gateway sync
+```
+
+`sync` checks every Pending record with a linked issue, and for any issue
+that's since closed, reads its last comment in as the resolution and marks
+the record Confirmed. It's meant to run on a schedule (cron), not stay
+running — one pass, then exit. An issue closed with no comment is left
+Pending; there's nothing to confirm it with, and `note --id` still works on
+it by hand later.
+
+Retrieval and capture failures (embedding endpoint down, Postgres or Gitea
+unreachable) are logged and treated as "skip this part" rather than
+failing the alert — none of RAG is a dependency the core summarizer needs
+to stay up.
+
+Setup, once, before turning `rag.enabled` on:
+
+1. Install the pgvector extension on the Postgres server itself (an OS/apt
+   package — `CREATE EXTENSION` alone won't work if the extension binary
+   isn't installed).
+2. Run `pkg/rag/schema.sql` against the target database (a fresh install —
+   already-deployed databases from before the Pending/Confirmed split
+   should run `pkg/rag/migrate_0001_pending_status.sql` instead, which
+   upgrades an existing `incidents` table in place). Both default the
+   embedding column to `vector(1024)`, matching `bge-m3`'s output dimension
+   — if you use a different embedding model, check its dimension and edit
+   the column definition before running either one.
+3. Point `embedding_endpoint`/`embedding_model` at wherever that model is
+   served (the same LM Studio/Ollama/vLLM instance `summarizer` uses is
+   fine, as long as it also has an embedding model loaded).
+4. If using Gitea capture, create a dedicated repo for issues first (don't
+   reuse the code repo) and generate a token scoped to `write:issue` (plus
+   `write:repository`/`write:user` if you're creating the repo via the API
+   too, as opposed to the web UI).
 
 ### Getting a Telegram bot token and chat ID
 

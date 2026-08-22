@@ -3,9 +3,12 @@
 // local LLM to summarize what's going on, and pushes that summary to
 // Telegram. See pkg/aiops and config.yaml.
 //
-// Two entry points share this binary: `victoria-gateway [flags]` (default)
-// runs the server; `victoria-gateway note [flags]` records a confirmed
-// incident resolution into the RAG store — see note.go.
+// Three entry points share this binary: `victoria-gateway [flags]`
+// (default) runs the server; `victoria-gateway note [flags]` records a
+// confirmed incident resolution into the RAG store directly, or confirms
+// an existing pending one by id — see note.go; `victoria-gateway sync`
+// pulls resolutions back from closed Gitea issues linked to pending
+// records — see sync.go.
 package main
 
 import (
@@ -18,18 +21,26 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
 	"github.com/gordonwei/victoria-gateway/pkg/config"
+	"github.com/gordonwei/victoria-gateway/pkg/gitea"
 	"github.com/gordonwei/victoria-gateway/pkg/model"
 	"github.com/gordonwei/victoria-gateway/pkg/rag"
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "note" {
-		runNote(os.Args[2:])
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "note":
+			runNote(os.Args[2:])
+			return
+		case "sync":
+			runSync(os.Args[2:])
+			return
+		}
 	}
 	runServe(os.Args[1:])
 }
@@ -142,6 +153,14 @@ func runServe(args []string) {
 		if h.ragTopK <= 0 {
 			h.ragTopK = 3
 		}
+		if cfg.RAG.Gitea != nil {
+			h.gitea = gitea.NewClient(gitea.ClientConfig{
+				Endpoint: cfg.RAG.Gitea.Endpoint,
+				Token:    cfg.RAG.Gitea.Token,
+				Owner:    cfg.RAG.Gitea.Owner,
+				Repo:     cfg.RAG.Gitea.Repo,
+			})
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -172,6 +191,7 @@ type handler struct {
 	rag         rag.Store     // nil if RAG is disabled
 	ragEmbedder *rag.Embedder // nil if RAG is disabled
 	ragTopK     int
+	gitea       *gitea.Client // nil if Gitea capture isn't configured
 }
 
 // alertResult is one entry in the JSON array returned by
@@ -275,7 +295,75 @@ func (h *handler) summarizeOne(alert aiops.Alert) alertResult {
 	}
 
 	res.Summary = result.Summary
+	h.captureIncident(alert, logs, result, res.AnalyzedBy)
 	return res
+}
+
+// captureIncident records what was just analyzed as a Pending RAG record
+// — not retrievable by Search until someone confirms it (via `note
+// --id` directly, or `sync` reading a linked Gitea issue's closing
+// comment). This runs on every successfully analyzed alert when RAG is
+// enabled, whether or not Gitea is configured: capture always happens,
+// filing an issue is just one (optional) way to eventually get a
+// resolution back. Best-effort like retrieveRAGContext — failures are
+// logged, never fail the alert itself.
+func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, result aiops.SummarizeResult, analyzedBy string) {
+	if h.rag == nil || h.ragEmbedder == nil {
+		return
+	}
+
+	host, _ := alert.Host()
+	logLines := make([]string, len(logs))
+	for i, l := range logs {
+		logLines[i] = l.Line
+	}
+	// Embedded on the final analysis result rather than the raw
+	// pre-analysis alert text retrieveRAGContext uses for its query — the
+	// summary is a richer description of what this incident actually was,
+	// which is what a future similar incident should match against.
+	embedding, err := h.ragEmbedder.Embed(rag.BuildQueryText(alert.Labels["alertname"], host, result.Summary, logLines))
+	if err != nil {
+		log.Printf("aiops: rag capture embed failed, incident not recorded: %v", err)
+		return
+	}
+
+	var issueNumber int64
+	if h.gitea != nil {
+		title := fmt.Sprintf("[%s] %s", alert.Labels["alertname"], host)
+		body := fmt.Sprintf(
+			"**分析結果（%s）：**\n\n%s\n\n---\n此 Issue 由 Victoria Gateway 自動建立。調查完後請在關閉前留一則留言說明實際原因/怎麼修的，`victoria-gateway sync` 會把它讀回 RAG 資料庫，供未來類似告警參考。",
+			analyzedBy, result.Summary)
+		n, err := h.gitea.CreateIssue(context.Background(), title, body)
+		if err != nil {
+			log.Printf("aiops: create gitea issue failed, capturing without a linked issue: %v", err)
+		} else {
+			issueNumber = n
+		}
+	}
+
+	logExcerpt := strings.Join(logLines, "\n")
+	const maxLogExcerpt = 4000 // keep the stored row a reasonable size; the full log is in Loki anyway
+	if len(logExcerpt) > maxLogExcerpt {
+		logExcerpt = logExcerpt[len(logExcerpt)-maxLogExcerpt:]
+	}
+
+	rec := rag.Record{
+		AlertName:        alert.Labels["alertname"],
+		Host:             host,
+		LogExcerpt:       logExcerpt,
+		Summary:          result.Summary,
+		GiteaIssueNumber: issueNumber,
+	}
+	id, err := h.rag.InsertPending(context.Background(), rec, embedding)
+	if err != nil {
+		log.Printf("aiops: rag insert pending failed: %v", err)
+		return
+	}
+	if issueNumber != 0 {
+		log.Printf("aiops: captured pending incident id=%d, filed gitea issue #%d", id, issueNumber)
+	} else {
+		log.Printf("aiops: captured pending incident id=%d (no gitea issue)", id)
+	}
 }
 
 // retrieveRAGContext looks up past incidents similar to this alert, if

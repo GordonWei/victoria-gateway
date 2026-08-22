@@ -33,14 +33,17 @@ func newMockStore(t *testing.T) (*PGStore, sqlmock.Sqlmock) {
 	return &PGStore{db: db}, mock
 }
 
+var recordRowCols = []string{"id", "alert_name", "host", "log_excerpt", "summary", "resolution", "status", "gitea_issue_number", "created_at", "confirmed_at"}
+
 func TestPGStore_Search(t *testing.T) {
 	store, mock := newMockStore(t)
 
 	createdAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
-	rows := sqlmock.NewRows([]string{"id", "alert_name", "host", "log_excerpt", "summary", "resolution", "created_at"}).
-		AddRow(int64(1), "InstanceDown", "192.0.2.7", "log excerpt", "old summary", "舊測試機殘留 target，已下線", createdAt)
+	confirmedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows(recordRowCols).
+		AddRow(int64(1), "InstanceDown", "192.0.2.7", "log excerpt", "old summary", "舊測試機殘留 target，已下線", "confirmed", int64(0), createdAt, confirmedAt)
 
-	mock.ExpectQuery("SELECT id, alert_name, host, log_excerpt, summary, resolution, created_at").
+	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'confirmed'").
 		WithArgs("[0.1,0.2]", 3).
 		WillReturnRows(rows)
 
@@ -54,6 +57,9 @@ func TestPGStore_Search(t *testing.T) {
 	if records[0].AlertName != "InstanceDown" || records[0].Resolution != "舊測試機殘留 target，已下線" {
 		t.Errorf("unexpected record: %+v", records[0])
 	}
+	if records[0].Status != "confirmed" {
+		t.Errorf("status = %q, want confirmed", records[0].Status)
+	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
@@ -63,8 +69,8 @@ func TestPGStore_Search(t *testing.T) {
 func TestPGStore_Search_DefaultsTopK(t *testing.T) {
 	store, mock := newMockStore(t)
 
-	rows := sqlmock.NewRows([]string{"id", "alert_name", "host", "log_excerpt", "summary", "resolution", "created_at"})
-	mock.ExpectQuery("SELECT id, alert_name, host, log_excerpt, summary, resolution, created_at").
+	rows := sqlmock.NewRows(recordRowCols)
+	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'confirmed'").
 		WithArgs("[1]", 3).
 		WillReturnRows(rows)
 
@@ -117,5 +123,101 @@ func TestPGStore_Insert_RequiresResolution(t *testing.T) {
 	err := store.Insert(context.Background(), rec, []float32{0.1})
 	if err == nil {
 		t.Error("expected error when Resolution is empty")
+	}
+}
+
+func TestPGStore_InsertPending(t *testing.T) {
+	store, mock := newMockStore(t)
+
+	mock.ExpectQuery("INSERT INTO incidents").
+		WithArgs("InstanceDown", "192.0.2.7", "log", "summary", int64(42), "[0.1,0.2]", sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(9)))
+
+	rec := Record{
+		AlertName:        "InstanceDown",
+		Host:             "192.0.2.7",
+		LogExcerpt:       "log",
+		Summary:          "summary",
+		GiteaIssueNumber: 42,
+	}
+	id, err := store.InsertPending(context.Background(), rec, []float32{0.1, 0.2})
+	if err != nil {
+		t.Fatalf("InsertPending: %v", err)
+	}
+	if id != 9 {
+		t.Errorf("id = %d, want 9", id)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+func TestPGStore_InsertPending_NoGiteaIssue(t *testing.T) {
+	store, mock := newMockStore(t)
+
+	mock.ExpectQuery("INSERT INTO incidents").
+		WithArgs("InstanceDown", "192.0.2.7", "log", "summary", nil, "[0.1]", sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(3)))
+
+	rec := Record{AlertName: "InstanceDown", Host: "192.0.2.7", LogExcerpt: "log", Summary: "summary"}
+	if _, err := store.InsertPending(context.Background(), rec, []float32{0.1}); err != nil {
+		t.Fatalf("InsertPending: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+func TestPGStore_PendingWithGiteaIssue(t *testing.T) {
+	store, mock := newMockStore(t)
+
+	createdAt := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows(recordRowCols).
+		AddRow(int64(5), "InstanceDown", "192.0.2.7", "log", "summary", "", "pending", int64(42), createdAt, time.Time{})
+	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'pending'").
+		WillReturnRows(rows)
+
+	records, err := store.PendingWithGiteaIssue(context.Background())
+	if err != nil {
+		t.Fatalf("PendingWithGiteaIssue: %v", err)
+	}
+	if len(records) != 1 || records[0].GiteaIssueNumber != 42 {
+		t.Errorf("unexpected records: %+v", records)
+	}
+	if !records[0].ConfirmedAt.IsZero() {
+		t.Errorf("expected zero ConfirmedAt for a pending record, got %v", records[0].ConfirmedAt)
+	}
+}
+
+func TestPGStore_Confirm(t *testing.T) {
+	store, mock := newMockStore(t)
+
+	mock.ExpectExec("UPDATE incidents SET resolution").
+		WithArgs(int64(5), "舊測試機殘留 target，已下線").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := store.Confirm(context.Background(), 5, "舊測試機殘留 target，已下線"); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+func TestPGStore_Confirm_RequiresResolution(t *testing.T) {
+	store, _ := newMockStore(t)
+	if err := store.Confirm(context.Background(), 5, "  "); err == nil {
+		t.Error("expected error when resolution is blank")
+	}
+}
+
+func TestPGStore_Confirm_NoSuchRecord(t *testing.T) {
+	store, mock := newMockStore(t)
+	mock.ExpectExec("UPDATE incidents SET resolution").
+		WithArgs(int64(999), "x").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := store.Confirm(context.Background(), 999, "x"); err == nil {
+		t.Error("expected error when no row matches the id")
 	}
 }
