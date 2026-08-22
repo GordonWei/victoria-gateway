@@ -72,6 +72,13 @@ type CloudConfig struct {
 // local model notices.
 type EscalationConfig struct {
 	AlwaysCloud []string `yaml:"always_cloud"` // alertname values, matched case-insensitively
+	// MaxPerHour caps how many alerts can escalate to Cloud within a
+	// rolling hour, 0 (default) meaning unlimited. Exists because nothing
+	// else bounds cloud spend if the local model's self-reported
+	// escalate signal misfires broadly, or always_cloud ends up matching
+	// more alerts than intended — an alert that would have escalated but
+	// hits the cap stays on the local result instead of failing.
+	MaxPerHour int `yaml:"max_per_hour"`
 }
 
 // RAGConfig controls optional retrieval of past incidents to ground the

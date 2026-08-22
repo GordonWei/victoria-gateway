@@ -121,6 +121,7 @@ cloud:
 escalation:
   always_cloud:
     - "SomeAlwaysComplexAlert"   # alertname values, case-insensitive
+  max_per_hour: 20   # optional, defaults to 0 (unlimited)
 ```
 
 Two independent signals decide whether an alert escalates, OR'd together:
@@ -144,6 +145,13 @@ failing the alert outright — check the process logs for
 
 Leaving `cloud` unset (the default) disables all of this — `escalation` with
 no `cloud` configured is a startup error rather than a silent no-op.
+
+`escalation.max_per_hour` is an optional spend guardrail: at most this many
+alerts escalate to `cloud` within a rolling hour, 0 (default) meaning
+unlimited. Nothing else bounds cost if the local model's `escalate` signal
+misfires broadly or `always_cloud` matches more alerts than intended — an
+alert that hits the cap stays on the local result (logged, not failed)
+instead of also calling `cloud`.
 
 ## RAG: grounding the summary in past incidents
 
@@ -308,6 +316,14 @@ from the config file if you need to override it without editing the file.
 
 `GET /healthz` returns `200 ok` once the process is up — use it for a
 container healthcheck or a quick "is this running" check.
+
+`GET /metrics` exposes a handful of counters in Prometheus text exposition
+format — alerts processed/errored, dedup/resolved skips, webhook auth
+rejections, escalation attempts/failures/rate-limits, RAG capture/search
+failures, tracker issue-creation failures, Telegram push failures. No
+external dependency for this (`pkg/metrics` is hand-rolled, not
+`prometheus/client_golang`) — point a Prometheus scrape config at this
+port's `/metrics` path if you want them collected.
 
 Or via Docker — see `Dockerfile` and `deploy/`:
 

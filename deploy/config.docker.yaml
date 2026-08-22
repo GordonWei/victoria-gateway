@@ -40,6 +40,12 @@ summarizer:
 # escalation:
 #   always_cloud:
 #     - "SomeAlwaysComplexAlert"
+#   # Optional spend guardrail: caps escalations to `cloud` at this many
+#   # per rolling hour. 0 (default) is unlimited. Nothing else bounds
+#   # cloud API cost if the local model's escalate signal misfires
+#   # broadly or always_cloud matches more than intended — an alert that
+#   # hits the cap stays on the local result instead of failing.
+#   max_per_hour: 20
 
 # Optional. Retrieves past incidents similar to a new alert and adds them
 # to the prompt as reference context. Requires a Postgres database with the

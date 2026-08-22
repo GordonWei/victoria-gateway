@@ -848,3 +848,158 @@ func TestBuildTracker_GitHubOnly(t *testing.T) {
 		t.Fatal("expected a non-nil tracker when rag.github is set")
 	}
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Concurrent alert processing
+// ══════════════════════════════════════════════════════════════════════════════
+
+// multiAlertPayload builds one Alertmanager delivery carrying several
+// distinct alerts (distinct fingerprints and hosts, so none are deduped
+// against each other), to exercise the fan-out in
+// handleAlertmanagerWebhook.
+func multiAlertPayload(n int) []byte {
+	alerts := make([]map[string]any, n)
+	for i := 0; i < n; i++ {
+		alerts[i] = map[string]any{
+			"status":      "firing",
+			"labels":      map[string]string{"alertname": "cpu_high", "host": fmt.Sprintf("host-%d", i)},
+			"startsAt":    time.Now().Add(-2 * time.Minute).Format(time.RFC3339),
+			"fingerprint": fmt.Sprintf("fp-%d", i),
+		}
+	}
+	b, _ := json.Marshal(map[string]any{"version": "4", "status": "firing", "alerts": alerts})
+	return b
+}
+
+// TestHandleAlertmanagerWebhook_MultipleAlerts_ProcessedConcurrently
+// confirms a single payload with several alerts doesn't serialize on the
+// LLM: with N concurrent slow calls capped at a shared latency, total
+// wall time should look like one call's worth of latency, not N of them.
+func TestHandleAlertmanagerWebhook_MultipleAlerts_ProcessedConcurrently(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+
+	const perCallDelay = 150 * time.Millisecond
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(perCallDelay)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"content": `{"summary":"ok","confidence":"high","escalate":false,"reason":"x"}`}}},
+		})
+	}))
+	defer llmSrv.Close()
+
+	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
+	const n = 5
+
+	start := time.Now()
+	req := httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", bytes.NewReader(multiAlertPayload(n)))
+	rec := httptest.NewRecorder()
+	h.handleAlertmanagerWebhook(rec, req)
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	// Serial processing would take roughly n*perCallDelay (750ms here);
+	// concurrent processing should stay close to one call's delay. Give
+	// generous headroom above a single call to absorb scheduling noise
+	// without the check being meaningless.
+	if elapsed >= n*perCallDelay {
+		t.Errorf("elapsed = %v, want well under %v (n=%d alerts serialized instead of running concurrently)", elapsed, n*perCallDelay, n)
+	}
+
+	var body struct {
+		Results []alertResult `json:"results"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Results) != n {
+		t.Fatalf("got %d results, want %d", len(body.Results), n)
+	}
+	for i, res := range body.Results {
+		wantHost := fmt.Sprintf("host-%d", i)
+		if res.Host != wantHost {
+			t.Errorf("results[%d].Host = %q, want %q (result order should match request order)", i, res.Host, wantHost)
+		}
+	}
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Escalation rate limiting
+// ══════════════════════════════════════════════════════════════════════════════
+
+func TestAllowEscalation_UnlimitedByDefault(t *testing.T) {
+	h := &handler{}
+	for i := 0; i < 100; i++ {
+		if !h.allowEscalation() {
+			t.Fatalf("call %d: allowEscalation() = false, want true (max_per_hour 0 means unlimited)", i)
+		}
+	}
+}
+
+func TestAllowEscalation_CapsWithinWindow(t *testing.T) {
+	h := &handler{escalation: config.EscalationConfig{MaxPerHour: 2}}
+	if !h.allowEscalation() {
+		t.Fatal("1st call: want true")
+	}
+	if !h.allowEscalation() {
+		t.Fatal("2nd call: want true")
+	}
+	if h.allowEscalation() {
+		t.Fatal("3rd call within the same hour: want false, the cap should hold")
+	}
+}
+
+func TestAllowEscalation_ResetsAfterWindowExpires(t *testing.T) {
+	h := &handler{escalation: config.EscalationConfig{MaxPerHour: 1}}
+	if !h.allowEscalation() {
+		t.Fatal("1st call: want true")
+	}
+	if h.allowEscalation() {
+		t.Fatal("2nd call still within the window: want false")
+	}
+	// Simulate the window having expired instead of sleeping an hour.
+	h.escalationWindowStart = time.Now().Add(-2 * time.Hour)
+	if !h.allowEscalation() {
+		t.Fatal("call after the window expired: want true, the cap should have reset")
+	}
+}
+
+func TestSummarizeOne_EscalationRateLimited_StaysLocal(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+	llmSrv := newFakeLLM(t, `{"summary":"local ok","confidence":"low","escalate":true,"reason":"need cloud"}`)
+	defer llmSrv.Close()
+
+	cloudCalled := false
+	cloudSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cloudCalled = true
+		w.WriteHeader(500)
+	}))
+	defer cloudSrv.Close()
+
+	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
+	h.cloud = model.NewOpenAIClient(model.OpenAIClientConfig{Endpoint: cloudSrv.URL, Model: "cloud-model", Backend: "test-cloud"})
+	h.escalation = config.EscalationConfig{MaxPerHour: 1}
+	h.escalationWindowStart = time.Now()
+	h.escalationCount = 1 // already at the cap before this alert
+
+	alert := aiops.Alert{
+		Status:   "firing",
+		Labels:   map[string]string{"alertname": "cpu_high", "host": "test-host"},
+		StartsAt: time.Now().Add(-2 * time.Minute).Format(time.RFC3339),
+	}
+	res := h.summarizeOne(alert)
+
+	if cloudCalled {
+		t.Error("cloud should not be called once escalation.max_per_hour is reached")
+	}
+	if res.AnalyzedBy != "local" {
+		t.Errorf("AnalyzedBy = %q, want \"local\" (rate-limited escalation should fall back to the local result)", res.AnalyzedBy)
+	}
+	if res.Summary != "local ok" {
+		t.Errorf("Summary = %q, want the local model's summary", res.Summary)
+	}
+}

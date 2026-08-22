@@ -28,6 +28,7 @@ import (
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
 	"github.com/gordonwei/victoria-gateway/pkg/config"
+	"github.com/gordonwei/victoria-gateway/pkg/metrics"
 	"github.com/gordonwei/victoria-gateway/pkg/model"
 	"github.com/gordonwei/victoria-gateway/pkg/rag"
 	"github.com/gordonwei/victoria-gateway/pkg/tracker"
@@ -75,6 +76,18 @@ func runServe(args []string) {
 	// loudly at startup rather than have alerts quietly never escalate.
 	if len(cfg.Escalation.AlwaysCloud) > 0 && cfg.Cloud == nil {
 		fmt.Fprintln(os.Stderr, "❌ escalation.always_cloud is set but cloud is not configured in config.yaml")
+		os.Exit(1)
+	}
+	if cfg.Escalation.MaxPerHour < 0 {
+		fmt.Fprintln(os.Stderr, "❌ escalation.max_per_hour must be >= 0 (0 means unlimited)")
+		os.Exit(1)
+	}
+	// An empty username/password would still technically "match" via
+	// checkWebhookAuth's constant-time comparison if a caller explicitly
+	// sent empty Basic Auth credentials — that's not the "require a real
+	// secret" behavior an operator setting webhook_auth actually wants.
+	if cfg.WebhookAuth != nil && (cfg.WebhookAuth.Username == "" || cfg.WebhookAuth.Password == "") {
+		fmt.Fprintln(os.Stderr, "❌ webhook_auth is set but username/password is empty — set both, or remove the webhook_auth block to leave the endpoint unauthenticated")
 		os.Exit(1)
 	}
 	if cfg.RAG != nil && cfg.RAG.Enabled {
@@ -140,6 +153,7 @@ func runServe(args []string) {
 		lookback:    lookback,
 		limit:       limit,
 		webhookAuth: cfg.WebhookAuth,
+		metrics:     &metrics.Counters{},
 	}
 
 	ragEnabled := cfg.RAG != nil && cfg.RAG.Enabled
@@ -170,6 +184,7 @@ func runServe(args []string) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.Handle("/metrics", h.metrics.Handler())
 
 	fmt.Printf("🚀 victoria-gateway listening on %s (POST /webhook/alertmanager)\n", addr)
 	fmt.Printf("   loki: %s | summarizer: %s (%s) | telegram: %v | cloud: %v | rag: %v\n",
@@ -195,8 +210,39 @@ type handler struct {
 	ragTopK     int
 	tracker     tracker.Tracker // nil if no issue tracker (Gitea/GitHub) is configured
 
+	metrics *metrics.Counters // nil-safe; see pkg/metrics
+
 	dedupMu  sync.Mutex
 	recentFP map[string]time.Time // fingerprint -> last-processed time, see claimFingerprint
+
+	escalationMu          sync.Mutex
+	escalationWindowStart time.Time
+	escalationCount       int
+}
+
+// allowEscalation reports whether an escalation to Cloud is still within
+// escalation.max_per_hour, claiming a slot if so. escalation.MaxPerHour
+// <= 0 means unlimited. The window is fixed (not sliding): it resets to a
+// fresh hour the first time an escalation is attempted after the previous
+// window expired, rather than tracking each escalation's own expiry —
+// simpler, and "at most N per rolling-ish hour" is all this needs to be a
+// useful spend guardrail, not a precise rate limiter.
+func (h *handler) allowEscalation() bool {
+	if h.escalation.MaxPerHour <= 0 {
+		return true
+	}
+	h.escalationMu.Lock()
+	defer h.escalationMu.Unlock()
+	now := time.Now()
+	if now.Sub(h.escalationWindowStart) >= time.Hour {
+		h.escalationWindowStart = now
+		h.escalationCount = 0
+	}
+	if h.escalationCount >= h.escalation.MaxPerHour {
+		return false
+	}
+	h.escalationCount++
+	return true
 }
 
 // checkWebhookAuth reports whether the request is authorized to hit the
@@ -284,6 +330,7 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if !h.checkWebhookAuth(r) {
+		h.metrics.IncWebhookAuthRejectedTotal()
 		w.Header().Set("WWW-Authenticate", `Basic realm="victoria-gateway"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -302,7 +349,17 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	results := make([]alertResult, 0, len(payload.Alerts))
+	// Filter first (cheap, and must stay a plain sequential loop —
+	// claimFingerprint/clearFingerprint mutate shared dedup state and
+	// deciding what to skip has to happen before any concurrent work
+	// starts, not interleaved with it), then fan the surviving alerts out
+	// concurrently. A single payload can carry several alerts, and each
+	// one blocks on Loki + a local LLM call + possibly a cloud escalation
+	// + RAG/tracker calls — running them one at a time meant a payload of
+	// N alerts took roughly N times as long to answer Alertmanager, which
+	// is exactly the kind of latency that made Alertmanager's own webhook
+	// timeout matter in the first place.
+	var toProcess []aiops.Alert
 	for _, alert := range payload.Alerts {
 		// A "resolved" delivery means the problem stopped, not that
 		// there's something new to diagnose — analyzing it would just
@@ -314,6 +371,7 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 		// a duplicate of the old episode.
 		if alert.Status == "resolved" {
 			h.clearFingerprint(alert.Fingerprint)
+			h.metrics.IncResolvedSkippedTotal()
 			continue
 		}
 
@@ -327,13 +385,27 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 		// again as a genuinely new episode later still gets analyzed.
 		if !h.claimFingerprint(alert.Fingerprint) {
 			log.Printf("aiops: alert %q (fingerprint=%s) already processed recently, skipping duplicate delivery", alert.Labels["alertname"], alert.Fingerprint)
+			h.metrics.IncDedupSkippedTotal()
 			continue
 		}
 
-		res := h.summarizeOne(alert)
-		results = append(results, res)
-		h.notifyTelegram(res)
+		toProcess = append(toProcess, alert)
 	}
+
+	// Each goroutine only ever writes its own index, so results needs no
+	// mutex — index isolation, not locking, is what makes this safe.
+	results := make([]alertResult, len(toProcess))
+	var wg sync.WaitGroup
+	for i, alert := range toProcess {
+		wg.Add(1)
+		go func(i int, alert aiops.Alert) {
+			defer wg.Done()
+			res := h.summarizeOne(alert)
+			results[i] = res
+			h.notifyTelegram(res)
+		}(i, alert)
+	}
+	wg.Wait()
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(struct {
@@ -347,26 +419,33 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 // (bad host label, Loki unreachable, LLM error) are captured in the result
 // rather than aborting the whole webhook request — a payload can carry
 // multiple alerts, and one bad one shouldn't blank out the rest.
-func (h *handler) summarizeOne(alert aiops.Alert) alertResult {
-	res := alertResult{AlertName: alert.Labels["alertname"]}
+func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
+	h.metrics.IncAlertsTotal()
+	defer func() {
+		if res.Error != "" {
+			h.metrics.IncAlertsErrorTotal()
+		}
+	}()
+
+	res.AlertName = alert.Labels["alertname"]
 
 	host, ok := alert.Host()
 	if !ok {
 		res.Error = fmt.Sprintf("alert has no \"host\" or \"instance\" label (fingerprint=%s)", alert.Fingerprint)
-		return res
+		return
 	}
 	res.Host = host
 
 	start, err := alert.StartTime()
 	if err != nil {
 		res.Error = fmt.Sprintf("parse startsAt: %v", err)
-		return res
+		return
 	}
 
 	logs, err := h.loki.QueryRange(host, start.Add(-h.lookback), time.Now(), h.limit)
 	if err != nil {
 		res.Error = fmt.Sprintf("loki query: %v", err)
-		return res
+		return
 	}
 
 	ragContext := h.retrieveRAGContext(alert, logs)
@@ -374,7 +453,7 @@ func (h *handler) summarizeOne(alert aiops.Alert) alertResult {
 	local, err := h.summarizer.Summarize(alert, logs, ragContext)
 	if err != nil {
 		res.Error = fmt.Sprintf("summarize: %v", err)
-		return res
+		return
 	}
 	if local.ParseFailed {
 		log.Printf("aiops: local model reply for alert %q was not valid structured JSON; showing raw reply", res.AlertName)
@@ -383,7 +462,13 @@ func (h *handler) summarizeOne(alert aiops.Alert) alertResult {
 	result := local
 	res.AnalyzedBy = "local"
 
-	if escalate, reason := aiops.ShouldEscalate(res.AlertName, local, h.escalation.AlwaysCloud); escalate && h.cloud != nil {
+	escalate, reason := aiops.ShouldEscalate(res.AlertName, local, h.escalation.AlwaysCloud)
+	if escalate && h.cloud != nil && !h.allowEscalation() {
+		log.Printf("aiops: alert %q would escalate (%s) but escalation.max_per_hour is already reached this hour; staying on the local result", res.AlertName, reason)
+		h.metrics.IncEscalationRateLimitedTotal()
+		escalate = false
+	}
+	if escalate && h.cloud != nil {
 		cloudResult, cloudErr := aiops.SummarizeWithLLM(h.cloud, alert, logs, ragContext)
 		if cloudErr != nil {
 			// Escalation failing isn't fatal to the alert — the local
@@ -391,16 +476,18 @@ func (h *handler) summarizeOne(alert aiops.Alert) alertResult {
 			// operator seeing it plus this log line knows to double-check
 			// it themselves rather than getting nothing.
 			log.Printf("aiops: cloud escalation failed for alert %q (%s): %v", res.AlertName, reason, cloudErr)
+			h.metrics.IncEscalationFailuresTotal()
 		} else {
 			log.Printf("aiops: alert %q escalated to cloud (%s)", res.AlertName, reason)
 			result = cloudResult
 			res.AnalyzedBy = "cloud"
+			h.metrics.IncEscalationsTotal()
 		}
 	}
 
 	res.Summary = result.Summary
 	h.captureIncident(alert, logs, result, res.AnalyzedBy)
-	return res
+	return
 }
 
 // captureIncident records what was just analyzed as a Pending RAG record
@@ -428,6 +515,7 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 	embedding, err := h.ragEmbedder.Embed(rag.BuildQueryText(alert.Labels["alertname"], host, result.Summary, logLines))
 	if err != nil {
 		log.Printf("aiops: rag capture embed failed, incident not recorded: %v", err)
+		h.metrics.IncRAGCaptureFailuresTotal()
 		return
 	}
 
@@ -440,6 +528,7 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 		n, err := h.tracker.CreateIssue(context.Background(), title, body)
 		if err != nil {
 			log.Printf("aiops: create issue failed, capturing without a linked issue: %v", err)
+			h.metrics.IncTrackerCreateIssueFailuresTotal()
 		} else {
 			issueNumber = n
 		}
@@ -461,8 +550,10 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 	id, err := h.rag.InsertPending(context.Background(), rec, embedding)
 	if err != nil {
 		log.Printf("aiops: rag insert pending failed: %v", err)
+		h.metrics.IncRAGCaptureFailuresTotal()
 		return
 	}
+	h.metrics.IncRAGCaptureTotal()
 	if issueNumber != 0 {
 		log.Printf("aiops: captured pending incident id=%d, filed gitea issue #%d", id, issueNumber)
 	} else {
@@ -494,12 +585,14 @@ func (h *handler) retrieveRAGContext(alert aiops.Alert, logs []aiops.LogEntry) s
 	embedding, err := h.ragEmbedder.Embed(queryText)
 	if err != nil {
 		log.Printf("aiops: rag embed failed, continuing without past-incident context: %v", err)
+		h.metrics.IncRAGSearchFailuresTotal()
 		return ""
 	}
 
 	records, err := h.rag.Search(context.Background(), embedding, h.ragTopK)
 	if err != nil {
 		log.Printf("aiops: rag search failed, continuing without past-incident context: %v", err)
+		h.metrics.IncRAGSearchFailuresTotal()
 		return ""
 	}
 	return rag.FormatContext(records)
@@ -536,5 +629,6 @@ func (h *handler) notifyTelegram(res alertResult) {
 
 	if err := h.telegram.SendMessage(text); err != nil {
 		log.Printf("aiops: telegram push failed for alert %q: %v", res.AlertName, err)
+		h.metrics.IncTelegramPushFailuresTotal()
 	}
 }
