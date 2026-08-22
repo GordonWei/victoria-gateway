@@ -273,6 +273,14 @@ func (h *handler) checkWebhookAuth(r *http.Request) bool {
 // re-analyzed; that's an acceptable tradeoff for not needing an "is this
 // alert still active" signal from Alertmanager, which the webhook
 // payload alone doesn't reliably give.
+//
+// recentFP lives only in process memory (see the handler struct below) —
+// a restart clears it. In the narrow window right after a restart, a
+// retry that lands inside what would have been the old dedup window can
+// reprocess and re-file an issue. Not persisted on purpose: the fix would
+// mean every deployment needs a durable store just for this, when RAG
+// (the one store this service already has) is itself optional. A rare,
+// harmless-worst-case duplicate on restart is the accepted tradeoff.
 const dedupWindow = 10 * time.Minute
 
 // claimFingerprint reports whether this is the first time this alert
