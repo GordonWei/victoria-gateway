@@ -34,10 +34,10 @@ jobs:
         run: go test -race -count=1 ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          # "latest" resolved to a v1 build compiled with an older Go
-          # toolchain than this module's go.mod requires, which fails
-          # outright rather than lint anything -- pin the real latest
-          # (v2 line, built with a matching/newer Go) explicitly instead.
+          # golangci-lint-action@v6 only supports golangci-lint v1, whose
+          # "latest" release was built with an older Go toolchain than
+          # this module's go.mod requires and refuses to run at all.
+          # v7 of the action is needed for the v2 line of golangci-lint.
           version: v2.13.1
