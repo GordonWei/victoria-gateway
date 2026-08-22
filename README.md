@@ -1,5 +1,7 @@
 # Victoria Gateway
 
+[![CI](https://github.com/GordonWei/victoria-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/GordonWei/victoria-gateway/actions/workflows/ci.yml)
+
 An Alertmanager webhook receiver: on each incoming alert, it pulls the
 surrounding Loki logs for the alerting host, asks a local OpenAI-compatible
 LLM (LM Studio, Ollama, vLLM, etc.) to summarize what's going on, and pushes
@@ -348,17 +350,16 @@ Alertmanager route as an additive second webhook target.
 
 ## Status
 
-This repo is a fresh extraction of a service that's been running in
-production against a home Alertmanager/Loki/LM Studio stack — the code here
-is the same logic, trimmed down to just what the service needs (no CLI,
-REPL, or unrelated routing/session code from the project it started as a
-subcommand of).
+Running in production against a home Alertmanager/Loki/LM Studio stack,
+with CI (gofmt/build/vet/`go test -race`) on every push and PR. Every
+feature above — Triage, RAG capture/retrieval, the Gitea/GitHub tracker
+integrations, webhook auth, fingerprint dedup, concurrent multi-alert
+processing — has been exercised against real alerts on that deployment, not
+just unit tests.
 
-The live deployment has been cut over to build from this repo (2026-08-22):
-the deployment host clones this repo directly and builds the image from it,
-rather than a source transfer from the old location. The config schema is
-flat (see Config above) — the old deployment's nested `aiops:`/`memory:`
-schema from before the extraction is no longer supported.
+Started as a subcommand of a larger CLI project; this repo is that logic
+extracted and trimmed down to just what the service needs (no CLI, REPL, or
+unrelated routing/session code came along).
 
 ## Testing
 
