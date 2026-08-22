@@ -13,23 +13,44 @@ silently discarded.
 ## How it works
 
 ```
-Alertmanager --webhook--> victoria-gateway --query--> Loki
+Alertmanager --webhook--> victoria-gateway
+                               |
+                       [Basic Auth check]        optional (webhook_auth)
+                               |
+                       [dedup by fingerprint]     always on, 10 min window
                                |
                                v
-                       LLM (summarize)
+                        query Loki for logs
                                |
-                               v
-                          Telegram push
+                       [search past incidents]    optional (rag)
+                               |            \
+                               |             > added to the prompt as context
+                               v            /
+                      local LLM summarizes
+                               |
+                       [escalate to cloud LLM]    optional (cloud + escalation)
+                               |
+                 +-------------+-------------+
+                 v                           v
+          Telegram push              [capture incident +
+                                       file tracker issue]
+                                       optional (rag)
 ```
 
 `POST /webhook/alertmanager` accepts Alertmanager's standard webhook payload
 (one or more alerts). Each alert must carry a `host` or `instance` label —
 that's what scopes the Loki query. Alerts without one are reported back as
-an error entry rather than failing the whole request.
+an error entry rather than failing the whole request. `resolved` deliveries
+are never analyzed — they just clear the dedup entry for that fingerprint so
+a genuinely new firing of the same alert isn't mistaken for a duplicate.
 
-Two things above are optional and off unless configured: escalating a hard
-alert from the local model to a cloud model (**Triage**, below), and
-grounding the prompt in similar past incidents (**RAG**, below).
+Everything in brackets above is optional and off unless configured:
+authenticating the webhook (see **Securing the webhook**, below), grounding
+the prompt in similar past incidents and capturing new ones (**RAG**,
+below), and escalating a hard alert from the local model to a cloud model
+(**Triage**, below). Fingerprint dedup is the one piece that's always on —
+it costs nothing to leave enabled and protects against Alertmanager retries
+double-processing the same alert.
 
 ## Requirements
 
