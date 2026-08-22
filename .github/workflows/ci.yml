@@ -36,4 +36,8 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # "latest" resolved to a v1 build compiled with an older Go
+          # toolchain than this module's go.mod requires, which fails
+          # outright rather than lint anything -- pin the real latest
+          # (v2 line, built with a matching/newer Go) explicitly instead.
+          version: v2.13.1
