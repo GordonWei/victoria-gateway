@@ -150,3 +150,167 @@ type openAIResponse struct {
 		} `json:"message"`
 	} `json:"choices"`
 }
+
+// --- Anthropic Client (cloud escalation target) ---
+
+// AnthropicClient speaks the Anthropic Messages API. It exists so the
+// triage path (see pkg/aiops) can escalate a hard-to-diagnose alert from
+// the local model to a stronger cloud model without the caller needing to
+// know which one it's talking to — both satisfy the same LLM interface.
+type AnthropicClient struct {
+	endpoint string
+	apiKey   string
+	model    string
+	client   *http.Client
+}
+
+type AnthropicClientConfig struct {
+	Endpoint string // defaults to "https://api.anthropic.com" if empty
+	APIKey   string
+	Model    string // e.g. "claude-haiku-4-5"
+	Timeout  time.Duration
+}
+
+const anthropicAPIVersion = "2023-06-01"
+
+func NewAnthropicClient(cfg AnthropicClientConfig) *AnthropicClient {
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = 60 * time.Second
+	}
+	endpoint := cfg.Endpoint
+	if endpoint == "" {
+		endpoint = "https://api.anthropic.com"
+	}
+	return &AnthropicClient{
+		endpoint: endpoint,
+		apiKey:   cfg.APIKey,
+		model:    cfg.Model,
+		client:   &http.Client{Timeout: timeout},
+	}
+}
+
+// Chat maps the shared Message/ChatOptions shape onto Anthropic's Messages
+// API. Anthropic takes the system prompt as a separate top-level field
+// rather than a message with role "system", so any such messages are
+// pulled out of the list rather than sent through as-is.
+func (c *AnthropicClient) Chat(messages []Message, opts *ChatOptions) (string, error) {
+	maxTokens := 1024
+	temperature := 0.1
+	if opts != nil {
+		if opts.MaxTokens > 0 {
+			maxTokens = opts.MaxTokens
+		}
+		if opts.Temperature > 0 {
+			temperature = opts.Temperature
+		}
+	}
+
+	var system string
+	chatMessages := make([]Message, 0, len(messages))
+	for _, m := range messages {
+		if m.Role == "system" {
+			// Anthropic only accepts one system prompt; later ones (there
+			// shouldn't be more than one in practice) get appended rather
+			// than silently dropped.
+			if system == "" {
+				system = m.Content
+			} else {
+				system += "\n\n" + m.Content
+			}
+			continue
+		}
+		chatMessages = append(chatMessages, m)
+	}
+
+	reqBody := anthropicRequest{
+		Model:       c.model,
+		System:      system,
+		Messages:    chatMessages,
+		MaxTokens:   maxTokens,
+		Temperature: temperature,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, c.endpoint+"/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("anthropic-version", anthropicAPIVersion)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request to anthropic failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("anthropic returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result anthropicResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+
+	for _, block := range result.Content {
+		if block.Type == "text" && block.Text != "" {
+			return block.Text, nil
+		}
+	}
+	return "", fmt.Errorf("anthropic returned no text content block")
+}
+
+// Available does a lightweight reachability check. Anthropic has no
+// unauthenticated health endpoint, so this sends a minimal (1-token)
+// real request — any response that isn't a network-level failure counts
+// as "available", including an auth error, since that still confirms the
+// endpoint itself is reachable and it's the caller's config that's wrong.
+func (c *AnthropicClient) Available() bool {
+	req, err := http.NewRequest(http.MethodPost, c.endpoint+"/v1/messages", bytes.NewReader([]byte(
+		`{"model":"`+c.model+`","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}`,
+	)))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("anthropic-version", anthropicAPIVersion)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return true
+}
+
+func (c *AnthropicClient) ModelName() string {
+	return c.model
+}
+
+func (c *AnthropicClient) Backend() string {
+	return "anthropic"
+}
+
+type anthropicRequest struct {
+	Model       string    `json:"model"`
+	System      string    `json:"system,omitempty"`
+	Messages    []Message `json:"messages"`
+	MaxTokens   int       `json:"max_tokens"`
+	Temperature float64   `json:"temperature"`
+}
+
+type anthropicResponse struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+}

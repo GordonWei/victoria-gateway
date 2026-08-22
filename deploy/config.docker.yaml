@@ -15,6 +15,34 @@ summarizer:
   endpoint: "http://REPLACE-llm-host:1234"
   model: "REPLACE-model-name"
 
+# Optional. Omit this whole section to run local-only, exactly as before —
+# nothing below changes behavior unless escalation.always_cloud is also set
+# or the local model's own reply asks to escalate (see README's Triage
+# section).
+# cloud:
+#   endpoint: ""   # optional; defaults to https://api.anthropic.com
+#   api_key: "REPLACE-anthropic-api-key"
+#   model: "claude-haiku-4-5"
+
+# Optional. Alert names listed here always get re-analyzed by `cloud`
+# regardless of what the local model's own confidence says — use this for
+# alerts you already know are complex/sensitive in your environment.
+# escalation:
+#   always_cloud:
+#     - "SomeAlwaysComplexAlert"
+
+# Optional. Retrieves past incidents similar to a new alert and adds them
+# to the prompt as reference context. Requires a Postgres database with the
+# pgvector extension installed (see pkg/rag/schema.sql) and an
+# OpenAI-compatible /v1/embeddings endpoint. Starts empty — see the `note`
+# CLI subcommand in README for how records get in.
+# rag:
+#   enabled: false
+#   postgres_dsn: "postgres://REPLACE-user:REPLACE-pass@REPLACE-host:5432/REPLACE-db"
+#   embedding_endpoint: "http://REPLACE-llm-host:1234"
+#   embedding_model: "bge-m3"
+#   top_k: 3
+
 telegram:
   # Push each alert's LLM summary to this chat. Leave bot_token empty to
   # disable — the summary is still computed either way, it just won't be

@@ -215,3 +215,120 @@ func TestOpenAIClient_EmptyChoices(t *testing.T) {
 		t.Error("Chat() should return error when choices is empty")
 	}
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AnthropicClient
+// ══════════════════════════════════════════════════════════════════════════════
+
+func TestAnthropicClient_Chat(t *testing.T) {
+	var receivedBody anthropicRequest
+	var receivedAPIKey, receivedVersion string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		receivedAPIKey = r.Header.Get("x-api-key")
+		receivedVersion = r.Header.Get("anthropic-version")
+		if err := json.NewDecoder(r.Body).Decode(&receivedBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(anthropicResponse{
+			Content: []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}{{Type: "text", Text: "cloud reply"}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewAnthropicClient(AnthropicClientConfig{
+		Endpoint: server.URL,
+		APIKey:   "test-key",
+		Model:    "claude-haiku-4-5",
+	})
+
+	reply, err := client.Chat([]Message{
+		{Role: "system", Content: "you are helpful"},
+		{Role: "user", Content: "hello"},
+	}, &ChatOptions{MaxTokens: 512, Temperature: 0.3})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if reply != "cloud reply" {
+		t.Errorf("reply = %q, want %q", reply, "cloud reply")
+	}
+
+	if receivedAPIKey != "test-key" {
+		t.Errorf("x-api-key header = %q, want %q", receivedAPIKey, "test-key")
+	}
+	if receivedVersion != anthropicAPIVersion {
+		t.Errorf("anthropic-version header = %q, want %q", receivedVersion, anthropicAPIVersion)
+	}
+	// The system-role message must be lifted into the top-level `system`
+	// field, not sent through in `messages` — Anthropic rejects role
+	// "system" inside the messages array.
+	if receivedBody.System != "you are helpful" {
+		t.Errorf("system field = %q, want %q", receivedBody.System, "you are helpful")
+	}
+	if len(receivedBody.Messages) != 1 || receivedBody.Messages[0].Role != "user" {
+		t.Errorf("messages = %+v, want exactly one user message", receivedBody.Messages)
+	}
+	if receivedBody.MaxTokens != 512 {
+		t.Errorf("max_tokens = %d, want 512", receivedBody.MaxTokens)
+	}
+
+	if client.ModelName() != "claude-haiku-4-5" {
+		t.Errorf("ModelName() = %q, want %q", client.ModelName(), "claude-haiku-4-5")
+	}
+	if client.Backend() != "anthropic" {
+		t.Errorf("Backend() = %q, want %q", client.Backend(), "anthropic")
+	}
+}
+
+func TestAnthropicClient_DefaultEndpoint(t *testing.T) {
+	client := NewAnthropicClient(AnthropicClientConfig{APIKey: "k", Model: "m"})
+	if client.endpoint != "https://api.anthropic.com" {
+		t.Errorf("default endpoint = %q, want the public Anthropic API", client.endpoint)
+	}
+}
+
+func TestAnthropicClient_ErrorStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		w.Write([]byte(`{"error":{"message":"invalid x-api-key"}}`))
+	}))
+	defer server.Close()
+
+	client := NewAnthropicClient(AnthropicClientConfig{Endpoint: server.URL, APIKey: "bad", Model: "m"})
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Error("expected error on 401 response")
+	}
+}
+
+func TestAnthropicClient_NoTextContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(anthropicResponse{})
+	}))
+	defer server.Close()
+
+	client := NewAnthropicClient(AnthropicClientConfig{Endpoint: server.URL, APIKey: "k", Model: "m"})
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Error("expected error when response has no text content block")
+	}
+}
+
+func TestAnthropicClient_Unavailable(t *testing.T) {
+	client := NewAnthropicClient(AnthropicClientConfig{
+		Endpoint: "http://127.0.0.1:19999",
+		APIKey:   "k",
+		Model:    "m",
+	})
+	if client.Available() {
+		t.Error("expected client to be unavailable when nothing is listening")
+	}
+}

@@ -12,10 +12,13 @@ import (
 )
 
 type Config struct {
-	ListenAddr string         `yaml:"listen_addr"` // e.g. ":8090"
-	Loki       LokiConfig     `yaml:"loki"`
-	Summarizer LLMConfig      `yaml:"summarizer"`
-	Telegram   TelegramConfig `yaml:"telegram"`
+	ListenAddr string           `yaml:"listen_addr"` // e.g. ":8090"
+	Loki       LokiConfig       `yaml:"loki"`
+	Summarizer LLMConfig        `yaml:"summarizer"`
+	Cloud      *CloudConfig     `yaml:"cloud"`      // optional: cloud model for escalated alerts
+	Escalation EscalationConfig `yaml:"escalation"` // rules for when to escalate to Cloud
+	RAG        *RAGConfig       `yaml:"rag"`        // optional: past-incident retrieval
+	Telegram   TelegramConfig   `yaml:"telegram"`
 }
 
 // LokiConfig points at the Loki instance to query for context around a
@@ -31,6 +34,39 @@ type LokiConfig struct {
 type LLMConfig struct {
 	Endpoint string `yaml:"endpoint"`
 	Model    string `yaml:"model"`
+}
+
+// CloudConfig is the Anthropic endpoint escalated alerts get re-analyzed
+// against. Only used when at least one Escalation rule can trigger, or
+// the local model's own structured reply asks for escalation — see
+// pkg/aiops.ShouldEscalate.
+type CloudConfig struct {
+	Endpoint string `yaml:"endpoint"` // optional; defaults to https://api.anthropic.com
+	APIKey   string `yaml:"api_key"`
+	Model    string `yaml:"model"` // e.g. "claude-haiku-4-5"
+}
+
+// EscalationConfig lists alerts that must always be re-analyzed by Cloud
+// regardless of what the local model's own confidence/escalate signal
+// says. This exists because a small local model's self-reported
+// confidence isn't reliably calibrated — an operator who knows "this
+// specific alert is always complex/sensitive in our environment" should
+// be able to force escalation deterministically rather than hoping the
+// local model notices.
+type EscalationConfig struct {
+	AlwaysCloud []string `yaml:"always_cloud"` // alertname values, matched case-insensitively
+}
+
+// RAGConfig controls optional retrieval of past incidents to ground the
+// summarizer prompt. Nil (or Enabled: false) means orch-gateway behaves
+// exactly as it did before this existed — RAG is opt-in, not a
+// requirement to run the service.
+type RAGConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	PostgresDSN       string `yaml:"postgres_dsn"`       // e.g. "postgres://user:pass@host:5432/dbname"
+	EmbeddingEndpoint string `yaml:"embedding_endpoint"` // OpenAI-compatible /v1/embeddings endpoint
+	EmbeddingModel    string `yaml:"embedding_model"`    // e.g. "bge-m3"
+	TopK              int    `yaml:"top_k"`              // how many past incidents to retrieve; defaults to 3
 }
 
 // TelegramConfig, if BotToken is set, makes the webhook handler push each
