@@ -32,3 +32,8 @@ jobs:
 
       - name: go test
         run: go test -race -count=1 ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest

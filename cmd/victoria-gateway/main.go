@@ -63,38 +63,9 @@ func runServe(args []string) {
 		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 		os.Exit(1)
 	}
-	if cfg.Loki.Endpoint == "" {
-		fmt.Fprintln(os.Stderr, "❌ loki.endpoint is not set in config.yaml")
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 		os.Exit(1)
-	}
-	if cfg.Summarizer.Endpoint == "" {
-		fmt.Fprintln(os.Stderr, "❌ summarizer.endpoint is not set in config.yaml")
-		os.Exit(1)
-	}
-	// An escalation rule that can never fire (no Cloud configured) is a
-	// silent no-op the operator almost certainly didn't intend — fail
-	// loudly at startup rather than have alerts quietly never escalate.
-	if len(cfg.Escalation.AlwaysCloud) > 0 && cfg.Cloud == nil {
-		fmt.Fprintln(os.Stderr, "❌ escalation.always_cloud is set but cloud is not configured in config.yaml")
-		os.Exit(1)
-	}
-	if cfg.Escalation.MaxPerHour < 0 {
-		fmt.Fprintln(os.Stderr, "❌ escalation.max_per_hour must be >= 0 (0 means unlimited)")
-		os.Exit(1)
-	}
-	// An empty username/password would still technically "match" via
-	// checkWebhookAuth's constant-time comparison if a caller explicitly
-	// sent empty Basic Auth credentials — that's not the "require a real
-	// secret" behavior an operator setting webhook_auth actually wants.
-	if cfg.WebhookAuth != nil && (cfg.WebhookAuth.Username == "" || cfg.WebhookAuth.Password == "") {
-		fmt.Fprintln(os.Stderr, "❌ webhook_auth is set but username/password is empty — set both, or remove the webhook_auth block to leave the endpoint unauthenticated")
-		os.Exit(1)
-	}
-	if cfg.RAG != nil && cfg.RAG.Enabled {
-		if cfg.RAG.PostgresDSN == "" || cfg.RAG.EmbeddingEndpoint == "" || cfg.RAG.EmbeddingModel == "" {
-			fmt.Fprintln(os.Stderr, "❌ rag.enabled is true but postgres_dsn/embedding_endpoint/embedding_model is missing in config.yaml")
-			os.Exit(1)
-		}
 	}
 
 	addr := cfg.ListenAddr
@@ -166,7 +137,7 @@ func runServe(args []string) {
 		}
 		defer store.Close()
 		h.rag = store
-		h.ragEmbedder = rag.NewEmbedder(cfg.RAG.EmbeddingEndpoint, cfg.RAG.EmbeddingModel)
+		h.ragEmbedder = rag.NewEmbedder(cfg.RAG.EmbeddingEndpoint, cfg.RAG.EmbeddingModel, cfg.RAG.EmbeddingAPIKey)
 		h.ragTopK = cfg.RAG.TopK
 		if h.ragTopK <= 0 {
 			h.ragTopK = 3

@@ -105,6 +105,30 @@ func TestQueryRange_HTTP500(t *testing.T) {
 	}
 }
 
+// TestQueryRange_HTTP200_StatusError confirms a 200 response whose body
+// still says status:"error" (some Loki versions do this on query timeout
+// or an internal error) is treated as a real failure, not silently
+// returned as "zero logs found".
+func TestQueryRange_HTTP200_StatusError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"error","data":{"resultType":"streams","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL)
+	start := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 8, 20, 11, 0, 0, 0, time.UTC)
+
+	_, err := client.QueryRange("web-01", start, end, 10)
+	if err == nil {
+		t.Fatal("expected an error when the response body's status is \"error\" despite HTTP 200, got nil")
+	}
+	if got := err.Error(); !containsSubstring(got, "error") {
+		t.Errorf("error = %q, expected it to mention the response status", got)
+	}
+}
+
 func containsSubstring(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(s) > 0 && contains(s, sub))
 }

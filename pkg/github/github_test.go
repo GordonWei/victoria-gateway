@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -77,9 +78,14 @@ func TestIssueState(t *testing.T) {
 }
 
 func TestLastComment(t *testing.T) {
+	var gotQuery string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		// A real GitHub server given sort=created&direction=desc&per_page=1
+		// would return exactly one comment, the newest — the mock does the
+		// same rather than returning a full list for LastComment to pick
+		// from, so this test exercises the actual contract being relied on.
 		json.NewEncoder(w).Encode([]comment{
-			{Body: "investigating"},
 			{Body: "舊測試機殘留 target，已下線"},
 		})
 	}))
@@ -92,6 +98,11 @@ func TestLastComment(t *testing.T) {
 	}
 	if last != "舊測試機殘留 target，已下線" {
 		t.Errorf("last comment = %q", last)
+	}
+	for _, want := range []string{"sort=created", "direction=desc", "per_page=1"} {
+		if !strings.Contains(gotQuery, want) {
+			t.Errorf("query = %q, want it to contain %q (an issue with >30 comments would otherwise return the wrong one)", gotQuery, want)
+		}
 	}
 }
 

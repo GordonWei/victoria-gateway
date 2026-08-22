@@ -22,13 +22,19 @@ import (
 type Embedder struct {
 	endpoint string
 	model    string
+	apiKey   string // empty for unauthenticated local servers
 	client   *http.Client
 }
 
-func NewEmbedder(endpoint, model string) *Embedder {
+// NewEmbedder builds an Embedder. apiKey is optional — leave it empty for
+// an unauthenticated local server (LM Studio, Ollama); set it if
+// embedding_endpoint points at a real cloud endpoint or a proxy (e.g. a
+// LiteLLM gateway shared with summarizer) that requires one.
+func NewEmbedder(endpoint, model, apiKey string) *Embedder {
 	return &Embedder{
 		endpoint: endpoint,
 		model:    model,
+		apiKey:   apiKey,
 		client:   &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -40,7 +46,16 @@ func (e *Embedder) Embed(text string) ([]float32, error) {
 		return nil, fmt.Errorf("marshal embedding request: %w", err)
 	}
 
-	resp, err := e.client.Post(e.endpoint+"/v1/embeddings", "application/json", bytes.NewReader(reqBody))
+	req, err := http.NewRequest(http.MethodPost, e.endpoint+"/v1/embeddings", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("build embedding request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if e.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+e.apiKey)
+	}
+
+	resp, err := e.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("embedding request failed: %w", err)
 	}

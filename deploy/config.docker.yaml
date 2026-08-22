@@ -67,6 +67,7 @@ summarizer:
 #   postgres_dsn: "postgres://REPLACE-user:REPLACE-pass@REPLACE-host:5432/REPLACE-db"
 #   embedding_endpoint: "http://REPLACE-llm-host:1234"
 #   embedding_model: "bge-m3"
+#   # embedding_api_key: ""   # optional; only if embedding_endpoint requires auth
 #   top_k: 3
 #   # Optional. Files an issue per analyzed alert on whichever tracker you
 #   # configure; `victoria-gateway sync` (run on a schedule) reads closed

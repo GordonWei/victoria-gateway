@@ -37,6 +37,10 @@ func runSync(args []string) {
 		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 		os.Exit(1)
 	}
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+		os.Exit(1)
+	}
 	if cfg.RAG == nil || !cfg.RAG.Enabled {
 		fmt.Fprintln(os.Stderr, "❌ rag.enabled is not set to true in config.yaml")
 		os.Exit(1)

@@ -2,6 +2,13 @@
 
 [![CI](https://github.com/GordonWei/victoria-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/GordonWei/victoria-gateway/actions/workflows/ci.yml)
 
+> **TL;DR** — Alertmanager fires → Victoria Gateway pulls the matching Loki
+> logs → a local LLM summarizes what's going on → the summary is pushed to
+> Telegram. Optionally: escalate hard alerts to a cloud model, ground the
+> analysis in similar past incidents (RAG), auto-file a Gitea/GitHub issue
+> per alert. Single Go binary, no runtime dependency beyond Loki and an
+> LLM endpoint.
+
 An Alertmanager webhook receiver: on each incoming alert, it pulls the
 surrounding Loki logs for the alerting host, asks a local OpenAI-compatible
 LLM (LM Studio, Ollama, vLLM, etc.) to summarize what's going on, and pushes

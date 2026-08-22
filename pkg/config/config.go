@@ -97,6 +97,7 @@ type RAGConfig struct {
 	PostgresDSN       string `yaml:"postgres_dsn"`       // e.g. "postgres://user:pass@host:5432/dbname"
 	EmbeddingEndpoint string `yaml:"embedding_endpoint"` // OpenAI-compatible /v1/embeddings endpoint
 	EmbeddingModel    string `yaml:"embedding_model"`    // e.g. "bge-m3"
+	EmbeddingAPIKey   string `yaml:"embedding_api_key"`  // optional, only for an endpoint requiring auth
 	TopK              int    `yaml:"top_k"`              // how many past incidents to retrieve; defaults to 3
 
 	// Gitea/GitHub: at most one should be set. Whichever is, every
@@ -135,6 +136,45 @@ type GitHubConfig struct {
 type TelegramConfig struct {
 	BotToken string `yaml:"bot_token"`
 	ChatID   int64  `yaml:"chat_id"`
+}
+
+// Validate checks the parts of Config that Load's YAML unmarshal can't —
+// required fields, and combinations that parse fine but don't make sense
+// together (e.g. an escalation rule with no cloud to escalate to). All
+// three entry points (runServe, runNote, runSync) share one config.yaml,
+// so this checks the fields the server needs even when called from note
+// or sync — a real deployment's config.yaml already has them set, since
+// the server has to be running for note/sync's captured/synced records to
+// exist in the first place.
+func (c *Config) Validate() error {
+	if c.Loki.Endpoint == "" {
+		return fmt.Errorf("loki.endpoint is not set in config.yaml")
+	}
+	if c.Summarizer.Endpoint == "" {
+		return fmt.Errorf("summarizer.endpoint is not set in config.yaml")
+	}
+	// An escalation rule that can never fire (no Cloud configured) is a
+	// silent no-op the operator almost certainly didn't intend — fail
+	// loudly rather than have alerts quietly never escalate.
+	if len(c.Escalation.AlwaysCloud) > 0 && c.Cloud == nil {
+		return fmt.Errorf("escalation.always_cloud is set but cloud is not configured in config.yaml")
+	}
+	if c.Escalation.MaxPerHour < 0 {
+		return fmt.Errorf("escalation.max_per_hour must be >= 0 (0 means unlimited)")
+	}
+	// An empty username/password would still technically "match" via
+	// checkWebhookAuth's constant-time comparison if a caller explicitly
+	// sent empty Basic Auth credentials — that's not the "require a real
+	// secret" behavior an operator setting webhook_auth actually wants.
+	if c.WebhookAuth != nil && (c.WebhookAuth.Username == "" || c.WebhookAuth.Password == "") {
+		return fmt.Errorf("webhook_auth is set but username/password is empty — set both, or remove the webhook_auth block to leave the endpoint unauthenticated")
+	}
+	if c.RAG != nil && c.RAG.Enabled {
+		if c.RAG.PostgresDSN == "" || c.RAG.EmbeddingEndpoint == "" || c.RAG.EmbeddingModel == "" {
+			return fmt.Errorf("rag.enabled is true but postgres_dsn/embedding_endpoint/embedding_model is missing in config.yaml")
+		}
+	}
+	return nil
 }
 
 func Load(path string) (*Config, error) {

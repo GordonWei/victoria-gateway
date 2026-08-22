@@ -402,7 +402,7 @@ func TestSummarizeOne_RAGContext_InjectedIntoPrompt(t *testing.T) {
 		{AlertName: "InstanceDown", Host: "192.0.2.7", Resolution: "舊測試機殘留 target，已下線", CreatedAt: time.Now()},
 	}}
 	h.rag = store
-	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3")
+	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3", "")
 	h.ragTopK = 3
 
 	alert := aiops.Alert{
@@ -460,7 +460,7 @@ func TestSummarizeOne_CapturesPendingRecord(t *testing.T) {
 	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
 	store := &fakeRAGStore{}
 	h.rag = store
-	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3")
+	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3", "")
 
 	alert := aiops.Alert{
 		Status:   "firing",
@@ -504,7 +504,7 @@ func TestSummarizeOne_CapturesWithGiteaIssue(t *testing.T) {
 	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
 	store := &fakeRAGStore{}
 	h.rag = store
-	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3")
+	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3", "")
 	h.tracker = gitea.NewClient(gitea.ClientConfig{Endpoint: giteaSrv.URL, Token: "t", Owner: "ops-team", Repo: "victoria-gateway-incidents"})
 
 	alert := aiops.Alert{
@@ -536,7 +536,7 @@ func TestSummarizeOne_GiteaCreateFails_StillCapturesPending(t *testing.T) {
 	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
 	store := &fakeRAGStore{}
 	h.rag = store
-	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3")
+	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3", "")
 	h.tracker = gitea.NewClient(gitea.ClientConfig{Endpoint: "http://127.0.0.1:19999", Token: "t", Owner: "ops-team", Repo: "r"})
 
 	alert := aiops.Alert{

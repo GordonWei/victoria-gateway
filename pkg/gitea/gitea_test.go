@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -73,7 +74,9 @@ func TestGetIssue(t *testing.T) {
 }
 
 func TestLastComment(t *testing.T) {
+	var gotQuery string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
 		json.NewEncoder(w).Encode([]comment{
 			{Body: "investigating"},
 			{Body: "舊測試機殘留 target，已下線"},
@@ -88,6 +91,9 @@ func TestLastComment(t *testing.T) {
 	}
 	if last != "舊測試機殘留 target，已下線" {
 		t.Errorf("last comment = %q", last)
+	}
+	if !strings.Contains(gotQuery, "limit=200") {
+		t.Errorf("query = %q, want it to contain \"limit=200\" (an issue with more comments than Gitea's default page size would otherwise return the wrong one)", gotQuery)
 	}
 }
 

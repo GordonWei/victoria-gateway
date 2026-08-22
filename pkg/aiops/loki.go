@@ -85,6 +85,14 @@ func parseLokiResponse(body []byte) ([]LogEntry, error) {
 	if err := json.Unmarshal(body, &lr); err != nil {
 		return nil, fmt.Errorf("loki: unmarshal response: %w", err)
 	}
+	// A 200 HTTP status doesn't guarantee Loki actually answered the
+	// query — some versions return status:"error" with 200 on query
+	// timeout or an internal error. Without this check that looks
+	// identical to "no logs found" and the summarizer proceeds with an
+	// empty log window instead of reporting Loki itself is the problem.
+	if lr.Status != "success" {
+		return nil, fmt.Errorf("loki: response status is %q (expected \"success\")", lr.Status)
+	}
 
 	var entries []LogEntry
 	for _, stream := range lr.Data.Result {

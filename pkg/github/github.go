@@ -122,9 +122,13 @@ type comment struct {
 }
 
 // LastComment returns the body of the most recently posted comment on an
-// issue, or "" if there are none.
+// issue, or "" if there are none. Asks the API to sort newest-first and
+// return only one result (rather than fetching the whole list and taking
+// the last element) — GitHub's comments endpoint defaults to 30 per page,
+// and an issue with more comments than that would otherwise silently
+// return the last comment of page one, not the actual most recent one.
 func (c *Client) LastComment(ctx context.Context, number int64) (string, error) {
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", c.owner, c.repo, number)
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?sort=created&direction=desc&per_page=1", c.owner, c.repo, number)
 	var comments []comment
 	if err := c.do(ctx, http.MethodGet, path, nil, &comments); err != nil {
 		return "", fmt.Errorf("list comments: %w", err)
@@ -132,5 +136,5 @@ func (c *Client) LastComment(ctx context.Context, number int64) (string, error) 
 	if len(comments) == 0 {
 		return "", nil
 	}
-	return comments[len(comments)-1].Body, nil
+	return comments[0].Body, nil
 }

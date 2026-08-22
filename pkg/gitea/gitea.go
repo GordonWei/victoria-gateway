@@ -131,8 +131,16 @@ type comment struct {
 // last comment before an issue is closed as the resolution — the normal
 // workflow is investigate, then leave one final comment explaining what
 // happened, then close.
+//
+// Gitea returns comments oldest-first and paginates at a server-default
+// page size (commonly 30) if `limit` isn't set — an issue with more
+// comments than that would otherwise silently return the last comment of
+// page one, not the actual most recent one. Unlike GitHub's API, Gitea
+// doesn't offer a sort-direction parameter here, so the fix is a
+// generously high limit rather than a single "give me the last one"
+// request; a resolution thread realistically never approaches this.
 func (c *Client) LastComment(ctx context.Context, number int64) (string, error) {
-	path := fmt.Sprintf("/api/v1/repos/%s/%s/issues/%d/comments", c.owner, c.repo, number)
+	path := fmt.Sprintf("/api/v1/repos/%s/%s/issues/%d/comments?limit=200", c.owner, c.repo, number)
 	var comments []comment
 	if err := c.do(ctx, http.MethodGet, path, nil, &comments); err != nil {
 		return "", fmt.Errorf("list comments: %w", err)

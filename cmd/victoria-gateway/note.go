@@ -52,12 +52,12 @@ func runNote(args []string) {
 		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 		os.Exit(1)
 	}
-	if cfg.RAG == nil || !cfg.RAG.Enabled {
-		fmt.Fprintln(os.Stderr, "❌ rag.enabled is not set to true in config.yaml — there's no store to write this note into")
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 		os.Exit(1)
 	}
-	if cfg.RAG.PostgresDSN == "" || cfg.RAG.EmbeddingEndpoint == "" || cfg.RAG.EmbeddingModel == "" {
-		fmt.Fprintln(os.Stderr, "❌ rag.postgres_dsn/embedding_endpoint/embedding_model is missing in config.yaml")
+	if cfg.RAG == nil || !cfg.RAG.Enabled {
+		fmt.Fprintln(os.Stderr, "❌ rag.enabled is not set to true in config.yaml — there's no store to write this note into")
 		os.Exit(1)
 	}
 
@@ -80,7 +80,7 @@ func runNote(args []string) {
 		return
 	}
 
-	embedder := rag.NewEmbedder(cfg.RAG.EmbeddingEndpoint, cfg.RAG.EmbeddingModel)
+	embedder := rag.NewEmbedder(cfg.RAG.EmbeddingEndpoint, cfg.RAG.EmbeddingModel, cfg.RAG.EmbeddingAPIKey)
 	queryText := rag.BuildQueryText(*alertName, *host, *summary, []string{*logExcerpt})
 	embedding, err := embedder.Embed(queryText)
 	if err != nil {
