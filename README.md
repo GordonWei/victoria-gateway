@@ -104,10 +104,11 @@ is the same logic, trimmed down to just what the service needs (no CLI,
 REPL, or unrelated routing/session code from the project it started as a
 subcommand of).
 
-**Not yet done: the live deployment hasn't been cut over to build from this
-repo** — it's still running off a build from its old location. Cutting over
-means getting this repo (or its built image) onto the deployment host and
-swapping the compose service's build source, which is a separate step.
+The live deployment has been cut over to build from this repo (2026-08-22):
+the deployment host clones this repo directly and builds the image from it,
+rather than a source transfer from the old location. The config schema is
+flat (see Config above) — the old deployment's nested `aiops:`/`memory:`
+schema from before the extraction is no longer supported.
 
 ## Testing
 
