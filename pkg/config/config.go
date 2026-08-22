@@ -36,14 +36,15 @@ type LLMConfig struct {
 	Model    string `yaml:"model"`
 }
 
-// CloudConfig is the Anthropic endpoint escalated alerts get re-analyzed
-// against. Only used when at least one Escalation rule can trigger, or
-// the local model's own structured reply asks for escalation — see
-// pkg/aiops.ShouldEscalate.
+// CloudConfig is the cloud model endpoint escalated alerts get
+// re-analyzed against. Only used when at least one Escalation rule can
+// trigger, or the local model's own structured reply asks for escalation
+// — see pkg/aiops.ShouldEscalate.
 type CloudConfig struct {
-	Endpoint string `yaml:"endpoint"` // optional; defaults to https://api.anthropic.com
+	Provider string `yaml:"provider"` // "gemini" (default) or "anthropic"
+	Endpoint string `yaml:"endpoint"` // optional; each provider has its own default
 	APIKey   string `yaml:"api_key"`
-	Model    string `yaml:"model"` // e.g. "claude-haiku-4-5"
+	Model    string `yaml:"model"` // e.g. "gemini-2.5-flash" or "claude-haiku-4-5"
 }
 
 // EscalationConfig lists alerts that must always be re-analyzed by Cloud

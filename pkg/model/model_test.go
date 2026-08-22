@@ -332,3 +332,159 @@ func TestAnthropicClient_Unavailable(t *testing.T) {
 		t.Error("expected client to be unavailable when nothing is listening")
 	}
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GeminiClient
+// ══════════════════════════════════════════════════════════════════════════════
+
+func TestGeminiClient_Chat(t *testing.T) {
+	var receivedBody geminiRequest
+	var receivedAPIKey, receivedPath string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedAPIKey = r.Header.Get("x-goog-api-key")
+		if err := json.NewDecoder(r.Body).Decode(&receivedBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"candidates": []map[string]any{
+				{"content": map[string]any{"parts": []map[string]string{{"text": "gemini reply"}}}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewGeminiClient(GeminiClientConfig{
+		Endpoint: server.URL,
+		APIKey:   "test-key",
+		Model:    "gemini-2.5-flash",
+	})
+
+	reply, err := client.Chat([]Message{
+		{Role: "system", Content: "you are helpful"},
+		{Role: "user", Content: "hello"},
+	}, &ChatOptions{MaxTokens: 512, Temperature: 0.3})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if reply != "gemini reply" {
+		t.Errorf("reply = %q, want %q", reply, "gemini reply")
+	}
+
+	if receivedPath != "/v1beta/models/gemini-2.5-flash:generateContent" {
+		t.Errorf("path = %q, want the generateContent endpoint for the configured model", receivedPath)
+	}
+	if receivedAPIKey != "test-key" {
+		t.Errorf("x-goog-api-key header = %q, want %q", receivedAPIKey, "test-key")
+	}
+	if receivedBody.SystemInstruction == nil || receivedBody.SystemInstruction.Parts[0].Text != "you are helpful" {
+		t.Errorf("systemInstruction = %+v, want the system-role message lifted out", receivedBody.SystemInstruction)
+	}
+	if len(receivedBody.Contents) != 1 || receivedBody.Contents[0].Role != "user" {
+		t.Errorf("contents = %+v, want exactly one user message", receivedBody.Contents)
+	}
+	if receivedBody.GenerationConfig.MaxOutputTokens != 512 {
+		t.Errorf("maxOutputTokens = %d, want 512", receivedBody.GenerationConfig.MaxOutputTokens)
+	}
+
+	if client.ModelName() != "gemini-2.5-flash" {
+		t.Errorf("ModelName() = %q, want %q", client.ModelName(), "gemini-2.5-flash")
+	}
+	if client.Backend() != "gemini" {
+		t.Errorf("Backend() = %q, want %q", client.Backend(), "gemini")
+	}
+}
+
+func TestGeminiClient_AssistantRoleMappedToModel(t *testing.T) {
+	var receivedBody geminiRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"candidates": []map[string]any{{"content": map[string]any{"parts": []map[string]string{{"text": "ok"}}}}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewGeminiClient(GeminiClientConfig{Endpoint: server.URL, APIKey: "k", Model: "m"})
+	_, err := client.Chat([]Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "prior reply"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(receivedBody.Contents) != 2 || receivedBody.Contents[1].Role != "model" {
+		t.Errorf("contents = %+v, want the assistant-role message mapped to role \"model\"", receivedBody.Contents)
+	}
+}
+
+func TestGeminiClient_DefaultEndpoint(t *testing.T) {
+	client := NewGeminiClient(GeminiClientConfig{APIKey: "k", Model: "m"})
+	if client.endpoint != "https://generativelanguage.googleapis.com" {
+		t.Errorf("default endpoint = %q, want the public Gemini API", client.endpoint)
+	}
+}
+
+func TestGeminiClient_ErrorStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		w.Write([]byte(`{"error":{"message":"invalid API key"}}`))
+	}))
+	defer server.Close()
+
+	client := NewGeminiClient(GeminiClientConfig{Endpoint: server.URL, APIKey: "bad", Model: "m"})
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Error("expected error on 400 response")
+	}
+}
+
+func TestGeminiClient_NoCandidates(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(geminiResponse{})
+	}))
+	defer server.Close()
+
+	client := NewGeminiClient(GeminiClientConfig{Endpoint: server.URL, APIKey: "k", Model: "m"})
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Error("expected error when response has no candidates")
+	}
+}
+
+func TestGeminiClient_Unavailable(t *testing.T) {
+	client := NewGeminiClient(GeminiClientConfig{
+		Endpoint: "http://127.0.0.1:19999",
+		APIKey:   "k",
+		Model:    "m",
+	})
+	if client.Available() {
+		t.Error("expected client to be unavailable when nothing is listening")
+	}
+}
+
+func TestGeminiClient_Available(t *testing.T) {
+	var receivedPath, receivedAPIKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedAPIKey = r.Header.Get("x-goog-api-key")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"models":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewGeminiClient(GeminiClientConfig{Endpoint: server.URL, APIKey: "k", Model: "m"})
+	if !client.Available() {
+		t.Error("expected client to be available")
+	}
+	if receivedPath != "/v1beta/models" {
+		t.Errorf("Available() hit path %q, want the list-models endpoint", receivedPath)
+	}
+	if receivedAPIKey != "k" {
+		t.Errorf("Available() sent api key %q, want %q", receivedAPIKey, "k")
+	}
+}

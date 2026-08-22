@@ -99,11 +99,23 @@ func runServe(args []string) {
 
 	var cloud model.LLM
 	if cfg.Cloud != nil {
-		cloud = model.NewAnthropicClient(model.AnthropicClientConfig{
-			Endpoint: cfg.Cloud.Endpoint,
-			APIKey:   cfg.Cloud.APIKey,
-			Model:    cfg.Cloud.Model,
-		})
+		switch cfg.Cloud.Provider {
+		case "", "gemini":
+			cloud = model.NewGeminiClient(model.GeminiClientConfig{
+				Endpoint: cfg.Cloud.Endpoint,
+				APIKey:   cfg.Cloud.APIKey,
+				Model:    cfg.Cloud.Model,
+			})
+		case "anthropic":
+			cloud = model.NewAnthropicClient(model.AnthropicClientConfig{
+				Endpoint: cfg.Cloud.Endpoint,
+				APIKey:   cfg.Cloud.APIKey,
+				Model:    cfg.Cloud.Model,
+			})
+		default:
+			fmt.Fprintf(os.Stderr, "❌ unknown cloud.provider %q (must be \"gemini\" or \"anthropic\")\n", cfg.Cloud.Provider)
+			os.Exit(1)
+		}
 	}
 
 	h := &handler{

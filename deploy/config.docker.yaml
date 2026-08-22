@@ -20,9 +20,10 @@ summarizer:
 # or the local model's own reply asks to escalate (see README's Triage
 # section).
 # cloud:
-#   endpoint: ""   # optional; defaults to https://api.anthropic.com
-#   api_key: "REPLACE-anthropic-api-key"
-#   model: "claude-haiku-4-5"
+#   provider: "gemini"   # optional, defaults to "gemini"; "anthropic" also supported
+#   endpoint: ""   # optional; each provider has its own default
+#   api_key: "REPLACE-gemini-api-key"
+#   model: "gemini-2.5-flash"
 
 # Optional. Alert names listed here always get re-analyzed by `cloud`
 # regardless of what the local model's own confidence says — use this for

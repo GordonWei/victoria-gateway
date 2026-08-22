@@ -68,14 +68,17 @@ container-specific comments (including the two optional sections below).
 The local model is fast and free, but it's a small quantized model — it can
 misdiagnose alerts that need broader reasoning or turn up nothing when a
 host's logs don't cover the real cause. Add a `cloud` block and orch-gateway
-can re-run the analysis against a stronger cloud model (Anthropic) for
-alerts that need it, while everything else still stays local:
+can re-run the analysis against a stronger cloud model for alerts that need
+it, while everything else still stays local. Gemini is the default provider
+(`pkg/model.GeminiClient`); Anthropic is also supported
+(`pkg/model.AnthropicClient`) via `provider: "anthropic"`:
 
 ```yaml
 cloud:
-  endpoint: ""   # optional; defaults to https://api.anthropic.com
-  api_key: "sk-ant-..."
-  model: "claude-haiku-4-5"
+  provider: "gemini"   # optional, defaults to "gemini"; "anthropic" also supported
+  endpoint: ""   # optional; each provider has its own default
+  api_key: "AIza..."
+  model: "gemini-2.5-flash"
 
 escalation:
   always_cloud:

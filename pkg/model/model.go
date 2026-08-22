@@ -314,3 +314,182 @@ type anthropicResponse struct {
 		Text string `json:"text"`
 	} `json:"content"`
 }
+
+// --- Gemini Client (default cloud escalation target) ---
+
+// GeminiClient speaks the Google Gemini generateContent API. It's the
+// default cloud escalation target — chosen over Anthropic because this
+// deployment already has other Gemini API usage (see Cowork's
+// call-gemini skill) and reusing that reduces how many separate API
+// keys/billing accounts an operator has to manage for one home-lab
+// service.
+type GeminiClient struct {
+	endpoint string
+	apiKey   string
+	model    string
+	client   *http.Client
+}
+
+type GeminiClientConfig struct {
+	Endpoint string // defaults to "https://generativelanguage.googleapis.com" if empty
+	APIKey   string
+	Model    string // e.g. "gemini-2.5-flash"
+	Timeout  time.Duration
+}
+
+func NewGeminiClient(cfg GeminiClientConfig) *GeminiClient {
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = 60 * time.Second
+	}
+	endpoint := cfg.Endpoint
+	if endpoint == "" {
+		endpoint = "https://generativelanguage.googleapis.com"
+	}
+	return &GeminiClient{
+		endpoint: endpoint,
+		apiKey:   cfg.APIKey,
+		model:    cfg.Model,
+		client:   &http.Client{Timeout: timeout},
+	}
+}
+
+// Chat maps the shared Message/ChatOptions shape onto Gemini's
+// generateContent request. Like Anthropic, Gemini takes the system
+// prompt as a separate top-level field (systemInstruction) rather than a
+// message in the conversation list, and uses "model" rather than
+// "assistant" as the role for the model's own turns — this codebase
+// never sends an assistant-role message back in, but the mapping is
+// still correct if that ever changes.
+func (c *GeminiClient) Chat(messages []Message, opts *ChatOptions) (string, error) {
+	maxTokens := 1024
+	temperature := 0.1
+	if opts != nil {
+		if opts.MaxTokens > 0 {
+			maxTokens = opts.MaxTokens
+		}
+		if opts.Temperature > 0 {
+			temperature = opts.Temperature
+		}
+	}
+
+	var system *geminiContent
+	contents := make([]geminiContent, 0, len(messages))
+	for _, m := range messages {
+		if m.Role == "system" {
+			if system == nil {
+				system = &geminiContent{Parts: []geminiPart{{Text: m.Content}}}
+			} else {
+				system.Parts = append(system.Parts, geminiPart{Text: "\n\n" + m.Content})
+			}
+			continue
+		}
+		role := m.Role
+		if role == "assistant" {
+			role = "model"
+		}
+		contents = append(contents, geminiContent{Role: role, Parts: []geminiPart{{Text: m.Content}}})
+	}
+
+	reqBody := geminiRequest{
+		Contents:          contents,
+		SystemInstruction: system,
+		GenerationConfig: geminiGenerationConfig{
+			MaxOutputTokens: maxTokens,
+			Temperature:     temperature,
+		},
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent", c.endpoint, c.model)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", c.apiKey)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request to gemini failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("gemini returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result geminiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+
+	if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
+		return "", fmt.Errorf("gemini returned no content")
+	}
+	var text string
+	for _, p := range result.Candidates[0].Content.Parts {
+		text += p.Text
+	}
+	if text == "" {
+		return "", fmt.Errorf("gemini returned no text content")
+	}
+	return text, nil
+}
+
+// Available lists models with the configured key — a cheap, free call
+// (unlike a real generateContent request) that still confirms both the
+// endpoint and the key are working.
+func (c *GeminiClient) Available() bool {
+	req, err := http.NewRequest(http.MethodGet, c.endpoint+"/v1beta/models", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("x-goog-api-key", c.apiKey)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
+func (c *GeminiClient) ModelName() string {
+	return c.model
+}
+
+func (c *GeminiClient) Backend() string {
+	return "gemini"
+}
+
+type geminiPart struct {
+	Text string `json:"text"`
+}
+
+type geminiContent struct {
+	Role  string       `json:"role,omitempty"`
+	Parts []geminiPart `json:"parts"`
+}
+
+type geminiGenerationConfig struct {
+	MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
+	Temperature     float64 `json:"temperature,omitempty"`
+}
+
+type geminiRequest struct {
+	Contents          []geminiContent        `json:"contents"`
+	SystemInstruction *geminiContent         `json:"systemInstruction,omitempty"`
+	GenerationConfig  geminiGenerationConfig `json:"generationConfig"`
+}
+
+type geminiResponse struct {
+	Candidates []struct {
+		Content geminiContent `json:"content"`
+	} `json:"candidates"`
+}
