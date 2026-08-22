@@ -112,6 +112,16 @@ func (c *Client) GetIssue(ctx context.Context, number int64) (Issue, error) {
 	return issue, nil
 }
 
+// IssueState implements pkg/tracker.Tracker — a thin wrapper over
+// GetIssue for callers that only need the state, not the full Issue.
+func (c *Client) IssueState(ctx context.Context, number int64) (string, error) {
+	issue, err := c.GetIssue(ctx, number)
+	if err != nil {
+		return "", err
+	}
+	return issue.State, nil
+}
+
 type comment struct {
 	Body string `json:"body"`
 }

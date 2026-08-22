@@ -3,6 +3,15 @@
 
 listen_addr: ":8090"
 
+# Optional. Requires HTTP Basic Auth on /webhook/alertmanager when set —
+# anyone who can reach this port can otherwise trigger LLM/cloud calls and
+# file tracker issues on your behalf, so set this if the port is reachable
+# from anywhere you don't fully trust. Configure the same username/password
+# on Alertmanager's webhook_configs (see deploy/alertmanager_receiver_example.md).
+# webhook_auth:
+#   username: "alertmanager"
+#   password: "REPLACE-a-real-secret"
+
 loki:
   endpoint: "http://loki:3100"   # Loki's service name on the same docker network
   lookback_sec: 300
@@ -45,15 +54,22 @@ summarizer:
 #   embedding_endpoint: "http://REPLACE-llm-host:1234"
 #   embedding_model: "bge-m3"
 #   top_k: 3
-#   # Optional. Files a Gitea issue per analyzed alert; `victoria-gateway
-#   # sync` (run on a schedule) reads closed issues' last comment back in
-#   # as the resolution. Omit to skip auto-filing — capture still happens,
-#   # confirmation just has to be done via `note --id` instead.
+#   # Optional. Files an issue per analyzed alert on whichever tracker you
+#   # configure; `victoria-gateway sync` (run on a schedule) reads closed
+#   # issues' last comment back in as the resolution. Omit both to skip
+#   # auto-filing — capture still happens, confirmation just has to be done
+#   # via `note --id` instead. Configure at most one of gitea/github —
+#   # having both set is a startup error.
 #   gitea:
 #     endpoint: "https://REPLACE-gitea-instance"
 #     token: "REPLACE-gitea-token"   # needs write:issue scope
 #     owner: "REPLACE-owner"
 #     repo: "victoria-gateway-incidents"   # a dedicated repo, not the code repo
+#   # github:
+#   #   endpoint: ""   # optional, defaults to https://api.github.com (set for GitHub Enterprise Server)
+#   #   token: "REPLACE-github-token"   # needs the "issues" repo permission
+#   #   owner: "REPLACE-owner"
+#   #   repo: "victoria-gateway-incidents"   # a dedicated repo, not the code repo
 
 telegram:
   # Push each alert's LLM summary to this chat. Leave bot_token empty to

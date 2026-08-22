@@ -1,0 +1,44 @@
+# Standalone Postgres+pgvector for victoria-gateway's RAG store — not part
+# of the main monitoring stack, doesn't need Loki/Prometheus/Alertmanager
+# anywhere nearby. Run this on whatever host will hold the RAG database
+# (can be the same host as victoria-gateway itself, or a separate one — just
+# make sure postgres_dsn in config.yaml can reach it).
+#
+# `pgvector/pgvector:pg16` ships the pgvector extension binary preinstalled,
+# so there's no OS-level `apt install postgresql-16-pgvector` step — schema.sql's
+# `CREATE EXTENSION IF NOT EXISTS vector;` just works. schema.sql is mounted
+# into Postgres's docker-entrypoint-initdb.d/, which only runs on first init
+# (an empty data volume) — it's a no-op on every later start, and it won't
+# touch an already-initialized volume from a previous run.
+#
+# Usage:
+#   cp .env.example .env   # then edit the password
+#   docker compose up -d
+#   # postgres_dsn for config.yaml's rag section:
+#   #   postgres://victoria:<your password>@<this host's LAN IP>:5432/victoria_gateway
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: victoria-gateway-rag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: victoria
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: victoria_gateway
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../../pkg/rag/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      # Published so victoria-gateway (likely a different container/host)
+      # can reach it. Drop this if Postgres and victoria-gateway end up on
+      # the same docker network and can talk by service name instead.
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U victoria -d victoria_gateway"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

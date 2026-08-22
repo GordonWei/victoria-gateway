@@ -505,7 +505,7 @@ func TestSummarizeOne_CapturesWithGiteaIssue(t *testing.T) {
 	store := &fakeRAGStore{}
 	h.rag = store
 	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3")
-	h.gitea = gitea.NewClient(gitea.ClientConfig{Endpoint: giteaSrv.URL, Token: "t", Owner: "ops-team", Repo: "victoria-gateway-incidents"})
+	h.tracker = gitea.NewClient(gitea.ClientConfig{Endpoint: giteaSrv.URL, Token: "t", Owner: "ops-team", Repo: "victoria-gateway-incidents"})
 
 	alert := aiops.Alert{
 		Status:   "firing",
@@ -537,7 +537,7 @@ func TestSummarizeOne_GiteaCreateFails_StillCapturesPending(t *testing.T) {
 	store := &fakeRAGStore{}
 	h.rag = store
 	h.ragEmbedder = rag.NewEmbedder(embedSrv.URL, "bge-m3")
-	h.gitea = gitea.NewClient(gitea.ClientConfig{Endpoint: "http://127.0.0.1:19999", Token: "t", Owner: "ops-team", Repo: "r"})
+	h.tracker = gitea.NewClient(gitea.ClientConfig{Endpoint: "http://127.0.0.1:19999", Token: "t", Owner: "ops-team", Repo: "r"})
 
 	alert := aiops.Alert{
 		Status:   "firing",
@@ -729,5 +729,122 @@ func TestClaimFingerprint_EmptyAlwaysClaims(t *testing.T) {
 	}
 	if !h.claimFingerprint("") {
 		t.Error("calling again with empty fingerprint should still claim true")
+	}
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Webhook auth
+// ══════════════════════════════════════════════════════════════════════════════
+
+func TestHandleAlertmanagerWebhook_NoAuthConfigured_AnyoneCanCall(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+	llmSrv := newFakeLLM(t, "ok")
+	defer llmSrv.Close()
+
+	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL) // h.webhookAuth left nil
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", bytes.NewReader(validAlertmanagerPayload(t)))
+	rec := httptest.NewRecorder()
+	h.handleAlertmanagerWebhook(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (no auth configured = no auth required)", rec.Code)
+	}
+}
+
+func TestHandleAlertmanagerWebhook_AuthConfigured_RejectsMissingCreds(t *testing.T) {
+	h := newTestHandler(t, "http://unused.invalid", "http://unused.invalid")
+	h.webhookAuth = &config.WebhookAuthConfig{Username: "alertmanager", Password: "s3cret"}
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", bytes.NewReader(validAlertmanagerPayload(t)))
+	rec := httptest.NewRecorder()
+	h.handleAlertmanagerWebhook(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestHandleAlertmanagerWebhook_AuthConfigured_RejectsWrongPassword(t *testing.T) {
+	h := newTestHandler(t, "http://unused.invalid", "http://unused.invalid")
+	h.webhookAuth = &config.WebhookAuthConfig{Username: "alertmanager", Password: "s3cret"}
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", bytes.NewReader(validAlertmanagerPayload(t)))
+	req.SetBasicAuth("alertmanager", "wrong")
+	rec := httptest.NewRecorder()
+	h.handleAlertmanagerWebhook(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestHandleAlertmanagerWebhook_AuthConfigured_AcceptsCorrectCreds(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+	llmSrv := newFakeLLM(t, "ok")
+	defer llmSrv.Close()
+
+	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
+	h.webhookAuth = &config.WebhookAuthConfig{Username: "alertmanager", Password: "s3cret"}
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", bytes.NewReader(validAlertmanagerPayload(t)))
+	req.SetBasicAuth("alertmanager", "s3cret")
+	rec := httptest.NewRecorder()
+	h.handleAlertmanagerWebhook(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// buildTracker
+// ══════════════════════════════════════════════════════════════════════════════
+
+func TestBuildTracker_NilRAGConfig(t *testing.T) {
+	tr, err := buildTracker(nil)
+	if err != nil || tr != nil {
+		t.Errorf("buildTracker(nil) = (%v, %v), want (nil, nil)", tr, err)
+	}
+}
+
+func TestBuildTracker_NeitherConfigured(t *testing.T) {
+	tr, err := buildTracker(&config.RAGConfig{})
+	if err != nil || tr != nil {
+		t.Errorf("buildTracker with neither gitea nor github set = (%v, %v), want (nil, nil)", tr, err)
+	}
+}
+
+func TestBuildTracker_BothConfigured_Errors(t *testing.T) {
+	ragCfg := &config.RAGConfig{
+		Gitea:  &config.GiteaConfig{Endpoint: "https://gitea.example.com", Owner: "o", Repo: "r"},
+		GitHub: &config.GitHubConfig{Owner: "o", Repo: "r"},
+	}
+	if _, err := buildTracker(ragCfg); err == nil {
+		t.Error("expected an error when both rag.gitea and rag.github are configured")
+	}
+}
+
+func TestBuildTracker_GiteaOnly(t *testing.T) {
+	ragCfg := &config.RAGConfig{Gitea: &config.GiteaConfig{Endpoint: "https://gitea.example.com", Owner: "o", Repo: "r"}}
+	tr, err := buildTracker(ragCfg)
+	if err != nil {
+		t.Fatalf("buildTracker: %v", err)
+	}
+	if tr == nil {
+		t.Fatal("expected a non-nil tracker when rag.gitea is set")
+	}
+}
+
+func TestBuildTracker_GitHubOnly(t *testing.T) {
+	ragCfg := &config.RAGConfig{GitHub: &config.GitHubConfig{Owner: "o", Repo: "r"}}
+	tr, err := buildTracker(ragCfg)
+	if err != nil {
+		t.Fatalf("buildTracker: %v", err)
+	}
+	if tr == nil {
+		t.Fatal("expected a non-nil tracker when rag.github is set")
 	}
 }

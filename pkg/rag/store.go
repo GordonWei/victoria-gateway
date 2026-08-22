@@ -27,14 +27,19 @@ const (
 // retrieve later; Summary/LogExcerpt are kept as reference for whoever
 // writes that resolution, not treated as ground truth on their own.
 type Record struct {
-	ID               int64
-	AlertName        string
-	Host             string
-	LogExcerpt       string
-	Summary          string
-	Resolution       string
-	Status           string
-	GiteaIssueNumber int64 // 0 if not linked to a Gitea issue
+	ID         int64
+	AlertName  string
+	Host       string
+	LogExcerpt string
+	Summary    string
+	Resolution string
+	Status     string
+	// GiteaIssueNumber is 0 if not linked to a tracker issue. Named for
+	// when Gitea was the only backend; it's used the same way regardless
+	// of whether pkg/gitea or pkg/github (see pkg/tracker) filed it — the
+	// DB column wasn't renamed along with the code to avoid a schema
+	// migration over a field that already had real rows in it.
+	GiteaIssueNumber int64
 	CreatedAt        time.Time
 	ConfirmedAt      time.Time // zero if not yet Confirmed
 }

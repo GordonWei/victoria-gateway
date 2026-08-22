@@ -61,7 +61,24 @@ telegram:
 `loki.endpoint` and `summarizer.endpoint` are required — the process exits
 on startup if either is missing. Everything else has a default or is
 optional. See `deploy/config.docker.yaml` for the same shape with
-container-specific comments (including the two optional sections below).
+container-specific comments (including the optional sections below).
+
+### Securing the webhook
+
+`/webhook/alertmanager` has no auth by default (matching Alertmanager's own
+default-open `webhook_configs`), which is fine if it's only reachable from a
+private network you already trust. If it's exposed more broadly, add
+`webhook_auth` to require HTTP Basic Auth:
+
+```yaml
+webhook_auth:
+  username: "alertmanager"
+  password: "a-real-secret"
+```
+
+Requests without valid credentials get `401`, before any Loki/LLM/cloud/RAG
+work happens. Configure the matching `basic_auth` on Alertmanager's side —
+see `deploy/alertmanager_receiver_example.md`.
 
 ## Triage: escalating a hard alert to a cloud model
 
@@ -114,6 +131,12 @@ alert and searches a Postgres+pgvector store for similar past incidents,
 inserting whatever it finds into the prompt as reference context (both the
 local and any escalated cloud call see it).
 
+No Postgres already running? `deploy/rag-quickstart/` has a
+`docker-compose.yml` that stands up pgvector and applies `schema.sql`
+automatically — `cd deploy/rag-quickstart && docker compose up -d` gets you
+a `postgres_dsn` to paste below in about a minute, no manual pgvector
+package install needed.
+
 ```yaml
 rag:
   enabled: true
@@ -160,7 +183,8 @@ victoria-gateway note \
 Pending record) or `--alert-name` (creates a new Confirmed one from
 scratch) must be given.
 
-**Automatically, via Gitea**, if you add a `gitea` block:
+**Automatically, via Gitea or GitHub**, if you add a `gitea` or `github`
+block (configure at most one — having both set is a startup error):
 
 ```yaml
 rag:
@@ -175,7 +199,22 @@ rag:
     repo: "victoria-gateway-incidents"   # a dedicated repo, not the code repo
 ```
 
-With this set, every analyzed alert also files a Gitea issue (title = alert
+or, on GitHub instead:
+
+```yaml
+rag:
+  enabled: true
+  postgres_dsn: "postgres://user:pass@host:5432/dbname"
+  embedding_endpoint: "http://your-llm-host:1234"
+  embedding_model: "bge-m3"
+  github:
+    # endpoint: ""   # optional, defaults to https://api.github.com; set for GitHub Enterprise Server
+    token: "..."          # needs the "issues" repo permission on the target repo
+    owner: "your-username"
+    repo: "victoria-gateway-incidents"   # a dedicated repo, not the code repo
+```
+
+With either set, every analyzed alert also files an issue (title = alert
 name + host, body = the analysis) alongside the Pending record it's linked
 to. Investigate as normal; before closing the issue, leave one comment
 describing what it actually was — that's what gets pulled back as the
@@ -192,30 +231,35 @@ running — one pass, then exit. An issue closed with no comment is left
 Pending; there's nothing to confirm it with, and `note --id` still works on
 it by hand later.
 
-Retrieval and capture failures (embedding endpoint down, Postgres or Gitea
-unreachable) are logged and treated as "skip this part" rather than
-failing the alert — none of RAG is a dependency the core summarizer needs
-to stay up.
+Retrieval and capture failures (embedding endpoint down, Postgres or the
+issue tracker unreachable) are logged and treated as "skip this part" rather
+than failing the alert — none of RAG is a dependency the core summarizer
+needs to stay up.
 
 Setup, once, before turning `rag.enabled` on:
 
-1. Install the pgvector extension on the Postgres server itself (an OS/apt
-   package — `CREATE EXTENSION` alone won't work if the extension binary
-   isn't installed).
-2. Run `pkg/rag/schema.sql` against the target database (a fresh install —
-   already-deployed databases from before the Pending/Confirmed split
-   should run `pkg/rag/migrate_0001_pending_status.sql` instead, which
-   upgrades an existing `incidents` table in place). Both default the
-   embedding column to `vector(1024)`, matching `bge-m3`'s output dimension
-   — if you use a different embedding model, check its dimension and edit
-   the column definition before running either one.
-3. Point `embedding_endpoint`/`embedding_model` at wherever that model is
+1. Get a Postgres with the pgvector extension available. Easiest path:
+   `cd deploy/rag-quickstart && docker compose up -d` (uses the
+   `pgvector/pgvector` image, which ships the extension binary preinstalled,
+   and applies `schema.sql` automatically on first start). Otherwise, install
+   the pgvector extension on your existing Postgres server yourself (an
+   OS/apt package — `CREATE EXTENSION` alone won't work if the extension
+   binary isn't installed) and run `pkg/rag/schema.sql` against the target
+   database by hand (already-deployed databases from before the
+   Pending/Confirmed split should run `pkg/rag/migrate_0001_pending_status.sql`
+   instead, which upgrades an existing `incidents` table in place). Both
+   schema files default the embedding column to `vector(1024)`, matching
+   `bge-m3`'s output dimension — if you use a different embedding model,
+   check its dimension and edit the column definition before running either
+   one.
+2. Point `embedding_endpoint`/`embedding_model` at wherever that model is
    served (the same LM Studio/Ollama/vLLM instance `summarizer` uses is
    fine, as long as it also has an embedding model loaded).
-4. If using Gitea capture, create a dedicated repo for issues first (don't
-   reuse the code repo) and generate a token scoped to `write:issue` (plus
-   `write:repository`/`write:user` if you're creating the repo via the API
-   too, as opposed to the web UI).
+3. If using Gitea or GitHub capture, create a dedicated repo for issues
+   first (don't reuse the code repo) and generate a token scoped to
+   `write:issue` (Gitea; plus `write:repository`/`write:user` if creating
+   the repo via the API too, as opposed to the web UI) or the `issues` repo
+   permission (GitHub, fine-grained PAT).
 
 ### Getting a Telegram bot token and chat ID
 

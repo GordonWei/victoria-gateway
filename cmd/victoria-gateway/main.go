@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -27,9 +28,9 @@ import (
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
 	"github.com/gordonwei/victoria-gateway/pkg/config"
-	"github.com/gordonwei/victoria-gateway/pkg/gitea"
 	"github.com/gordonwei/victoria-gateway/pkg/model"
 	"github.com/gordonwei/victoria-gateway/pkg/rag"
+	"github.com/gordonwei/victoria-gateway/pkg/tracker"
 )
 
 func main() {
@@ -131,13 +132,14 @@ func runServe(args []string) {
 	}
 
 	h := &handler{
-		loki:       lokiClient,
-		summarizer: summarizer,
-		telegram:   telegram,
-		cloud:      cloud,
-		escalation: cfg.Escalation,
-		lookback:   lookback,
-		limit:      limit,
+		loki:        lokiClient,
+		summarizer:  summarizer,
+		telegram:    telegram,
+		cloud:       cloud,
+		escalation:  cfg.Escalation,
+		lookback:    lookback,
+		limit:       limit,
+		webhookAuth: cfg.WebhookAuth,
 	}
 
 	ragEnabled := cfg.RAG != nil && cfg.RAG.Enabled
@@ -154,14 +156,12 @@ func runServe(args []string) {
 		if h.ragTopK <= 0 {
 			h.ragTopK = 3
 		}
-		if cfg.RAG.Gitea != nil {
-			h.gitea = gitea.NewClient(gitea.ClientConfig{
-				Endpoint: cfg.RAG.Gitea.Endpoint,
-				Token:    cfg.RAG.Gitea.Token,
-				Owner:    cfg.RAG.Gitea.Owner,
-				Repo:     cfg.RAG.Gitea.Repo,
-			})
+		t, err := buildTracker(cfg.RAG)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+			os.Exit(1)
 		}
+		h.tracker = t
 	}
 
 	mux := http.NewServeMux()
@@ -181,21 +181,40 @@ func runServe(args []string) {
 }
 
 type handler struct {
-	loki       *aiops.Client
-	summarizer *aiops.Summarizer
-	telegram   *aiops.TelegramNotifier
-	cloud      model.LLM // nil if no cloud escalation target configured
-	escalation config.EscalationConfig
-	lookback   time.Duration
-	limit      int
+	loki        *aiops.Client
+	summarizer  *aiops.Summarizer
+	telegram    *aiops.TelegramNotifier
+	cloud       model.LLM // nil if no cloud escalation target configured
+	escalation  config.EscalationConfig
+	lookback    time.Duration
+	limit       int
+	webhookAuth *config.WebhookAuthConfig // nil if the webhook endpoint requires no auth
 
 	rag         rag.Store     // nil if RAG is disabled
 	ragEmbedder *rag.Embedder // nil if RAG is disabled
 	ragTopK     int
-	gitea       *gitea.Client // nil if Gitea capture isn't configured
+	tracker     tracker.Tracker // nil if no issue tracker (Gitea/GitHub) is configured
 
 	dedupMu  sync.Mutex
 	recentFP map[string]time.Time // fingerprint -> last-processed time, see claimFingerprint
+}
+
+// checkWebhookAuth reports whether the request is authorized to hit the
+// webhook — always true when webhookAuth isn't configured (the default;
+// see WebhookAuthConfig's doc comment on why that's not itself a
+// contradiction). Uses constant-time comparison so a timing side-channel
+// can't be used to guess the password one byte at a time.
+func (h *handler) checkWebhookAuth(r *http.Request) bool {
+	if h.webhookAuth == nil {
+		return true
+	}
+	user, pass, ok := r.BasicAuth()
+	if !ok {
+		return false
+	}
+	userOK := subtle.ConstantTimeCompare([]byte(user), []byte(h.webhookAuth.Username)) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(pass), []byte(h.webhookAuth.Password)) == 1
+	return userOK && passOK
 }
 
 // dedupWindow bounds how long a fingerprint is considered "already
@@ -262,6 +281,11 @@ type alertResult struct {
 func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !h.checkWebhookAuth(r) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="victoria-gateway"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -408,14 +432,14 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 	}
 
 	var issueNumber int64
-	if h.gitea != nil {
+	if h.tracker != nil {
 		title := fmt.Sprintf("[%s] %s", alert.Labels["alertname"], host)
 		body := fmt.Sprintf(
 			"**分析結果（%s）：**\n\n%s\n\n---\n此 Issue 由 Victoria Gateway 自動建立。調查完後請在關閉前留一則留言說明實際原因/怎麼修的，`victoria-gateway sync` 會把它讀回 RAG 資料庫，供未來類似告警參考。",
 			analyzedBy, result.Summary)
-		n, err := h.gitea.CreateIssue(context.Background(), title, body)
+		n, err := h.tracker.CreateIssue(context.Background(), title, body)
 		if err != nil {
-			log.Printf("aiops: create gitea issue failed, capturing without a linked issue: %v", err)
+			log.Printf("aiops: create issue failed, capturing without a linked issue: %v", err)
 		} else {
 			issueNumber = n
 		}

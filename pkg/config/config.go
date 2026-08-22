@@ -12,13 +12,29 @@ import (
 )
 
 type Config struct {
-	ListenAddr string           `yaml:"listen_addr"` // e.g. ":8090"
-	Loki       LokiConfig       `yaml:"loki"`
-	Summarizer LLMConfig        `yaml:"summarizer"`
-	Cloud      *CloudConfig     `yaml:"cloud"`      // optional: cloud model for escalated alerts
-	Escalation EscalationConfig `yaml:"escalation"` // rules for when to escalate to Cloud
-	RAG        *RAGConfig       `yaml:"rag"`        // optional: past-incident retrieval
-	Telegram   TelegramConfig   `yaml:"telegram"`
+	ListenAddr  string             `yaml:"listen_addr"` // e.g. ":8090"
+	Loki        LokiConfig         `yaml:"loki"`
+	Summarizer  LLMConfig          `yaml:"summarizer"`
+	Cloud       *CloudConfig       `yaml:"cloud"`      // optional: cloud model for escalated alerts
+	Escalation  EscalationConfig   `yaml:"escalation"` // rules for when to escalate to Cloud
+	RAG         *RAGConfig         `yaml:"rag"`        // optional: past-incident retrieval
+	Telegram    TelegramConfig     `yaml:"telegram"`
+	WebhookAuth *WebhookAuthConfig `yaml:"webhook_auth"` // optional: require HTTP Basic Auth on the webhook endpoint
+}
+
+// WebhookAuthConfig, if set, makes the webhook handler require HTTP
+// Basic Auth matching Username/Password on every request. Nothing about
+// POST /webhook/alertmanager is authenticated otherwise — anyone who can
+// reach the port can trigger a full analysis (an LLM call, possibly a
+// cloud escalation, possibly a filed issue). That's an acceptable
+// default on a private/home network, but it's a real exposure if this
+// port is ever reachable from anywhere less trusted, so it's documented
+// as a "turn this on unless you're sure" setting rather than defaulting
+// it on — a default-on secret would just be another thing every existing
+// deployment has to go set to keep working.
+type WebhookAuthConfig struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
 }
 
 // LokiConfig points at the Loki instance to query for context around a
@@ -69,11 +85,13 @@ type RAGConfig struct {
 	EmbeddingModel    string `yaml:"embedding_model"`    // e.g. "bge-m3"
 	TopK              int    `yaml:"top_k"`              // how many past incidents to retrieve; defaults to 3
 
-	// Gitea, if set, makes every analyzed alert file a Gitea issue and
-	// captures a Pending record alongside it (see pkg/rag.Store). Without
-	// it, RAG still works for Search/the `note` CLI, there's just no
-	// automatic capture path — every record has to be added by hand.
-	Gitea *GiteaConfig `yaml:"gitea"`
+	// Gitea/GitHub: at most one should be set. Whichever is, every
+	// analyzed alert files an issue there and captures a Pending record
+	// alongside it (see pkg/rag.Store). With neither set, RAG still works
+	// for Search/the `note` CLI, there's just no automatic capture path —
+	// every record has to be added by hand.
+	Gitea  *GiteaConfig  `yaml:"gitea"`
+	GitHub *GitHubConfig `yaml:"github"`
 }
 
 // GiteaConfig points at the repo Victoria Gateway files one issue per
@@ -84,6 +102,15 @@ type GiteaConfig struct {
 	Token    string `yaml:"token"`
 	Owner    string `yaml:"owner"` // repo owner, e.g. "ops-team"
 	Repo     string `yaml:"repo"`  // e.g. "victoria-gateway-incidents"
+}
+
+// GitHubConfig is the same idea as GiteaConfig, for anyone using GitHub
+// Issues instead of a self-hosted Gitea instance.
+type GitHubConfig struct {
+	Endpoint string `yaml:"endpoint"` // optional; defaults to https://api.github.com (set for GitHub Enterprise)
+	Token    string `yaml:"token"`    // a personal access token with Issues read/write on the target repo
+	Owner    string `yaml:"owner"`
+	Repo     string `yaml:"repo"` // a dedicated repo, not the code repo
 }
 
 // TelegramConfig, if BotToken is set, makes the webhook handler push each

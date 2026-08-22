@@ -18,6 +18,18 @@ That's it — no changes to `route:` needed. Every alert that already reaches
 `yourExistingReceiver` now also hits victoria-gateway in parallel; both
 integrations fire independently, so a failure in one doesn't block the other.
 
+If victoria-gateway's `webhook_auth` is set, add matching `basic_auth` here —
+Alertmanager supports it natively on `webhook_configs`:
+
+```yaml
+      - send_resolved: true
+        url: 'http://victoria-gateway:8090/webhook/alertmanager'
+        http_config:
+          basic_auth:
+            username: 'alertmanager'
+            password: 'REPLACE-same-secret-as-webhook_auth.password'
+```
+
 Reload without a restart:
 
 ```bash
