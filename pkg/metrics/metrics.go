@@ -150,7 +150,10 @@ func (c *Counters) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		for _, d := range c.snapshot() {
-			fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n%s %d\n", d.name, d.help, d.name, d.name, d.val)
+			// A write failure here just means the client went away
+			// mid-scrape; nothing useful to do about it, and the next
+			// scrape interval will just try again.
+			_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n%s %d\n", d.name, d.help, d.name, d.name, d.val)
 		}
 	})
 }

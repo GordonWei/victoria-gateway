@@ -39,7 +39,7 @@ func runNote(args []string) {
 	logExcerpt := fs.String("log-excerpt", "", "a relevant log excerpt, for your own future reference (optional)")
 	summary := fs.String("summary", "", "the AI-generated summary at the time, if you have it (optional)")
 	resolution := fs.String("resolution", "", "what it actually turned out to be and/or how it was fixed (required)")
-	fs.Parse(args)
+	_ = fs.Parse(args) // flag.ExitOnError already exits the process on a parse error
 
 	if *resolution == "" || (*id == 0 && *alertName == "") {
 		fmt.Fprintln(os.Stderr, "❌ --resolution is required, and either --id or --alert-name")
@@ -66,7 +66,7 @@ func runNote(args []string) {
 		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

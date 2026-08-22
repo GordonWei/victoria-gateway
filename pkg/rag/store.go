@@ -90,7 +90,7 @@ func OpenPostgres(dsn string) (*PGStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 	return &PGStore{db: db}, nil
@@ -145,7 +145,7 @@ func (s *PGStore) Search(ctx context.Context, embedding []float32, topK int) ([]
 	if err != nil {
 		return nil, fmt.Errorf("rag search query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []Record
 	for rows.Next() {
@@ -218,7 +218,7 @@ func (s *PGStore) PendingWithGiteaIssue(ctx context.Context) ([]Record, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rag pending query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []Record
 	for rows.Next() {

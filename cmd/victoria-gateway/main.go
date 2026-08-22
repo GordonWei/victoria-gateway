@@ -56,7 +56,7 @@ func runServe(args []string) {
 	}
 	fs.StringVar(&configPath, "config", configPath, "path to config.yaml")
 	port := fs.String("port", "", "override listen port, e.g. 8090 (defaults to config's listen_addr)")
-	fs.Parse(args)
+	_ = fs.Parse(args) // flag.ExitOnError already exits the process on a parse error
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -135,7 +135,7 @@ func runServe(args []string) {
 			fmt.Fprintf(os.Stderr, "❌ rag: %v\n", err)
 			os.Exit(1)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		h.rag = store
 		h.ragEmbedder = rag.NewEmbedder(cfg.RAG.EmbeddingEndpoint, cfg.RAG.EmbeddingModel, cfg.RAG.EmbeddingAPIKey)
 		h.ragTopK = cfg.RAG.TopK
@@ -321,7 +321,7 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 		http.Error(w, fmt.Sprintf("read body: %v", err), http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	payload, err := aiops.ParseWebhook(body)
 	if err != nil {

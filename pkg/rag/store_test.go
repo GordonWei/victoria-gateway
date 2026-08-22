@@ -29,7 +29,7 @@ func newMockStore(t *testing.T) (*PGStore, sqlmock.Sqlmock) {
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 	return &PGStore{db: db}, mock
 }
 

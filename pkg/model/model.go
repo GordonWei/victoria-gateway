@@ -127,7 +127,7 @@ func (c *OpenAIClient) Chat(messages []Message, opts *ChatOptions) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("request to %s failed: %w", c.backend, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -155,7 +155,7 @@ func (c *OpenAIClient) Available() bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return resp.StatusCode == 200
 }
 
@@ -281,7 +281,7 @@ func (c *AnthropicClient) Chat(messages []Message, opts *ChatOptions) (string, e
 	if err != nil {
 		return "", fmt.Errorf("request to anthropic failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -321,7 +321,7 @@ func (c *AnthropicClient) Available() bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return true
 }
 
@@ -450,7 +450,7 @@ func (c *GeminiClient) Chat(messages []Message, opts *ChatOptions) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("request to gemini failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -489,7 +489,7 @@ func (c *GeminiClient) Available() bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode == 200
 }
 

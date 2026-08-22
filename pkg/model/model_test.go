@@ -23,12 +23,12 @@ func TestOpenAIClient_Chat(t *testing.T) {
 				},
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 			return
 		}
 		if r.URL.Path == "/v1/models" {
 			w.WriteHeader(200)
-			w.Write([]byte(`{"data":[]}`))
+			_, _ = w.Write([]byte(`{"data":[]}`))
 			return
 		}
 		w.WriteHeader(404)
@@ -73,7 +73,7 @@ func TestOpenAIClient_NoAPIKey_SendsNoAuthorizationHeader(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		w.WriteHeader(200)
-		w.Write([]byte(`{"data":[]}`))
+		_, _ = w.Write([]byte(`{"data":[]}`))
 	}))
 	defer server.Close()
 
@@ -91,13 +91,13 @@ func TestOpenAIClient_APIKey_SendsBearerAuthorizationHeader(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		if r.URL.Path == "/v1/chat/completions" {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"choices": []map[string]any{{"message": map[string]string{"content": "ok"}}},
 			})
 			return
 		}
 		w.WriteHeader(200)
-		w.Write([]byte(`{"data":[]}`))
+		_, _ = w.Write([]byte(`{"data":[]}`))
 	}))
 	defer server.Close()
 
@@ -140,7 +140,7 @@ func TestOpenAIClient_ChatOptions(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/chat/completions" {
-			json.NewDecoder(r.Body).Decode(&receivedBody)
+			_ = json.NewDecoder(r.Body).Decode(&receivedBody)
 			resp := openAIResponse{
 				Choices: []struct {
 					Message struct {
@@ -152,7 +152,7 @@ func TestOpenAIClient_ChatOptions(t *testing.T) {
 					}{Content: "ok"}},
 				},
 			}
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 			return
 		}
 	}))
@@ -224,7 +224,7 @@ func TestOpenAIClient_ChatError(t *testing.T) {
 func TestOpenAIClient_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
-		w.Write([]byte("internal server error"))
+		_, _ = w.Write([]byte("internal server error"))
 	}))
 	defer server.Close()
 
@@ -246,7 +246,7 @@ func TestOpenAIClient_ServerError(t *testing.T) {
 func TestOpenAIClient_EmptyChoices(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"choices":[]}`))
+		_, _ = w.Write([]byte(`{"choices":[]}`))
 	}))
 	defer server.Close()
 
@@ -282,7 +282,7 @@ func TestAnthropicClient_Chat(t *testing.T) {
 			t.Fatalf("decode request body: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(anthropicResponse{
+		_ = json.NewEncoder(w).Encode(anthropicResponse{
 			Content: []struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
@@ -345,7 +345,7 @@ func TestAnthropicClient_DefaultEndpoint(t *testing.T) {
 func TestAnthropicClient_ErrorStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
-		w.Write([]byte(`{"error":{"message":"invalid x-api-key"}}`))
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid x-api-key"}}`))
 	}))
 	defer server.Close()
 
@@ -359,7 +359,7 @@ func TestAnthropicClient_ErrorStatus(t *testing.T) {
 func TestAnthropicClient_NoTextContent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(anthropicResponse{})
+		_ = json.NewEncoder(w).Encode(anthropicResponse{})
 	}))
 	defer server.Close()
 
@@ -396,7 +396,7 @@ func TestGeminiClient_Chat(t *testing.T) {
 			t.Fatalf("decode request body: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"candidates": []map[string]any{
 				{"content": map[string]any{"parts": []map[string]string{{"text": "gemini reply"}}}},
 			},
@@ -448,9 +448,9 @@ func TestGeminiClient_Chat(t *testing.T) {
 func TestGeminiClient_AssistantRoleMappedToModel(t *testing.T) {
 	var receivedBody geminiRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&receivedBody)
+		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"candidates": []map[string]any{{"content": map[string]any{"parts": []map[string]string{{"text": "ok"}}}}},
 		})
 	}))
@@ -479,7 +479,7 @@ func TestGeminiClient_DefaultEndpoint(t *testing.T) {
 func TestGeminiClient_ErrorStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
-		w.Write([]byte(`{"error":{"message":"invalid API key"}}`))
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key"}}`))
 	}))
 	defer server.Close()
 
@@ -493,7 +493,7 @@ func TestGeminiClient_ErrorStatus(t *testing.T) {
 func TestGeminiClient_NoCandidates(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(geminiResponse{})
+		_ = json.NewEncoder(w).Encode(geminiResponse{})
 	}))
 	defer server.Close()
 
@@ -521,7 +521,7 @@ func TestGeminiClient_Available(t *testing.T) {
 		receivedPath = r.URL.Path
 		receivedAPIKey = r.Header.Get("x-goog-api-key")
 		w.WriteHeader(200)
-		w.Write([]byte(`{"models":[]}`))
+		_, _ = w.Write([]byte(`{"models":[]}`))
 	}))
 	defer server.Close()
 

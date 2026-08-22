@@ -16,12 +16,12 @@ func TestEmbedder_Embed(t *testing.T) {
 		}
 		receivedAuth = r.Header.Get("Authorization")
 		var req embeddingRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		receivedModel = req.Model
 		receivedInput = req.Input
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(embeddingResponse{
+		_ = json.NewEncoder(w).Encode(embeddingResponse{
 			Data: []struct {
 				Embedding []float32 `json:"embedding"`
 			}{{Embedding: []float32{0.1, 0.2, 0.3}}},
@@ -51,7 +51,7 @@ func TestEmbedder_Embed(t *testing.T) {
 func TestEmbedder_Embed_EmptyResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(embeddingResponse{})
+		_ = json.NewEncoder(w).Encode(embeddingResponse{})
 	}))
 	defer server.Close()
 
@@ -85,7 +85,7 @@ func TestEmbedder_Embed_SendsAPIKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(embeddingResponse{
+		_ = json.NewEncoder(w).Encode(embeddingResponse{
 			Data: []struct {
 				Embedding []float32 `json:"embedding"`
 			}{{Embedding: []float32{0.1}}},

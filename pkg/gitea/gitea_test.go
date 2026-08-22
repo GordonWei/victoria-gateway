@@ -16,9 +16,9 @@ func TestCreateIssue(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
 		receivedAuth = r.Header.Get("Authorization")
-		json.NewDecoder(r.Body).Decode(&receivedBody)
+		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(Issue{Number: 42, State: "open", Title: "test"})
+		_ = json.NewEncoder(w).Encode(Issue{Number: 42, State: "open", Title: "test"})
 	}))
 	defer server.Close()
 
@@ -44,7 +44,7 @@ func TestCreateIssue(t *testing.T) {
 func TestCreateIssue_Error(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
-		w.Write([]byte(`{"message":"token does not have required scope"}`))
+		_, _ = w.Write([]byte(`{"message":"token does not have required scope"}`))
 	}))
 	defer server.Close()
 
@@ -59,7 +59,7 @@ func TestGetIssue(t *testing.T) {
 		if r.URL.Path != "/api/v1/repos/ops-team/victoria-gateway-incidents/issues/7" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(Issue{Number: 7, State: "closed", Title: "InstanceDown"})
+		_ = json.NewEncoder(w).Encode(Issue{Number: 7, State: "closed", Title: "InstanceDown"})
 	}))
 	defer server.Close()
 
@@ -77,7 +77,7 @@ func TestLastComment(t *testing.T) {
 	var gotQuery string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.RawQuery
-		json.NewEncoder(w).Encode([]comment{
+		_ = json.NewEncoder(w).Encode([]comment{
 			{Body: "investigating"},
 			{Body: "舊測試機殘留 target，已下線"},
 		})
@@ -99,7 +99,7 @@ func TestLastComment(t *testing.T) {
 
 func TestLastComment_None(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]comment{})
+		_ = json.NewEncoder(w).Encode([]comment{})
 	}))
 	defer server.Close()
 

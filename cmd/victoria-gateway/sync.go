@@ -30,7 +30,7 @@ func runSync(args []string) {
 		configPath = "/etc/victoria-gateway/config.yaml"
 	}
 	fs.StringVar(&configPath, "config", configPath, "path to config.yaml")
-	fs.Parse(args)
+	_ = fs.Parse(args) // flag.ExitOnError already exits the process on a parse error
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -61,7 +61,7 @@ func runSync(args []string) {
 		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

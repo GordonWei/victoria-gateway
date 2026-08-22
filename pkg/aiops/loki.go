@@ -50,7 +50,7 @@ func (c *Client) QueryRange(host string, start, end time.Time, limit int) ([]Log
 	if err != nil {
 		return nil, fmt.Errorf("loki: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

@@ -33,7 +33,7 @@ func TestQueryRange_Success(t *testing.T) {
 			t.Errorf("unexpected query param: %s", q)
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fixture))
+		_, _ = w.Write([]byte(fixture))
 	}))
 	defer srv.Close()
 
@@ -67,7 +67,7 @@ func TestQueryRange_EmptyResult(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fixture))
+		_, _ = w.Write([]byte(fixture))
 	}))
 	defer srv.Close()
 
@@ -87,7 +87,7 @@ func TestQueryRange_EmptyResult(t *testing.T) {
 func TestQueryRange_HTTP500(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"status":"error","message":"internal server error"}`))
+		_, _ = w.Write([]byte(`{"status":"error","message":"internal server error"}`))
 	}))
 	defer srv.Close()
 
@@ -112,7 +112,7 @@ func TestQueryRange_HTTP500(t *testing.T) {
 func TestQueryRange_HTTP200_StatusError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"error","data":{"resultType":"streams","result":[]}}`))
+		_, _ = w.Write([]byte(`{"status":"error","data":{"resultType":"streams","result":[]}}`))
 	}))
 	defer srv.Close()
 

@@ -29,7 +29,7 @@ func newFakeLoki(t *testing.T) *httptest.Server {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"success","data":{"resultType":"streams","result":[{"stream":{"host":"test-host"},"values":[["%d","cpu at 97%%"]]}]}}`,
+		_, _ = fmt.Fprintf(w, `{"status":"success","data":{"resultType":"streams","result":[{"stream":{"host":"test-host"},"values":[["%d","cpu at 97%%"]]}]}}`,
 			time.Now().UnixNano())
 	}))
 }
@@ -40,7 +40,7 @@ func newFakeLLM(t *testing.T, reply string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{
 				{"message": map[string]string{"content": reply}},
 			},
@@ -200,7 +200,7 @@ func newFakeCloud(t *testing.T, reply string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"content": []map[string]string{{"type": "text", "text": reply}},
 		})
 	}))
@@ -376,14 +376,14 @@ func TestSummarizeOne_RAGContext_InjectedIntoPrompt(t *testing.T) {
 		var body struct {
 			Messages []model.Message `json:"messages"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		for _, m := range body.Messages {
 			if m.Role == "user" {
 				receivedPrompt = m.Content
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{"message": map[string]string{"content": `{"summary":"ok","confidence":"high","escalate":false,"reason":"x"}`}}},
 		})
 	}))
@@ -391,7 +391,7 @@ func TestSummarizeOne_RAGContext_InjectedIntoPrompt(t *testing.T) {
 
 	embedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]any{{"embedding": []float32{0.1, 0.2}}},
 		})
 	}))
@@ -453,7 +453,7 @@ func TestSummarizeOne_CapturesPendingRecord(t *testing.T) {
 	defer llmSrv.Close()
 	embedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1}}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1}}}})
 	}))
 	defer embedSrv.Close()
 
@@ -487,7 +487,7 @@ func TestSummarizeOne_CapturesWithGiteaIssue(t *testing.T) {
 	defer llmSrv.Close()
 	embedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1}}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1}}}})
 	}))
 	defer embedSrv.Close()
 	var createdTitle string
@@ -495,9 +495,9 @@ func TestSummarizeOne_CapturesWithGiteaIssue(t *testing.T) {
 		var body struct {
 			Title string `json:"title"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		createdTitle = body.Title
-		json.NewEncoder(w).Encode(gitea.Issue{Number: 7, State: "open"})
+		_ = json.NewEncoder(w).Encode(gitea.Issue{Number: 7, State: "open"})
 	}))
 	defer giteaSrv.Close()
 
@@ -529,7 +529,7 @@ func TestSummarizeOne_GiteaCreateFails_StillCapturesPending(t *testing.T) {
 	defer llmSrv.Close()
 	embedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1}}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1}}}})
 	}))
 	defer embedSrv.Close()
 
@@ -592,7 +592,7 @@ func TestHandleAlertmanagerWebhook_DuplicateFingerprint_OnlyProcessedOnce(t *tes
 	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&llmCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{"message": map[string]string{"content": `{"summary":"ok","confidence":"high","escalate":false,"reason":"x"}`}}},
 		})
 	}))
@@ -627,7 +627,7 @@ func TestHandleAlertmanagerWebhook_DifferentFingerprints_BothProcessed(t *testin
 	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&llmCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{"message": map[string]string{"content": `{"summary":"ok","confidence":"high","escalate":false,"reason":"x"}`}}},
 		})
 	}))
@@ -691,7 +691,7 @@ func TestHandleAlertmanagerWebhook_ResolvedThenRefired_ProcessedAsNewEpisode(t *
 	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&llmCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{"message": map[string]string{"content": `{"summary":"ok","confidence":"high","escalate":false,"reason":"x"}`}}},
 		})
 	}))
@@ -883,7 +883,7 @@ func TestHandleAlertmanagerWebhook_MultipleAlerts_ProcessedConcurrently(t *testi
 	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(perCallDelay)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{"message": map[string]string{"content": `{"summary":"ok","confidence":"high","escalate":false,"reason":"x"}`}}},
 		})
 	}))

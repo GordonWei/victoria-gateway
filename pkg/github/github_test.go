@@ -17,9 +17,9 @@ func TestCreateIssue(t *testing.T) {
 		receivedPath = r.URL.Path
 		receivedAuth = r.Header.Get("Authorization")
 		receivedAccept = r.Header.Get("Accept")
-		json.NewDecoder(r.Body).Decode(&receivedBody)
+		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(issue{Number: 42, State: "open"})
+		_ = json.NewEncoder(w).Encode(issue{Number: 42, State: "open"})
 	}))
 	defer server.Close()
 
@@ -48,7 +48,7 @@ func TestCreateIssue(t *testing.T) {
 func TestCreateIssue_Error(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
-		w.Write([]byte(`{"message":"Resource not accessible by personal access token"}`))
+		_, _ = w.Write([]byte(`{"message":"Resource not accessible by personal access token"}`))
 	}))
 	defer server.Close()
 
@@ -63,7 +63,7 @@ func TestIssueState(t *testing.T) {
 		if r.URL.Path != "/repos/gordon/victoria-gateway-incidents/issues/7" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(issue{Number: 7, State: "closed"})
+		_ = json.NewEncoder(w).Encode(issue{Number: 7, State: "closed"})
 	}))
 	defer server.Close()
 
@@ -85,7 +85,7 @@ func TestLastComment(t *testing.T) {
 		// would return exactly one comment, the newest — the mock does the
 		// same rather than returning a full list for LastComment to pick
 		// from, so this test exercises the actual contract being relied on.
-		json.NewEncoder(w).Encode([]comment{
+		_ = json.NewEncoder(w).Encode([]comment{
 			{Body: "舊測試機殘留 target，已下線"},
 		})
 	}))
@@ -108,7 +108,7 @@ func TestLastComment(t *testing.T) {
 
 func TestLastComment_None(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]comment{})
+		_ = json.NewEncoder(w).Encode([]comment{})
 	}))
 	defer server.Close()
 
