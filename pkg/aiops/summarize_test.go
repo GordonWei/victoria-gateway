@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gordonwei/orch-gateway/pkg/model"
+	"github.com/gordonwei/victoria-gateway/pkg/model"
 )
 
 func TestParseSummarizeReply_ValidJSON(t *testing.T) {

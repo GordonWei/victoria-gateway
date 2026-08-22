@@ -2,7 +2,7 @@
 // operator record what a past alert actually turned out to be) so the
 // summarizer prompt can be grounded in real prior experience instead of
 // starting from nothing every time. It's entirely optional — see
-// config.RAGConfig.Enabled — and orch-gateway runs exactly as it did
+// config.RAGConfig.Enabled — and victoria-gateway runs exactly as it did
 // before this package existed when it's off.
 package rag
 

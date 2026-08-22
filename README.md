@@ -1,4 +1,4 @@
-# orch-gateway
+# Victoria Gateway
 
 An Alertmanager webhook receiver: on each incoming alert, it pulls the
 surrounding Loki logs for the alerting host, asks a local OpenAI-compatible
@@ -13,7 +13,7 @@ silently discarded.
 ## How it works
 
 ```
-Alertmanager --webhook--> orch-gateway --query--> Loki
+Alertmanager --webhook--> victoria-gateway --query--> Loki
                                |
                                v
                        LLM (summarize)
@@ -67,7 +67,7 @@ container-specific comments (including the two optional sections below).
 
 The local model is fast and free, but it's a small quantized model — it can
 misdiagnose alerts that need broader reasoning or turn up nothing when a
-host's logs don't cover the real cause. Add a `cloud` block and orch-gateway
+host's logs don't cover the real cause. Add a `cloud` block and victoria-gateway
 can re-run the analysis against a stronger cloud model for alerts that need
 it, while everything else still stays local. Gemini is the default provider
 (`pkg/model.GeminiClient`); Anthropic is also supported
@@ -109,7 +109,7 @@ no `cloud` configured is a startup error rather than a silent no-op.
 
 ## RAG: grounding the summary in past incidents
 
-Optional, and off by default. When enabled, orch-gateway embeds each new
+Optional, and off by default. When enabled, victoria-gateway embeds each new
 alert and searches a Postgres+pgvector store for similar past incidents,
 inserting whatever it finds into the prompt as reference context (both the
 local and any escalated cloud call see it).
@@ -136,7 +136,7 @@ Setup, once, before turning this on:
    served (the same LM Studio/Ollama/vLLM instance `summarizer` uses is
    fine, as long as it also has an embedding model loaded).
 
-**The store starts empty on purpose.** orch-gateway never writes to it
+**The store starts empty on purpose.** victoria-gateway never writes to it
 automatically — an LLM's own guess about an alert isn't confirmed truth,
 and seeding the store with unconfirmed guesses risks a wrong guess getting
 retrieved and repeated later. The only way a record gets in is the `note`
@@ -144,7 +144,7 @@ subcommand, run by a human after they've actually confirmed what an alert
 turned out to be:
 
 ```bash
-orch-gateway note \
+victoria-gateway note \
   --alert-name "InstanceDown" \
   --host "192.0.2.7" \
   --resolution "舊測試機殘留的 scrape target，機器已下線，從 node.yml 拿掉了" \
@@ -154,7 +154,7 @@ orch-gateway note \
 
 `--alert-name` and `--resolution` are required; everything else is optional
 context. This reads the same `config.yaml` as the server (`--config` flag or
-`$ORCH_GATEWAY_CONFIG`) and needs `rag.enabled: true` with all three RAG
+`$VICTORIA_GATEWAY_CONFIG`) and needs `rag.enabled: true` with all three RAG
 fields set — it's meant to be run on whatever host can reach the Postgres
 and embedding endpoint, not necessarily the deployment host itself.
 
@@ -175,16 +175,16 @@ stay up.
 ## Running
 
 ```bash
-go build -o orch-gateway ./cmd/orch-gateway/
-ORCH_GATEWAY_CONFIG=./config.yaml ./orch-gateway
+go build -o victoria-gateway ./cmd/victoria-gateway/
+VICTORIA_GATEWAY_CONFIG=./config.yaml ./victoria-gateway
 ```
 
-Config path resolution: `--config <path>` flag, else `$ORCH_GATEWAY_CONFIG`,
-else `/etc/orch-gateway/config.yaml`. `--port <n>` overrides `listen_addr`
+Config path resolution: `--config <path>` flag, else `$VICTORIA_GATEWAY_CONFIG`,
+else `/etc/victoria-gateway/config.yaml`. `--port <n>` overrides `listen_addr`
 from the config file if you need to override it without editing the file.
 
 ```bash
-./orch-gateway --config ./config.yaml --port 9000
+./victoria-gateway --config ./config.yaml --port 9000
 ```
 
 `GET /healthz` returns `200 ok` once the process is up — use it for a
@@ -193,7 +193,7 @@ container healthcheck or a quick "is this running" check.
 Or via Docker — see `Dockerfile` and `deploy/`:
 
 ```bash
-docker build -t orch-gateway:latest .
+docker build -t victoria-gateway:latest .
 ```
 
 `deploy/docker-compose.snippet.yml` has the service block to add to an

@@ -4,26 +4,26 @@
 #
 # Before copying in:
 #   1. Build the image on that host directly (it's plain amd64 Linux, no
-#      cross-compilation needed): `docker build -t orch-gateway:latest .`
+#      cross-compilation needed): `docker build -t victoria-gateway:latest .`
 #      from this repo's root.
 #   2. Copy deploy/config.docker.yaml to that host (e.g.
-#      /container/monitor/orch-gateway/config.yaml) and fill in the
+#      /container/monitor/victoria-gateway/config.yaml) and fill in the
 #      REPLACE-marked fields with real values (Loki endpoint, LLM
 #      endpoint/model, Telegram bot token/chat_id).
 
 services:
-  orch-gateway:
-    image: orch-gateway:latest
-    container_name: orch-gateway
+  victoria-gateway:
+    image: victoria-gateway:latest
+    container_name: victoria-gateway
     restart: unless-stopped
     networks:
       - monitor   # same network Loki/Prometheus/Alertmanager are on
     volumes:
-      - ./orch-gateway/config.yaml:/etc/orch-gateway/config.yaml:ro
+      - ./victoria-gateway/config.yaml:/etc/victoria-gateway/config.yaml:ro
     ports:
       # Published so it can be curled directly for testing
       # (curl http://<host>:8090/webhook/alertmanager). Alertmanager itself
       # reaches this over the `monitor` network by service name
-      # (http://orch-gateway:8090/webhook/alertmanager) and doesn't need
+      # (http://victoria-gateway:8090/webhook/alertmanager) and doesn't need
       # this mapping — drop it if you don't want the port exposed on the host.
       - "8090:8090"

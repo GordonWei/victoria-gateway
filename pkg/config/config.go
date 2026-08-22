@@ -1,4 +1,4 @@
-// Package config loads orch-gateway's YAML config. This service does one
+// Package config loads victoria-gateway's YAML config. This service does one
 // thing: receive Alertmanager webhooks, pull the surrounding Loki logs, ask
 // an OpenAI-compatible LLM endpoint to summarize what happened, and push
 // that summary to Telegram. The config shape is flat and matches that.
@@ -59,7 +59,7 @@ type EscalationConfig struct {
 }
 
 // RAGConfig controls optional retrieval of past incidents to ground the
-// summarizer prompt. Nil (or Enabled: false) means orch-gateway behaves
+// summarizer prompt. Nil (or Enabled: false) means victoria-gateway behaves
 // exactly as it did before this existed — RAG is opt-in, not a
 // requirement to run the service.
 type RAGConfig struct {

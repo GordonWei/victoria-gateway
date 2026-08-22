@@ -12,7 +12,7 @@ import (
 )
 
 // Record is one incident: an alert, the log context and summary it had at
-// the time, and — once someone runs `orch-gateway note` — the resolution
+// the time, and — once someone runs `victoria-gateway note` — the resolution
 // that was later confirmed. Resolution is what makes a record useful to
 // retrieve later; Summary/LogExcerpt are kept for the operator's own
 // reference when writing that resolution, not treated as ground truth.
@@ -28,7 +28,7 @@ type Record struct {
 
 // Store is the persistence boundary rag talks to. It's an interface so
 // the retrieval/formatting logic in this package (and the handler wiring
-// in cmd/orch-gateway) can be unit tested against a fake without a real
+// in cmd/victoria-gateway) can be unit tested against a fake without a real
 // Postgres — PGStore is the only production implementation.
 type Store interface {
 	// Search returns up to topK past records most similar to embedding,

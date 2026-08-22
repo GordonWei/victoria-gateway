@@ -1,4 +1,4 @@
-module github.com/gordonwei/orch-gateway
+module github.com/gordonwei/victoria-gateway
 
 go 1.25.0
 

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gordonwei/orch-gateway/pkg/model"
+	"github.com/gordonwei/victoria-gateway/pkg/model"
 )
 
 // maxLogLinesInPrompt caps how many log lines get sent to the LLM. Local
@@ -74,7 +74,7 @@ func (s *Summarizer) Summarize(alert Alert, logs []LogEntry, ragContext string) 
 
 // SummarizeWithLLM runs the same prompt against an arbitrary LLM backend.
 // It's a package-level function rather than a Summarizer method so the
-// triage escalation path (cmd/orch-gateway's handler) can reuse the exact
+// triage escalation path (cmd/victoria-gateway's handler) can reuse the exact
 // same prompt-building and JSON-parsing logic against a cloud model
 // without needing a second Summarizer instance wrapping it.
 func SummarizeWithLLM(llm model.LLM, alert Alert, logs []LogEntry, ragContext string) (SummarizeResult, error) {

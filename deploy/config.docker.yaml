@@ -1,4 +1,4 @@
-# orch-gateway config. Mounted read-only at /etc/orch-gateway/config.yaml —
+# victoria-gateway config. Mounted read-only at /etc/victoria-gateway/config.yaml —
 # see docker-compose.snippet.yml. Fill in every REPLACE marker before use.
 
 listen_addr: ":8090"

@@ -1,10 +1,10 @@
-// Command orch-gateway is an HTTP server that receives Alertmanager
+// Command victoria-gateway is an HTTP server that receives Alertmanager
 // webhooks, pulls the surrounding Loki logs for the alerting host, asks a
 // local LLM to summarize what's going on, and pushes that summary to
 // Telegram. See pkg/aiops and config.yaml.
 //
-// Two entry points share this binary: `orch-gateway [flags]` (default)
-// runs the server; `orch-gateway note [flags]` records a confirmed
+// Two entry points share this binary: `victoria-gateway [flags]` (default)
+// runs the server; `victoria-gateway note [flags]` records a confirmed
 // incident resolution into the RAG store — see note.go.
 package main
 
@@ -20,10 +20,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/gordonwei/orch-gateway/pkg/aiops"
-	"github.com/gordonwei/orch-gateway/pkg/config"
-	"github.com/gordonwei/orch-gateway/pkg/model"
-	"github.com/gordonwei/orch-gateway/pkg/rag"
+	"github.com/gordonwei/victoria-gateway/pkg/aiops"
+	"github.com/gordonwei/victoria-gateway/pkg/config"
+	"github.com/gordonwei/victoria-gateway/pkg/model"
+	"github.com/gordonwei/victoria-gateway/pkg/rag"
 )
 
 func main() {
@@ -35,10 +35,10 @@ func main() {
 }
 
 func runServe(args []string) {
-	fs := flag.NewFlagSet("orch-gateway", flag.ExitOnError)
-	configPath := os.Getenv("ORCH_GATEWAY_CONFIG")
+	fs := flag.NewFlagSet("victoria-gateway", flag.ExitOnError)
+	configPath := os.Getenv("VICTORIA_GATEWAY_CONFIG")
 	if configPath == "" {
-		configPath = "/etc/orch-gateway/config.yaml"
+		configPath = "/etc/victoria-gateway/config.yaml"
 	}
 	fs.StringVar(&configPath, "config", configPath, "path to config.yaml")
 	port := fs.String("port", "", "override listen port, e.g. 8090 (defaults to config's listen_addr)")
@@ -151,7 +151,7 @@ func runServe(args []string) {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	fmt.Printf("🚀 orch-gateway listening on %s (POST /webhook/alertmanager)\n", addr)
+	fmt.Printf("🚀 victoria-gateway listening on %s (POST /webhook/alertmanager)\n", addr)
 	fmt.Printf("   loki: %s | summarizer: %s (%s) | telegram: %v | cloud: %v | rag: %v\n",
 		cfg.Loki.Endpoint, cfg.Summarizer.Endpoint, cfg.Summarizer.Model, telegram.Enabled(), cloud != nil, ragEnabled)
 	if err := http.ListenAndServe(addr, mux); err != nil {

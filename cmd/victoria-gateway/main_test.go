@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gordonwei/orch-gateway/pkg/aiops"
-	"github.com/gordonwei/orch-gateway/pkg/config"
-	"github.com/gordonwei/orch-gateway/pkg/model"
-	"github.com/gordonwei/orch-gateway/pkg/rag"
+	"github.com/gordonwei/victoria-gateway/pkg/aiops"
+	"github.com/gordonwei/victoria-gateway/pkg/config"
+	"github.com/gordonwei/victoria-gateway/pkg/model"
+	"github.com/gordonwei/victoria-gateway/pkg/rag"
 )
 
 // newFakeLoki returns an httptest server that answers Loki's query_range

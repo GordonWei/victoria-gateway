@@ -7,7 +7,7 @@ import (
 
 // BuildQueryText turns an alert (plus a little log context) into the text
 // that gets embedded for a similarity search. It's deliberately similar
-// in shape to what `orch-gateway note` embeds for a stored record
+// in shape to what `victoria-gateway note` embeds for a stored record
 // (alert name + host + a log/description snippet) — a query and the
 // records it's meant to match need to live in the same "kind of text"
 // for cosine similarity to mean anything.

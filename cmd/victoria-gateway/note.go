@@ -7,22 +7,22 @@ import (
 	"os"
 	"time"
 
-	"github.com/gordonwei/orch-gateway/pkg/config"
-	"github.com/gordonwei/orch-gateway/pkg/rag"
+	"github.com/gordonwei/victoria-gateway/pkg/config"
+	"github.com/gordonwei/victoria-gateway/pkg/rag"
 )
 
-// runNote implements `orch-gateway note`: an operator confirms what a
+// runNote implements `victoria-gateway note`: an operator confirms what a
 // past alert actually turned out to be, and that gets embedded + stored
 // in the RAG database for future alerts to retrieve as reference. This is
-// the only way records get into the store — orch-gateway itself never
+// the only way records get into the store — victoria-gateway itself never
 // writes one automatically, on purpose: an LLM's own guess about an
 // alert isn't confirmed truth, and seeding the store with unconfirmed
 // guesses risks reinforcing wrong ones. See pkg/rag and schema.sql.
 func runNote(args []string) {
-	fs := flag.NewFlagSet("orch-gateway note", flag.ExitOnError)
-	configPath := os.Getenv("ORCH_GATEWAY_CONFIG")
+	fs := flag.NewFlagSet("victoria-gateway note", flag.ExitOnError)
+	configPath := os.Getenv("VICTORIA_GATEWAY_CONFIG")
 	if configPath == "" {
-		configPath = "/etc/orch-gateway/config.yaml"
+		configPath = "/etc/victoria-gateway/config.yaml"
 	}
 	fs.StringVar(&configPath, "config", configPath, "path to config.yaml")
 	alertName := fs.String("alert-name", "", "the alertname this note is about (required)")
