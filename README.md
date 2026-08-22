@@ -73,6 +73,7 @@ loki:
 summarizer:
   endpoint: "http://your-llm-host:1234"   # OpenAI-compatible /v1/chat/completions
   model: "your-model-name"
+  # api_key: ""   # optional; only for a real cloud endpoint requiring auth, see below
 
 telegram:
   bot_token: ""   # leave empty to disable the push
@@ -83,6 +84,15 @@ telegram:
 on startup if either is missing. Everything else has a default or is
 optional. See `deploy/config.docker.yaml` for the same shape with
 container-specific comments (including the optional sections below).
+
+`summarizer` is normally an unauthenticated local server, but
+`summarizer.api_key` lets it be a real cloud OpenAI-compatible endpoint
+instead — sent as `Authorization: Bearer <key>`. Useful if a local backend
+is too slow or unreliable and you'd rather every alert go straight to cloud,
+not just escalated ones (see Triage below). Gemini exposes an
+OpenAI-compatible layer at
+`https://generativelanguage.googleapis.com/v1beta/openai` that works here
+with the same API key used for `cloud.api_key`.
 
 ### Securing the webhook
 

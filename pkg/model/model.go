@@ -41,6 +41,7 @@ type OpenAIClient struct {
 	endpoint string
 	model    string
 	backend  string
+	apiKey   string // empty for unauthenticated local servers (LM Studio, Ollama, ...)
 	client   *http.Client
 }
 
@@ -48,7 +49,13 @@ type OpenAIClientConfig struct {
 	Endpoint string // e.g., "http://localhost:8080"
 	Model    string // e.g., "mlx-community/Qwen2.5-3B-Instruct-4bit"
 	Backend  string // e.g., "mlx", "ollama", "lm-studio"
-	Timeout  time.Duration
+	// APIKey is optional and sent as "Authorization: Bearer <key>" when
+	// set. Local backends (LM Studio, Ollama, vLLM on a private network)
+	// typically don't need one; a real cloud OpenAI-compatible endpoint
+	// (OpenAI itself, a LiteLLM proxy, Gemini's OpenAI-compatibility
+	// layer at generativelanguage.googleapis.com/v1beta/openai) does.
+	APIKey  string
+	Timeout time.Duration
 }
 
 func NewOpenAIClient(cfg OpenAIClientConfig) *OpenAIClient {
@@ -66,8 +73,26 @@ func NewOpenAIClient(cfg OpenAIClientConfig) *OpenAIClient {
 		endpoint: cfg.Endpoint,
 		model:    cfg.Model,
 		backend:  backend,
+		apiKey:   cfg.APIKey,
 		client:   &http.Client{Timeout: timeout},
 	}
+}
+
+// newRequest builds an HTTP request against this client's endpoint,
+// attaching the Authorization header when apiKey is set. Both Chat and
+// Available need this, so it's shared rather than duplicated.
+func (c *OpenAIClient) newRequest(method, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, c.endpoint+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return req, nil
 }
 
 func (c *OpenAIClient) Chat(messages []Message, opts *ChatOptions) (string, error) {
@@ -94,7 +119,11 @@ func (c *OpenAIClient) Chat(messages []Message, opts *ChatOptions) (string, erro
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	resp, err := c.client.Post(c.endpoint+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	req, err := c.newRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build request to %s: %w", c.backend, err)
+	}
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request to %s failed: %w", c.backend, err)
 	}
@@ -118,7 +147,11 @@ func (c *OpenAIClient) Chat(messages []Message, opts *ChatOptions) (string, erro
 }
 
 func (c *OpenAIClient) Available() bool {
-	resp, err := c.client.Get(c.endpoint + "/v1/models")
+	req, err := c.newRequest(http.MethodGet, "/v1/models", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return false
 	}

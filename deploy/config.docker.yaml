@@ -23,6 +23,14 @@ summarizer:
   # reachable by container/service name unless it's on the same docker network.
   endpoint: "http://REPLACE-llm-host:1234"
   model: "REPLACE-model-name"
+  # Optional. Only needed if `endpoint` above is a real cloud OpenAI-compatible
+  # API rather than an unauthenticated local server — e.g. running the primary
+  # summarizer itself against Gemini's OpenAI-compatibility layer
+  # (endpoint: "https://generativelanguage.googleapis.com/v1beta/openai",
+  # model: "gemini-2.5-flash") instead of a local model, which can be worth
+  # doing if the local backend is too slow/unreliable and you'd rather every
+  # alert go straight to cloud instead of only escalated ones (see Triage).
+  # api_key: "REPLACE-api-key"
 
 # Optional. Omit this whole section to run local-only, exactly as before —
 # nothing below changes behavior unless escalation.always_cloud is also set

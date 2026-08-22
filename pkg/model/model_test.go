@@ -68,6 +68,54 @@ func TestOpenAIClient_Chat(t *testing.T) {
 	}
 }
 
+func TestOpenAIClient_NoAPIKey_SendsNoAuthorizationHeader(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewOpenAIClient(OpenAIClientConfig{Endpoint: server.URL, Model: "m", Backend: "test"})
+	client.Available()
+
+	if gotAuth != "" {
+		t.Errorf("Authorization header = %q, want empty when no APIKey is configured (a local server shouldn't be sent a bogus credential)", gotAuth)
+	}
+}
+
+func TestOpenAIClient_APIKey_SendsBearerAuthorizationHeader(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if r.URL.Path == "/v1/chat/completions" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"message": map[string]string{"content": "ok"}}},
+			})
+			return
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewOpenAIClient(OpenAIClientConfig{Endpoint: server.URL, Model: "m", Backend: "test", APIKey: "sk-real-secret"})
+
+	client.Available()
+	if want := "Bearer sk-real-secret"; gotAuth != want {
+		t.Errorf("Available(): Authorization header = %q, want %q", gotAuth, want)
+	}
+
+	if _, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if want := "Bearer sk-real-secret"; gotAuth != want {
+		t.Errorf("Chat(): Authorization header = %q, want %q", gotAuth, want)
+	}
+}
+
 func TestOpenAIClient_Unavailable(t *testing.T) {
 	client := NewOpenAIClient(OpenAIClientConfig{
 		Endpoint: "http://localhost:19999", // nothing here

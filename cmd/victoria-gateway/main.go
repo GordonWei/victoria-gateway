@@ -119,6 +119,7 @@ func runServe(args []string) {
 		Endpoint: cfg.Summarizer.Endpoint,
 		Model:    cfg.Summarizer.Model,
 		Backend:  "aiops-summarizer",
+		APIKey:   cfg.Summarizer.APIKey,
 	})
 	summarizer := aiops.NewSummarizer(llm)
 	telegram := aiops.NewTelegramNotifier(cfg.Telegram.BotToken, cfg.Telegram.ChatID)

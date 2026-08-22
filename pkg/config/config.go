@@ -50,6 +50,13 @@ type LokiConfig struct {
 type LLMConfig struct {
 	Endpoint string `yaml:"endpoint"`
 	Model    string `yaml:"model"`
+	// APIKey is optional, for pointing summarizer at a real cloud
+	// OpenAI-compatible endpoint instead of an unauthenticated local
+	// server — e.g. Gemini's OpenAI-compatibility layer at
+	// generativelanguage.googleapis.com/v1beta/openai, or a LiteLLM
+	// proxy. Sent as "Authorization: Bearer <key>"; omit for local
+	// backends that don't need one.
+	APIKey string `yaml:"api_key"`
 }
 
 // CloudConfig is the cloud model endpoint escalated alerts get
