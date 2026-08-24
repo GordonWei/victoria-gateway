@@ -64,10 +64,31 @@ type LLMConfig struct {
 // trigger, or the local model's own structured reply asks for escalation
 // — see pkg/aiops.ShouldEscalate.
 type CloudConfig struct {
-	Provider string `yaml:"provider"` // "gemini" (default) or "anthropic"
+	Provider string `yaml:"provider"` // "gemini" (default), "anthropic", or "aws-devops-agent"
 	Endpoint string `yaml:"endpoint"` // optional; each provider has its own default
 	APIKey   string `yaml:"api_key"`
 	Model    string `yaml:"model"` // e.g. "gemini-2.5-flash" or "claude-haiku-4-5"
+
+	// DevOpsAgent configures the "aws-devops-agent" provider. Ignored by
+	// every other provider — see
+	// model.DevOpsAgentClient for why this one escalates to an
+	// AWS-account-aware investigation agent instead of a chat completion,
+	// and why that only makes sense when the alert being escalated is
+	// itself about AWS infrastructure.
+	DevOpsAgent *DevOpsAgentConfig `yaml:"aws_devops_agent"`
+}
+
+// DevOpsAgentConfig points at a local `aws-devops-agent mcp` installation
+// (pip install -e '.[mcp]' of aws-samples/sample-aws-devops-agent-acp-mcp)
+// and the AgentSpace it should investigate against. The AgentSpace itself
+// — its AWS account association and IAM role — is provisioned out of band;
+// see that repo's ONBOARDING.md. This config only says how to reach it.
+type DevOpsAgentConfig struct {
+	BinaryPath string `yaml:"binary_path"` // defaults to "aws-devops-agent" resolved via PATH
+	UserID     string `yaml:"user_id"`     // DEVOPS_AGENT_USER_ID
+	Region     string `yaml:"region"`      // defaults to "us-east-1"
+	SpaceID    string `yaml:"space_id"`    // DEVOPS_AGENT_SPACE_ID
+	Priority   string `yaml:"priority"`    // CRITICAL/HIGH/MEDIUM/LOW/MINIMAL, defaults to HIGH
 }
 
 // EscalationConfig lists alerts that must always be re-analyzed by Cloud

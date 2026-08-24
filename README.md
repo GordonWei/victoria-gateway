@@ -165,6 +165,63 @@ failing the alert outright — check the process logs for
 Leaving `cloud` unset (the default) disables all of this — `escalation` with
 no `cloud` configured is a startup error rather than a silent no-op.
 
+### Optional: escalating to AWS DevOps Agent instead of a chat completion
+
+A third `provider` option, `"aws-devops-agent"`, escalates to
+[AWS DevOps Agent](https://docs.aws.amazon.com/devopsagent/latest/userguide/)
+over MCP instead of asking a bigger LLM the same question. The difference
+matters: Gemini/Anthropic re-analyze whatever log excerpt Loki already gave
+victoria-gateway, but AWS DevOps Agent goes and looks at the target AWS
+account itself (CloudWatch metrics/alarms, CloudTrail, Lambda/EC2 config,
+...) and comes back with an evidence-backed root cause — see
+`pkg/model.DevOpsAgentClient` for the full design rationale.
+
+```yaml
+cloud:
+  provider: "aws-devops-agent"
+  aws_devops_agent:
+    binary_path: "/path/to/venv/bin/aws-devops-agent"  # optional, defaults to $PATH
+    user_id: "your-iam-username"
+    region: "us-east-1"      # optional, defaults to us-east-1
+    space_id: "..."          # the AgentSpace ID; see ONBOARDING.md below
+    priority: "HIGH"         # optional, defaults to HIGH
+```
+
+This only makes sense when the alert being escalated is *about* AWS
+infrastructure — AWS DevOps Agent has no visibility into on-prem/home-lab
+hosts, only whatever AWS account and resources you've associated with the
+AgentSpace.
+
+The point of this provider isn't just "swap in a fancier model" — the full
+alert context this client sends, including any RAG-retrieved history of
+past, human-confirmed incidents (see the RAG section above), goes to AWS
+DevOps Agent as the investigation's `description`, and whatever it
+concludes flows back into the same RAG store afterward like any other
+provider's result. Confirmed 2026-08-23 against the real service: the
+description is delivered intact (verified by reading the created task back
+via the AWS API). Whether a given investigation's *conclusion* ends up
+citing that history is a separate question — in testing, the agent
+consistently preferred re-deriving the answer from its own live AWS
+evidence (CloudTrail, CloudWatch) over taking a supplied note at face
+value, which is the same "verify, don't trust blindly" posture this
+deployment already applies everywhere else, not a shortcoming.
+
+It also pulls in a real dependency: the AgentSpace/MCP server
+plumbing is
+[aws-samples/sample-aws-devops-agent-acp-mcp](https://github.com/aws-samples/sample-aws-devops-agent-acp-mcp)
+(`pip install -e '.[mcp]'`, Python 3.10+), which this client shells out to
+as a subprocess and talks MCP to over stdio — a deliberate exception to
+this repo's otherwise single-binary/minimal-dependency footprint, isolated
+to deployments that opt into this one provider. Follow that repo's
+`ONBOARDING.md` for AgentSpace creation and IAM setup
+(`AIDevOpsAgentFullAccess` on your IAM user, plus an `AIDevOpsAgentAccessPolicy`
+service role for the AgentSpace to assume) before enabling this.
+
+Escalations here take 5-8 minutes (a real investigation, not a single
+completion) rather than the few seconds Gemini/Anthropic take — factor that
+into `escalation.max_per_hour` and expectations about how quickly an
+escalated alert's result shows up.
+
 `escalation.max_per_hour` is an optional spend guardrail: at most this many
 alerts escalate to `cloud` within a rolling hour, 0 (default) meaning
 unlimited. Nothing else bounds cost if the local model's `escalate` signal

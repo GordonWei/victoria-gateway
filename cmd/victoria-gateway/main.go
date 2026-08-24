@@ -110,8 +110,21 @@ func runServe(args []string) {
 				APIKey:   cfg.Cloud.APIKey,
 				Model:    cfg.Cloud.Model,
 			})
+		case "aws-devops-agent":
+			da := cfg.Cloud.DevOpsAgent
+			if da == nil {
+				fmt.Fprintln(os.Stderr, "❌ cloud.provider is \"aws-devops-agent\" but cloud.aws_devops_agent is not set")
+				os.Exit(1)
+			}
+			cloud = model.NewDevOpsAgentClient(model.DevOpsAgentClientConfig{
+				BinaryPath: da.BinaryPath,
+				UserID:     da.UserID,
+				Region:     da.Region,
+				SpaceID:    da.SpaceID,
+				Priority:   da.Priority,
+			})
 		default:
-			fmt.Fprintf(os.Stderr, "❌ unknown cloud.provider %q (must be \"gemini\" or \"anthropic\")\n", cfg.Cloud.Provider)
+			fmt.Fprintf(os.Stderr, "❌ unknown cloud.provider %q (must be \"gemini\", \"anthropic\", or \"aws-devops-agent\")\n", cfg.Cloud.Provider)
 			os.Exit(1)
 		}
 	}
