@@ -37,7 +37,13 @@ Alertmanager --webhook--> victoria-gateway
                                v            /
                       local LLM summarizes
                                |
-                       [escalate to cloud LLM]    optional (cloud + escalation)
+                       [escalate]                 optional (cloud + escalation)
+                               |
+                 +------+------+------+
+                 v      v             v
+              Gemini  Anthropic   AWS DevOps Agent
+              (re-analyze logs)   (MCP → investigate
+                                   AWS account directly)
                                |
                  +-------------+-------------+
                  v                           v
