@@ -126,6 +126,56 @@ Requests without valid credentials get `401`, before any Loki/LLM/cloud/RAG
 work happens. Configure the matching `basic_auth` on Alertmanager's side —
 see `deploy/alertmanager_receiver_example.md`.
 
+## Maintenance windows
+
+For planned maintenance where you already know alerts will fire and don't
+want to be paged (or don't want to waste LLM calls on expected noise), add
+`maintenance_windows` to `config.yaml`:
+
+```yaml
+maintenance_windows:
+  - name: "weekly-db-backup"
+    schedule: "SAT 02:00-04:00"    # periodic: DOW HH:MM-HH:MM (see below)
+    matchers:
+      job: "postgres-backup"       # label name -> glob pattern
+    action: "suppress"             # "suppress" or "mute"
+
+  - name: "one-off-migration"
+    start: "2026-09-01T22:00:00Z"  # one-time: ISO8601, use this OR schedule
+    end:   "2026-09-02T02:00:00Z"
+    matchers:
+      host: "db-primary"
+    action: "mute"
+```
+
+Two actions, checked right after fingerprint dedup, before any Loki/LLM work
+for a matching alert:
+
+- **`suppress`** — skip entirely: no Loki query, no LLM call, no RAG
+  capture, no Telegram push. Cheapest option; you get no record the alert
+  fired at all.
+- **`mute`** — still analyze and RAG-capture as usual, just skip the
+  Telegram push. Use this when you still want the incident on record (e.g.
+  synced to Gitea/GitHub for later reference) but don't want to be
+  interrupted for something already expected.
+
+`schedule` supports three periodic forms — `"SAT 02:00-04:00"` (every
+Saturday), `"DAILY 04:00-04:30"` (every day), `"1st-SUN 03:00-06:00"` (only
+the first Sunday of the month, or any `Nth-DOW` combination) — and a window
+that crosses midnight (e.g. `"SAT 23:00-02:00"`) correctly stays scoped to
+just the specified week for `Nth-DOW` schedules, not every occurrence of
+that weekday. Exactly one of `schedule` or `start`+`end` must be set, never
+both — `Validate()` rejects the config at startup otherwise. `matchers` must
+be non-empty (refuses to accidentally match every alert) and each value
+supports `*`/`?` wildcards as a normal string glob — including across `/`
+(e.g. `"/api/*"` matches `/api/v1/checkout`), unlike Go's `filepath.Match`
+which treats `/` as a path separator boundary.
+
+Times in `schedule` are evaluated in the process's local timezone (`TZ` env
+var), not per-window — if the container's `TZ` isn't what you expect, a
+"every Saturday 2am" window won't fire at 2am in the timezone you had in
+mind.
+
 ## Triage: escalating a hard alert to a cloud model
 
 The local model is fast and free, but it's a small quantized model — it can
@@ -421,11 +471,22 @@ Alertmanager route as an additive second webhook target.
 ## Status
 
 Running in production against a home Alertmanager/Loki/LM Studio stack,
-with CI (gofmt/build/vet/`go test -race`) on every push and PR. Every
-feature above — Triage, RAG capture/retrieval, the Gitea/GitHub tracker
-integrations, webhook auth, fingerprint dedup, concurrent multi-alert
-processing — has been exercised against real alerts on that deployment, not
-just unit tests.
+with CI (gofmt/build/vet/`go test -race`/golangci-lint) on every push and
+PR. Every feature above — Triage, RAG capture/retrieval, the Gitea/GitHub
+tracker integrations, webhook auth, fingerprint dedup, concurrent
+multi-alert processing, maintenance windows — has been exercised against
+real alerts on that deployment, not just unit tests.
+
+Maintenance windows specifically: shipped 2026-08-27, with two real bugs
+found in review before it reached production — a cross-midnight schedule
+combined with `Nth-DOW` matched every occurrence of that weekday instead of
+just the specified one, and the glob matcher (`filepath.Match`) silently
+failed to match any pattern containing `/`, which is common in label values
+like paths — both fixed with regression tests, then re-verified end-to-end
+against the live deployment (a synthetic alert matching a temporary test
+window was confirmed suppressed; a non-matching one correctly proceeded
+through the full pipeline). See `pkg/maintenance/maintenance_test.go` for
+the regression cases.
 
 Started as a subcommand of a larger CLI project; this repo is that logic
 extracted and trimmed down to just what the service needs (no CLI, REPL, or
