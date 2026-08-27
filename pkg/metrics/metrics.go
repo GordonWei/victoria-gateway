@@ -34,6 +34,8 @@ type Counters struct {
 	ragSearchFailuresTotal          atomic.Int64
 	trackerCreateIssueFailuresTotal atomic.Int64
 	telegramPushFailuresTotal       atomic.Int64
+	maintenanceSuppressedTotal      atomic.Int64
+	maintenanceMutedTotal           atomic.Int64
 }
 
 func (c *Counters) IncAlertsTotal() {
@@ -114,6 +116,18 @@ func (c *Counters) IncTelegramPushFailuresTotal() {
 	}
 }
 
+func (c *Counters) IncMaintenanceSuppressedTotal() {
+	if c != nil {
+		c.maintenanceSuppressedTotal.Add(1)
+	}
+}
+
+func (c *Counters) IncMaintenanceMutedTotal() {
+	if c != nil {
+		c.maintenanceMutedTotal.Add(1)
+	}
+}
+
 // counterDef pairs a counter's exposition name/help with a snapshot of its
 // current value, taken at Handler-call time.
 type counterDef struct {
@@ -140,6 +154,8 @@ func (c *Counters) snapshot() []counterDef {
 		{"victoria_gateway_rag_search_failures_total", "RAG past-incident lookups that failed (embedding or Postgres search error).", c.ragSearchFailuresTotal.Load()},
 		{"victoria_gateway_tracker_create_issue_failures_total", "Gitea/GitHub issue creation failures during capture.", c.trackerCreateIssueFailuresTotal.Load()},
 		{"victoria_gateway_telegram_push_failures_total", "Telegram summary push failures.", c.telegramPushFailuresTotal.Load()},
+		{"victoria_gateway_maintenance_suppressed_total", "Alerts suppressed (skipped entirely) due to an active maintenance window.", c.maintenanceSuppressedTotal.Load()},
+		{"victoria_gateway_maintenance_muted_total", "Alerts muted (analyzed but not pushed) due to an active maintenance window.", c.maintenanceMutedTotal.Load()},
 	}
 }
 

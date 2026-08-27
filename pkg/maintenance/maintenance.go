@@ -1,0 +1,313 @@
+// Package maintenance implements maintenance window matching for
+// victoria-gateway. A maintenance window defines a time period (periodic
+// or one-time) and a set of label matchers; when an alert arrives during
+// an active window whose matchers match the alert's labels, the alert is
+// either suppressed (skipped entirely) or muted (analyzed but not pushed
+// to notification channels).
+package maintenance
+
+import (
+	"fmt"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gordonwei/victoria-gateway/pkg/config"
+)
+
+// Action is what happens to an alert that matches an active window.
+type Action string
+
+const (
+	ActionSuppress Action = "suppress" // skip entirely: no Loki, no LLM, no capture, no push
+	ActionMute     Action = "mute"     // analyze + RAG capture, but don't push to notification channels
+)
+
+// Window is a parsed, ready-to-evaluate maintenance window. Build one per
+// config.MaintenanceWindow at startup via ParseWindows; then call
+// Check(time, labels) on each incoming alert.
+type Window struct {
+	Name     string
+	Action   Action
+	Matchers map[string]string // label name → glob pattern
+
+	// One of these two is set, never both (enforced by config.Validate).
+	schedule *schedule     // periodic
+	start    time.Time     // one-time
+	end      time.Time     // one-time
+}
+
+// schedule represents a parsed periodic time expression.
+type schedule struct {
+	dow       time.Weekday // -1 means "every day" (DAILY)
+	nthWeek   int          // 0 means "every week"; 1 means 1st, 2 means 2nd, etc.
+	startHour int
+	startMin  int
+	endHour   int
+	endMin    int
+}
+
+// ParseWindows parses all maintenance window definitions from config into
+// ready-to-evaluate Window values. Returns an error if any schedule string
+// is malformed or any one-time start/end can't be parsed as RFC3339.
+func ParseWindows(defs []config.MaintenanceWindow) ([]Window, error) {
+	windows := make([]Window, 0, len(defs))
+	for i, def := range defs {
+		label := fmt.Sprintf("maintenance_windows[%d]", i)
+		if def.Name != "" {
+			label = def.Name
+		}
+
+		w := Window{
+			Name:     def.Name,
+			Action:   Action(def.Action),
+			Matchers: def.Matchers,
+		}
+
+		if def.Schedule != "" {
+			s, err := parseSchedule(def.Schedule)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", label, err)
+			}
+			w.schedule = s
+		} else {
+			start, err := time.Parse(time.RFC3339, def.Start)
+			if err != nil {
+				return nil, fmt.Errorf("%s: parse start: %w", label, err)
+			}
+			end, err := time.Parse(time.RFC3339, def.End)
+			if err != nil {
+				return nil, fmt.Errorf("%s: parse end: %w", label, err)
+			}
+			if !end.After(start) {
+				return nil, fmt.Errorf("%s: end must be after start", label)
+			}
+			w.start = start
+			w.end = end
+		}
+
+		windows = append(windows, w)
+	}
+	return windows, nil
+}
+
+// parseSchedule parses schedule strings like:
+//   - "SAT 02:00-04:00"
+//   - "DAILY 04:00-04:30"
+//   - "1st-SUN 03:00-06:00"
+func parseSchedule(s string) (*schedule, error) {
+	s = strings.TrimSpace(s)
+	parts := strings.Fields(s)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid schedule %q: expected \"<day-spec> HH:MM-HH:MM\"", s)
+	}
+
+	daySpec := strings.ToUpper(parts[0])
+	timeSpec := parts[1]
+
+	sched := &schedule{}
+
+	// Parse day specifier
+	switch {
+	case daySpec == "DAILY":
+		sched.dow = -1
+		sched.nthWeek = 0
+	case strings.Contains(daySpec, "-"):
+		// "1ST-SUN", "2ND-MON", etc.
+		dashParts := strings.SplitN(daySpec, "-", 2)
+		nth, err := parseNth(dashParts[0])
+		if err != nil {
+			return nil, fmt.Errorf("invalid schedule %q: %w", s, err)
+		}
+		dow, err := parseDOW(dashParts[1])
+		if err != nil {
+			return nil, fmt.Errorf("invalid schedule %q: %w", s, err)
+		}
+		sched.dow = dow
+		sched.nthWeek = nth
+	default:
+		dow, err := parseDOW(daySpec)
+		if err != nil {
+			return nil, fmt.Errorf("invalid schedule %q: %w", s, err)
+		}
+		sched.dow = dow
+		sched.nthWeek = 0
+	}
+
+	// Parse time range
+	timeParts := strings.SplitN(timeSpec, "-", 2)
+	if len(timeParts) != 2 {
+		return nil, fmt.Errorf("invalid schedule %q: expected HH:MM-HH:MM time range", s)
+	}
+	startH, startM, err := parseHHMM(timeParts[0])
+	if err != nil {
+		return nil, fmt.Errorf("invalid schedule %q: start time: %w", s, err)
+	}
+	endH, endM, err := parseHHMM(timeParts[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid schedule %q: end time: %w", s, err)
+	}
+	sched.startHour = startH
+	sched.startMin = startM
+	sched.endHour = endH
+	sched.endMin = endM
+
+	return sched, nil
+}
+
+func parseDOW(s string) (time.Weekday, error) {
+	switch s {
+	case "SUN", "SUNDAY":
+		return time.Sunday, nil
+	case "MON", "MONDAY":
+		return time.Monday, nil
+	case "TUE", "TUESDAY":
+		return time.Tuesday, nil
+	case "WED", "WEDNESDAY":
+		return time.Wednesday, nil
+	case "THU", "THURSDAY":
+		return time.Thursday, nil
+	case "FRI", "FRIDAY":
+		return time.Friday, nil
+	case "SAT", "SATURDAY":
+		return time.Saturday, nil
+	}
+	return 0, fmt.Errorf("unknown day of week %q", s)
+}
+
+func parseNth(s string) (int, error) {
+	s = strings.ToUpper(s)
+	s = strings.TrimRight(s, "STNDRDTH")
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 || n > 5 {
+		return 0, fmt.Errorf("invalid nth-week specifier %q (expected 1st-5th)", s)
+	}
+	return n, nil
+}
+
+func parseHHMM(s string) (int, int, error) {
+	parts := strings.SplitN(s, ":", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("expected HH:MM, got %q", s)
+	}
+	h, err := strconv.Atoi(parts[0])
+	if err != nil || h < 0 || h > 23 {
+		return 0, 0, fmt.Errorf("hour out of range in %q", s)
+	}
+	m, err := strconv.Atoi(parts[1])
+	if err != nil || m < 0 || m > 59 {
+		return 0, 0, fmt.Errorf("minute out of range in %q", s)
+	}
+	return h, m, nil
+}
+
+// Check evaluates whether a given alert (described by its labels) at a
+// given time falls within this window. Returns true if both the time is
+// within the window's active period AND all matchers match the alert's
+// labels.
+func (w *Window) Check(now time.Time, labels map[string]string) bool {
+	if !w.isTimeActive(now) {
+		return false
+	}
+	return w.matchLabels(labels)
+}
+
+func (w *Window) isTimeActive(now time.Time) bool {
+	if w.schedule != nil {
+		return w.schedule.isActive(now)
+	}
+	return !now.Before(w.start) && now.Before(w.end)
+}
+
+func (s *schedule) isActive(now time.Time) bool {
+	// Check day-of-week
+	if s.dow >= 0 {
+		if now.Weekday() != s.dow {
+			// For cross-midnight schedules, also check if we're in the
+			// overflow portion (e.g., SAT 23:00-02:00 means Sunday
+			// 00:00-02:00 is also valid).
+			if s.crossesMidnight() {
+				yesterday := now.Add(-24 * time.Hour)
+				if yesterday.Weekday() != s.dow {
+					return false
+				}
+				// We're in the day after the scheduled day — only the
+				// overflow portion (00:00 to end) applies.
+				return s.inOverflowPortion(now)
+			}
+			return false
+		}
+		// Check nth-week constraint
+		if s.nthWeek > 0 {
+			day := now.Day()
+			nth := (day-1)/7 + 1
+			if nth != s.nthWeek {
+				return false
+			}
+		}
+	}
+
+	return s.inTimeRange(now)
+}
+
+func (s *schedule) crossesMidnight() bool {
+	startMinutes := s.startHour*60 + s.startMin
+	endMinutes := s.endHour*60 + s.endMin
+	return endMinutes <= startMinutes
+}
+
+func (s *schedule) inTimeRange(now time.Time) bool {
+	nowMinutes := now.Hour()*60 + now.Minute()
+	startMinutes := s.startHour*60 + s.startMin
+	endMinutes := s.endHour*60 + s.endMin
+
+	if s.crossesMidnight() {
+		// e.g. 23:00-02:00: active if >= 23:00 OR < 02:00
+		return nowMinutes >= startMinutes || nowMinutes < endMinutes
+	}
+	return nowMinutes >= startMinutes && nowMinutes < endMinutes
+}
+
+func (s *schedule) inOverflowPortion(now time.Time) bool {
+	nowMinutes := now.Hour()*60 + now.Minute()
+	endMinutes := s.endHour*60 + s.endMin
+	return nowMinutes < endMinutes
+}
+
+func (w *Window) matchLabels(labels map[string]string) bool {
+	for matchKey, matchPattern := range w.Matchers {
+		labelVal, exists := labels[matchKey]
+		if !exists {
+			return false
+		}
+		if !matchGlob(matchPattern, labelVal) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchGlob uses filepath.Match semantics (*, ?, []) for pattern matching.
+// An exact string (no wildcards) still works as a plain equality check.
+func matchGlob(pattern, value string) bool {
+	matched, err := filepath.Match(pattern, value)
+	if err != nil {
+		// Malformed pattern: treat as no-match rather than crashing.
+		return false
+	}
+	return matched
+}
+
+// CheckAll evaluates all windows against an alert's labels at the given
+// time. Returns the action of the first matching window and its name, or
+// ("", "") if no window matches. Evaluation order is config order: first
+// match wins.
+func CheckAll(windows []Window, now time.Time, labels map[string]string) (action Action, windowName string) {
+	for i := range windows {
+		if windows[i].Check(now, labels) {
+			return windows[i].Action, windows[i].Name
+		}
+	}
+	return "", ""
+}

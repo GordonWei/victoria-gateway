@@ -28,6 +28,7 @@ import (
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
 	"github.com/gordonwei/victoria-gateway/pkg/config"
+	"github.com/gordonwei/victoria-gateway/pkg/maintenance"
 	"github.com/gordonwei/victoria-gateway/pkg/metrics"
 	"github.com/gordonwei/victoria-gateway/pkg/model"
 	"github.com/gordonwei/victoria-gateway/pkg/rag"
@@ -141,6 +142,15 @@ func runServe(args []string) {
 		metrics:     &metrics.Counters{},
 	}
 
+	if len(cfg.MaintenanceWindows) > 0 {
+		mw, err := maintenance.ParseWindows(cfg.MaintenanceWindows)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+			os.Exit(1)
+		}
+		h.maintenanceWindows = mw
+	}
+
 	ragEnabled := cfg.RAG != nil && cfg.RAG.Enabled
 	if ragEnabled {
 		store, err := rag.OpenPostgres(cfg.RAG.PostgresDSN)
@@ -196,6 +206,8 @@ type handler struct {
 	tracker     tracker.Tracker // nil if no issue tracker (Gitea/GitHub) is configured
 
 	metrics *metrics.Counters // nil-safe; see pkg/metrics
+
+	maintenanceWindows []maintenance.Window
 
 	dedupMu  sync.Mutex
 	recentFP map[string]time.Time // fingerprint -> last-processed time, see claimFingerprint
@@ -313,8 +325,9 @@ type alertResult struct {
 	AlertName  string `json:"alert_name"`
 	Host       string `json:"host,omitempty"`
 	Summary    string `json:"summary,omitempty"`
-	AnalyzedBy string `json:"analyzed_by,omitempty"` // "local" or "cloud"
+	AnalyzedBy string `json:"analyzed_by,omitempty"` // "local" or "cloud" or "suppressed"
 	Error      string `json:"error,omitempty"`
+	muted      bool   // not exported to JSON; controls whether notification is skipped
 }
 
 func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Request) {
@@ -421,6 +434,26 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	}()
 
 	res.AlertName = alert.Labels["alertname"]
+
+	// Maintenance window check: before doing any Loki/LLM work, see if
+	// this alert is suppressed (skip entirely) or muted (analyze but
+	// don't push). Check uses the alert's full label set so matchers can
+	// reference any label, not just host/alertname.
+	if len(h.maintenanceWindows) > 0 {
+		action, windowName := maintenance.CheckAll(h.maintenanceWindows, time.Now(), alert.Labels)
+		switch action {
+		case maintenance.ActionSuppress:
+			log.Printf("aiops: alert %q suppressed by maintenance window %q", res.AlertName, windowName)
+			h.metrics.IncMaintenanceSuppressedTotal()
+			res.Summary = fmt.Sprintf("suppressed by maintenance window %q", windowName)
+			res.AnalyzedBy = "suppressed"
+			return
+		case maintenance.ActionMute:
+			log.Printf("aiops: alert %q muted by maintenance window %q (will analyze but not push)", res.AlertName, windowName)
+			h.metrics.IncMaintenanceMutedTotal()
+			res.muted = true
+		}
+	}
 
 	host, ok := alert.Host()
 	if !ok {
@@ -600,6 +633,9 @@ func (h *handler) retrieveRAGContext(alert aiops.Alert, logs []aiops.LogEntry) s
 // Alertmanager, which would just make Alertmanager retry pointlessly.
 func (h *handler) notifyTelegram(res alertResult) {
 	if !h.telegram.Enabled() {
+		return
+	}
+	if res.muted {
 		return
 	}
 

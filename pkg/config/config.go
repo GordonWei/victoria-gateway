@@ -12,14 +12,29 @@ import (
 )
 
 type Config struct {
-	ListenAddr  string             `yaml:"listen_addr"` // e.g. ":8090"
-	Loki        LokiConfig         `yaml:"loki"`
-	Summarizer  LLMConfig          `yaml:"summarizer"`
-	Cloud       *CloudConfig       `yaml:"cloud"`      // optional: cloud model for escalated alerts
-	Escalation  EscalationConfig   `yaml:"escalation"` // rules for when to escalate to Cloud
-	RAG         *RAGConfig         `yaml:"rag"`        // optional: past-incident retrieval
-	Telegram    TelegramConfig     `yaml:"telegram"`
-	WebhookAuth *WebhookAuthConfig `yaml:"webhook_auth"` // optional: require HTTP Basic Auth on the webhook endpoint
+	ListenAddr         string               `yaml:"listen_addr"` // e.g. ":8090"
+	Loki               LokiConfig           `yaml:"loki"`
+	Summarizer         LLMConfig            `yaml:"summarizer"`
+	Cloud              *CloudConfig         `yaml:"cloud"`      // optional: cloud model for escalated alerts
+	Escalation         EscalationConfig     `yaml:"escalation"` // rules for when to escalate to Cloud
+	RAG                *RAGConfig           `yaml:"rag"`        // optional: past-incident retrieval
+	Telegram           TelegramConfig       `yaml:"telegram"`
+	WebhookAuth        *WebhookAuthConfig   `yaml:"webhook_auth"`        // optional: require HTTP Basic Auth on the webhook endpoint
+	MaintenanceWindows []MaintenanceWindow  `yaml:"maintenance_windows"` // optional: suppress or mute alerts during scheduled windows
+}
+
+// MaintenanceWindow defines a time window during which matching alerts are
+// either completely suppressed (not analyzed, not pushed) or muted
+// (analyzed and captured for RAG, but not pushed to Telegram). Useful for
+// planned maintenance where you know alerts will fire and don't want to be
+// notified or waste LLM calls on expected noise.
+type MaintenanceWindow struct {
+	Name     string            `yaml:"name"`     // human-readable, printed in logs
+	Schedule string            `yaml:"schedule"` // periodic: "SAT 02:00-04:00", "DAILY 04:00-04:30", "1st-SUN 03:00-06:00"
+	Start    string            `yaml:"start"`    // one-time: ISO8601 start time
+	End      string            `yaml:"end"`      // one-time: ISO8601 end time
+	Matchers map[string]string `yaml:"matchers"` // label name → value (supports glob with *)
+	Action   string            `yaml:"action"`   // "suppress" or "mute"
 }
 
 // WebhookAuthConfig, if set, makes the webhook handler require HTTP
@@ -193,6 +208,29 @@ func (c *Config) Validate() error {
 	if c.RAG != nil && c.RAG.Enabled {
 		if c.RAG.PostgresDSN == "" || c.RAG.EmbeddingEndpoint == "" || c.RAG.EmbeddingModel == "" {
 			return fmt.Errorf("rag.enabled is true but postgres_dsn/embedding_endpoint/embedding_model is missing in config.yaml")
+		}
+	}
+	for i, mw := range c.MaintenanceWindows {
+		label := fmt.Sprintf("maintenance_windows[%d]", i)
+		if mw.Name != "" {
+			label = fmt.Sprintf("maintenance_windows[%d] (%s)", i, mw.Name)
+		}
+		hasSchedule := mw.Schedule != ""
+		hasStartEnd := mw.Start != "" || mw.End != ""
+		if hasSchedule && hasStartEnd {
+			return fmt.Errorf("%s: cannot set both schedule and start/end — use one or the other", label)
+		}
+		if !hasSchedule && !hasStartEnd {
+			return fmt.Errorf("%s: must set either schedule or start/end", label)
+		}
+		if hasStartEnd && (mw.Start == "" || mw.End == "") {
+			return fmt.Errorf("%s: both start and end are required for a one-time window", label)
+		}
+		if len(mw.Matchers) == 0 {
+			return fmt.Errorf("%s: matchers must not be empty (refusing to match all alerts)", label)
+		}
+		if mw.Action != "suppress" && mw.Action != "mute" {
+			return fmt.Errorf("%s: action must be \"suppress\" or \"mute\", got %q", label, mw.Action)
 		}
 	}
 	return nil
