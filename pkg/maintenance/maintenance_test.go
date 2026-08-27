@@ -156,6 +156,67 @@ func TestIsActive_CrossMidnight(t *testing.T) {
 	}
 }
 
+func TestIsActive_CrossMidnight_NthWeek(t *testing.T) {
+	// 2026-08-27 regression test: nth-week constraint must also apply
+	// to the cross-midnight overflow branch, not just the same-day
+	// branch (see isActive's bugfix comment). Schedule is "1st Saturday
+	// 23:00-02:00" -- only the first Saturday of the month's overflow
+	// into Sunday should match; other Saturdays' overflow must not.
+	s := &schedule{dow: time.Saturday, nthWeek: 1, startHour: 23, startMin: 0, endHour: 2, endMin: 0}
+
+	// 2026-08-01 is the 1st Saturday of August.
+	firstSatNight := time.Date(2026, 8, 1, 23, 30, 0, 0, time.FixedZone("CST", 8*3600))
+	if !s.isActive(firstSatNight) {
+		t.Error("expected active on 1st Saturday 23:30 (same-day portion)")
+	}
+	firstSunOverflow := time.Date(2026, 8, 2, 1, 0, 0, 0, time.FixedZone("CST", 8*3600))
+	if !s.isActive(firstSunOverflow) {
+		t.Error("expected active on Sunday 01:00 overflow from the 1st Saturday")
+	}
+
+	// 2026-08-08 is the 2nd Saturday of August -- same-day portion must
+	// NOT match a "1st-SAT" schedule.
+	secondSatNight := time.Date(2026, 8, 8, 23, 30, 0, 0, time.FixedZone("CST", 8*3600))
+	if s.isActive(secondSatNight) {
+		t.Error("expected inactive on 2nd Saturday 23:30 (schedule is 1st-SAT only)")
+	}
+	// This is the bug this test exists to lock down: overflow into
+	// Sunday 2026-08-09 from the 2nd Saturday used to match every
+	// week's overflow regardless of nth-week, because the nth-week
+	// check was only wired into the same-day branch, never the
+	// cross-midnight branch.
+	secondSunOverflow := time.Date(2026, 8, 9, 1, 0, 0, 0, time.FixedZone("CST", 8*3600))
+	if s.isActive(secondSunOverflow) {
+		t.Error("expected inactive on Sunday 01:00 overflow from the 2nd Saturday (only 1st-SAT should match)")
+	}
+}
+
+func TestParseNth_RejectsMismatchedSuffix(t *testing.T) {
+	// 2026-08-27 regression test: parseNth used to strip any trailing
+	// character in the set {S,T,N,D,R,H} (strings.TrimRight treats its
+	// second argument as a character set, not a literal suffix), so a
+	// misspelled ordinal like "1TH" (should be "1ST") or "2ST" (should
+	// be "2ND") silently parsed as a valid number instead of erroring.
+	badCases := []string{"1TH", "2ST", "3ST", "4RD", "5ST", "1ND"}
+	for _, s := range badCases {
+		if _, err := parseNth(s); err == nil {
+			t.Errorf("parseNth(%q) = no error, want error (mismatched ordinal suffix)", s)
+		}
+	}
+
+	goodCases := map[string]int{"1st": 1, "2nd": 2, "3rd": 3, "4th": 4, "5th": 5, "1ST": 1}
+	for s, want := range goodCases {
+		n, err := parseNth(s)
+		if err != nil {
+			t.Errorf("parseNth(%q) unexpected error: %v", s, err)
+			continue
+		}
+		if n != want {
+			t.Errorf("parseNth(%q) = %d, want %d", s, n, want)
+		}
+	}
+}
+
 func TestMatchGlob(t *testing.T) {
 	cases := []struct {
 		pattern string
@@ -170,6 +231,14 @@ func TestMatchGlob(t *testing.T) {
 		{"exact-match", "exact-matc", false},
 		{"node-[0-9]", "node-3", true},
 		{"node-[0-9]", "node-abc", false},
+		// 2026-08-27 regression cases: '*' must cross '/', since label
+		// values this project actually matches against (paths, image
+		// names, "namespace/pod" strings) commonly contain it. This
+		// used to silently fail under filepath.Match semantics.
+		{"/api/*", "/api/v1/users", true},
+		{"/api/*", "/other/path", false},
+		{"*prod*", "/env/prod/service", true},
+		{"*prod*", "/env/staging/service", false},
 	}
 	for _, tc := range cases {
 		got := matchGlob(tc.pattern, tc.value)

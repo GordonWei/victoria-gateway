@@ -8,7 +8,7 @@ package maintenance
 
 import (
 	"fmt"
-	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -177,11 +177,38 @@ func parseDOW(s string) (time.Weekday, error) {
 }
 
 func parseNth(s string) (int, error) {
-	s = strings.ToUpper(s)
-	s = strings.TrimRight(s, "STNDRDTH")
-	n, err := strconv.Atoi(s)
+	orig := s
+	upper := strings.ToUpper(s)
+
+	// 2026-08-27 bugfix: this used to strip any trailing run of
+	// characters in the set {S,T,N,D,R,H} (strings.TrimRight treats its
+	// second argument as a character set, not a literal suffix), so a
+	// misspelled ordinal like "2RD" (should be "2ND") or "1TH" (should
+	// be "1ST") silently trimmed down to a valid-looking number instead
+	// of being rejected. Match one of the four real ordinal suffixes
+	// explicitly, then verify it's the *correct* one for the number.
+	var suffix string
+	switch {
+	case strings.HasSuffix(upper, "ST"):
+		suffix = "ST"
+	case strings.HasSuffix(upper, "ND"):
+		suffix = "ND"
+	case strings.HasSuffix(upper, "RD"):
+		suffix = "RD"
+	case strings.HasSuffix(upper, "TH"):
+		suffix = "TH"
+	default:
+		return 0, fmt.Errorf("invalid nth-week specifier %q (expected 1st-5th)", orig)
+	}
+
+	n, err := strconv.Atoi(strings.TrimSuffix(upper, suffix))
 	if err != nil || n < 1 || n > 5 {
-		return 0, fmt.Errorf("invalid nth-week specifier %q (expected 1st-5th)", s)
+		return 0, fmt.Errorf("invalid nth-week specifier %q (expected 1st-5th)", orig)
+	}
+
+	wantSuffix := map[int]string{1: "ST", 2: "ND", 3: "RD", 4: "TH", 5: "TH"}[n]
+	if suffix != wantSuffix {
+		return 0, fmt.Errorf("invalid nth-week specifier %q: %d takes suffix %q, not %q", orig, n, wantSuffix, suffix)
 	}
 	return n, nil
 }
@@ -232,6 +259,16 @@ func (s *schedule) isActive(now time.Time) bool {
 				if yesterday.Weekday() != s.dow {
 					return false
 				}
+				// 2026-08-27 bugfix: the nth-week constraint was only
+				// checked in the same-day branch below, never here --
+				// so "1st-SAT 23:00-02:00" matched the Sunday overflow
+				// of *every* Saturday, not just the first one. The
+				// scheduled day-of-week occurrence is "yesterday" from
+				// the overflow's point of view, so nth-week must be
+				// checked against yesterday's date, not now's.
+				if !s.nthWeekMatches(yesterday) {
+					return false
+				}
 				// We're in the day after the scheduled day — only the
 				// overflow portion (00:00 to end) applies.
 				return s.inOverflowPortion(now)
@@ -239,16 +276,24 @@ func (s *schedule) isActive(now time.Time) bool {
 			return false
 		}
 		// Check nth-week constraint
-		if s.nthWeek > 0 {
-			day := now.Day()
-			nth := (day-1)/7 + 1
-			if nth != s.nthWeek {
-				return false
-			}
+		if !s.nthWeekMatches(now) {
+			return false
 		}
 	}
 
 	return s.inTimeRange(now)
+}
+
+// nthWeekMatches reports whether day falls in the schedule's nth-week
+// (1st through 5th occurrence of the month, by day-of-month bucketing).
+// Always true when the schedule has no nth-week constraint (nthWeek == 0,
+// i.e. "every week").
+func (s *schedule) nthWeekMatches(day time.Time) bool {
+	if s.nthWeek == 0 {
+		return true
+	}
+	nth := (day.Day()-1)/7 + 1
+	return nth == s.nthWeek
 }
 
 func (s *schedule) crossesMidnight() bool {
@@ -288,15 +333,61 @@ func (w *Window) matchLabels(labels map[string]string) bool {
 	return true
 }
 
-// matchGlob uses filepath.Match semantics (*, ?, []) for pattern matching.
-// An exact string (no wildcards) still works as a plain equality check.
+// matchGlob matches pattern against value using shell-glob-style wildcards
+// (*, ?, and POSIX bracket character classes like [0-9]). An exact string
+// (no wildcards) still works as a plain equality check.
+//
+// 2026-08-27 bugfix: this used to delegate to filepath.Match, whose '*'
+// deliberately does NOT cross '/' (it's a filesystem-path matcher, not a
+// general string glob). Label values this project actually matches
+// against -- image names, request paths, "namespace/pod" strings -- very
+// commonly contain '/', so patterns like "/api/*" or "*prod*" silently
+// failed to match "/api/v1/users" or "/env/prod/service" with no error at
+// all: the maintenance window would just never fire, and there was
+// nothing in the logs to say why. Compiling the glob to a regexp instead
+// gives '*' the "matches any run of characters" meaning implied by the
+// commit message and the design doc's examples.
 func matchGlob(pattern, value string) bool {
-	matched, err := filepath.Match(pattern, value)
+	re, err := globToRegexp(pattern)
 	if err != nil {
 		// Malformed pattern: treat as no-match rather than crashing.
 		return false
 	}
-	return matched
+	return re.MatchString(value)
+}
+
+// globToRegexp compiles a shell-glob pattern into an anchored regexp.
+// '*' becomes ".*" (any run of characters, including '/'), '?' becomes
+// "." (any single character), and '[...]' bracket expressions are passed
+// through largely as-is -- glob and regexp bracket-class syntax (ranges,
+// leading '^' negation) are compatible for the patterns this project
+// uses. Everything else is treated as a literal.
+func globToRegexp(pattern string) (*regexp.Regexp, error) {
+	var sb strings.Builder
+	sb.WriteByte('^')
+	runes := []rune(pattern)
+	for i := 0; i < len(runes); i++ {
+		switch c := runes[i]; c {
+		case '*':
+			sb.WriteString(".*")
+		case '?':
+			sb.WriteByte('.')
+		case '[':
+			j := i + 1
+			for j < len(runes) && runes[j] != ']' {
+				j++
+			}
+			if j >= len(runes) {
+				return nil, fmt.Errorf("unterminated character class in glob %q", pattern)
+			}
+			sb.WriteString(string(runes[i : j+1]))
+			i = j
+		default:
+			sb.WriteString(regexp.QuoteMeta(string(c)))
+		}
+	}
+	sb.WriteByte('$')
+	return regexp.Compile(sb.String())
 }
 
 // CheckAll evaluates all windows against an alert's labels at the given
