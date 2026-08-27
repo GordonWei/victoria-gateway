@@ -33,9 +33,9 @@ type Window struct {
 	Matchers map[string]string // label name → glob pattern
 
 	// One of these two is set, never both (enforced by config.Validate).
-	schedule *schedule     // periodic
-	start    time.Time     // one-time
-	end      time.Time     // one-time
+	schedule *schedule // periodic
+	start    time.Time // one-time
+	end      time.Time // one-time
 }
 
 // schedule represents a parsed periodic time expression.

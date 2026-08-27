@@ -12,15 +12,15 @@ import (
 )
 
 type Config struct {
-	ListenAddr         string               `yaml:"listen_addr"` // e.g. ":8090"
-	Loki               LokiConfig           `yaml:"loki"`
-	Summarizer         LLMConfig            `yaml:"summarizer"`
-	Cloud              *CloudConfig         `yaml:"cloud"`      // optional: cloud model for escalated alerts
-	Escalation         EscalationConfig     `yaml:"escalation"` // rules for when to escalate to Cloud
-	RAG                *RAGConfig           `yaml:"rag"`        // optional: past-incident retrieval
-	Telegram           TelegramConfig       `yaml:"telegram"`
-	WebhookAuth        *WebhookAuthConfig   `yaml:"webhook_auth"`        // optional: require HTTP Basic Auth on the webhook endpoint
-	MaintenanceWindows []MaintenanceWindow  `yaml:"maintenance_windows"` // optional: suppress or mute alerts during scheduled windows
+	ListenAddr         string              `yaml:"listen_addr"` // e.g. ":8090"
+	Loki               LokiConfig          `yaml:"loki"`
+	Summarizer         LLMConfig           `yaml:"summarizer"`
+	Cloud              *CloudConfig        `yaml:"cloud"`      // optional: cloud model for escalated alerts
+	Escalation         EscalationConfig    `yaml:"escalation"` // rules for when to escalate to Cloud
+	RAG                *RAGConfig          `yaml:"rag"`        // optional: past-incident retrieval
+	Telegram           TelegramConfig      `yaml:"telegram"`
+	WebhookAuth        *WebhookAuthConfig  `yaml:"webhook_auth"`        // optional: require HTTP Basic Auth on the webhook endpoint
+	MaintenanceWindows []MaintenanceWindow `yaml:"maintenance_windows"` // optional: suppress or mute alerts during scheduled windows
 }
 
 // MaintenanceWindow defines a time window during which matching alerts are
