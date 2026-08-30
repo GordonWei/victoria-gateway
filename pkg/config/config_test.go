@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func validConfig() *Config {
 	return &Config{
@@ -231,5 +234,43 @@ func TestValidate_NegativeShutdownGrace(t *testing.T) {
 	c.ShutdownGraceSec = -1
 	if err := c.Validate(); err == nil {
 		t.Error("expected error for negative shutdown_grace_sec")
+	}
+}
+
+// --- summarizer timeout_sec ---
+
+func TestValidate_NegativeSummarizerTimeout(t *testing.T) {
+	c := validConfig()
+	c.Summarizer.TimeoutSec = -1
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for negative summarizer.timeout_sec")
+	}
+}
+
+func TestValidate_SummarizerTimeout_ZeroAndPositiveOK(t *testing.T) {
+	c := validConfig()
+	c.Summarizer.TimeoutSec = 0
+	if err := c.Validate(); err != nil {
+		t.Errorf("timeout_sec 0 should be valid (client default), got %v", err)
+	}
+	c.Summarizer.TimeoutSec = 180
+	if err := c.Validate(); err != nil {
+		t.Errorf("timeout_sec 180 should be valid, got %v", err)
+	}
+}
+
+func TestLoad_ParsesSummarizerTimeoutSec(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+	yaml := "loki:\n  endpoint: \"http://loki:3100\"\nsummarizer:\n  endpoint: \"http://llm:1234\"\n  model: \"m\"\n  timeout_sec: 180\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Summarizer.TimeoutSec != 180 {
+		t.Errorf("timeout_sec = %d, want 180", cfg.Summarizer.TimeoutSec)
 	}
 }

@@ -31,6 +31,11 @@ summarizer:
   # doing if the local backend is too slow/unreliable and you'd rather every
   # alert go straight to cloud instead of only escalated ones (see Triage).
   # api_key: "REPLACE-api-key"
+  # Optional. Per-call timeout in seconds; 0/omitted = 60s default. Raise it
+  # above your model server's cold-load time (LM Studio JIT reload after
+  # idle can exceed 60s) so the first analysis after an idle period doesn't
+  # die at the default limit.
+  timeout_sec: 180
 
 # Optional. Omit this whole section to run local-only, exactly as before —
 # nothing below changes behavior unless escalation.always_cloud is also set

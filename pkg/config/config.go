@@ -129,6 +129,16 @@ type LLMConfig struct {
 	// proxy. Sent as "Authorization: Bearer <key>"; omit for local
 	// backends that don't need one.
 	APIKey string `yaml:"api_key"`
+
+	// TimeoutSec bounds one chat-completion call; 0 keeps the client's
+	// 60s default. Exists because a local model server that unloaded its
+	// model on idle (LM Studio JIT mode) can spend well over 60s
+	// reloading it before the first token — observed in production
+	// 2026-08-31, where the first analysis after an idle period failed
+	// at exactly the 60s mark and the retry landed on a warm model. Set
+	// this above the cold-load time (e.g. 180) to make that first
+	// analysis succeed instead.
+	TimeoutSec int `yaml:"timeout_sec"`
 }
 
 // CloudConfig is the cloud model endpoint escalated alerts get
@@ -266,6 +276,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Summarizer.Endpoint == "" {
 		return fmt.Errorf("summarizer.endpoint is not set in config.yaml")
+	}
+	if c.Summarizer.TimeoutSec < 0 {
+		return fmt.Errorf("summarizer.timeout_sec must be >= 0 (0 means the 60s default)")
 	}
 	// An escalation rule that can never fire (no Cloud configured) is a
 	// silent no-op the operator almost certainly didn't intend — fail

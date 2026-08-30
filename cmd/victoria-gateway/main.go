@@ -94,6 +94,7 @@ func runServe(args []string) {
 		Model:    cfg.Summarizer.Model,
 		Backend:  "aiops-summarizer",
 		APIKey:   cfg.Summarizer.APIKey,
+		Timeout:  time.Duration(cfg.Summarizer.TimeoutSec) * time.Second,
 	})
 	summarizer := aiops.NewSummarizer(llm)
 

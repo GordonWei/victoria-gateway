@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestOpenAIClient_Chat(t *testing.T) {
@@ -534,5 +535,20 @@ func TestGeminiClient_Available(t *testing.T) {
 	}
 	if receivedAPIKey != "k" {
 		t.Errorf("Available() sent api key %q, want %q", receivedAPIKey, "k")
+	}
+}
+
+func TestNewOpenAIClient_TimeoutConfigurable(t *testing.T) {
+	// 0 keeps the 60s default; a positive value is applied verbatim.
+	// This is what config's summarizer.timeout_sec ultimately controls —
+	// lock the mapping so a refactor can't silently drop it back to a
+	// hard-coded 60s (the failure mode that ate cold-model analyses).
+	def := NewOpenAIClient(OpenAIClientConfig{Endpoint: "http://x", Model: "m"})
+	if def.client.Timeout != 60*time.Second {
+		t.Errorf("default timeout = %v, want 60s", def.client.Timeout)
+	}
+	custom := NewOpenAIClient(OpenAIClientConfig{Endpoint: "http://x", Model: "m", Timeout: 180 * time.Second})
+	if custom.client.Timeout != 180*time.Second {
+		t.Errorf("custom timeout = %v, want 180s", custom.client.Timeout)
 	}
 }

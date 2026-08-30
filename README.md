@@ -88,7 +88,9 @@ loki:
 summarizer:
   endpoint: "http://your-llm-host:1234"   # OpenAI-compatible /v1/chat/completions
   model: "your-model-name"
-  # api_key: ""   # optional; only for a real cloud endpoint requiring auth, see below
+  # api_key: ""      # optional; only for a real cloud endpoint requiring auth, see below
+  # timeout_sec: 180 # optional; per-call timeout, default 60 — raise above your
+                     # model server's cold-load time (LM Studio JIT reload after idle)
 
 telegram:
   bot_token: ""   # leave empty to disable the push
@@ -589,9 +591,10 @@ local summarize, a genuine local-model-requested cloud escalation,
 Telegram delivery, RAG capture and tracker issue filing all confirmed via
 logs and the new duration/notify metrics (test artifacts cleaned up
 afterwards). One pre-existing behavior observed, not caused by this
-batch: the local LLM's 60s client timeout can fail the first analysis
-after the model server has been idle (cold model load); the retry lands
-on a warm model.
+batch: the local LLM's 60s default client timeout can fail the first
+analysis after the model server has been idle (cold model load); the
+retry lands on a warm model. Fixed properly in v1.2.1 via
+`summarizer.timeout_sec` — set it above the cold-load time (e.g. 180).
 
 Started as a subcommand of a larger CLI project; this repo is that logic
 extracted and trimmed down to just what the service needs (no CLI, REPL, or
