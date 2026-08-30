@@ -578,14 +578,20 @@ window was confirmed suppressed; a non-matching one correctly proceeded
 through the full pipeline). See `pkg/maintenance/maintenance_test.go` for
 the regression cases.
 
-2026-08-31 batch (notification routing, similar-incident references, the
-`/incidents` pages, async webhook mode, graceful shutdown, Telegram
-truncation/retry, Loki/embedder retry, duration metrics): implemented with
-unit coverage across `pkg/notify`, `pkg/config`, `pkg/rag`, and
-`cmd/victoria-gateway`; not yet exercised against the production
-deployment — deploy + end-to-end verification on the monitoring host is
-the remaining step before these count as "running in production" like the
-features above.
+2026-08-31 batch — v1.2.0 (notification routing, similar-incident
+references, the `/incidents` pages, async webhook mode, graceful
+shutdown, Telegram truncation/retry, Loki/embedder retry, duration
+metrics): implemented with unit coverage across `pkg/notify`,
+`pkg/config`, `pkg/rag`, and `cmd/victoria-gateway`, then deployed to the
+production monitoring host the same day and verified end-to-end with a
+real test alert: 202 in ~5ms (async mode), Loki query, RAG retrieval,
+local summarize, a genuine local-model-requested cloud escalation,
+Telegram delivery, RAG capture and tracker issue filing all confirmed via
+logs and the new duration/notify metrics (test artifacts cleaned up
+afterwards). One pre-existing behavior observed, not caused by this
+batch: the local LLM's 60s client timeout can fail the first analysis
+after the model server has been idle (cold model load); the retry lands
+on a warm model.
 
 Started as a subcommand of a larger CLI project; this repo is that logic
 extracted and trimmed down to just what the service needs (no CLI, REPL, or
