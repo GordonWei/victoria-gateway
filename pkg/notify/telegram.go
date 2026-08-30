@@ -128,7 +128,7 @@ func FormatTelegramText(msg Message) string {
 		var b strings.Builder
 		b.WriteString("\n\n📎 相似歷史事件：")
 		for _, s := range msg.Similar {
-			b.WriteString(fmt.Sprintf("\n • %s — %s", html.EscapeString(s.Ref), html.EscapeString(s.Date)))
+			fmt.Fprintf(&b, "\n • %s — %s", html.EscapeString(s.Ref), html.EscapeString(s.Date))
 			if s.URL != "" {
 				b.WriteString("\n   " + html.EscapeString(s.URL))
 			}

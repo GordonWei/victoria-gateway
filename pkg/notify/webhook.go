@@ -72,7 +72,7 @@ func (w *WebhookChannel) Send(msg Message) error {
 		Error:      msg.Error,
 	}
 	for _, s := range msg.Similar {
-		body.SimilarIncidents = append(body.SimilarIncidents, similarIncident{Ref: s.Ref, Date: s.Date, URL: s.URL})
+		body.SimilarIncidents = append(body.SimilarIncidents, similarIncident(s))
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
