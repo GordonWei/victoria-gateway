@@ -69,6 +69,13 @@ summarizer:
 #   embedding_model: "bge-m3"
 #   # embedding_api_key: ""   # optional; only if embedding_endpoint requires auth
 #   top_k: 3
+#   # Similar-incident references in notifications (on by default when RAG
+#   # is on): past confirmed incidents with cosine similarity >= the
+#   # threshold get linked at the bottom of each push — issue URL when the
+#   # record has one, otherwise this service's own /incidents/{id} page.
+#   # show_similar_in_notification: true
+#   # similarity_threshold: 0.75
+#   # public_base_url: "http://REPLACE-host:8090"   # what /incidents links are prefixed with
 #   # Optional. Files an issue per analyzed alert on whichever tracker you
 #   # configure; `victoria-gateway sync` (run on a schedule) reads closed
 #   # issues' last comment back in as the resolution. Omit both to skip
@@ -93,3 +100,43 @@ telegram:
   # which nothing reads in production).
   bot_token: "REPLACE-bot-token"
   chat_id: 0
+
+# Optional. Respond 202 immediately and analyze in the background instead of
+# holding Alertmanager's webhook connection until every analysis finishes.
+# Recommended (true) for any deployment fronted by a real Alertmanager —
+# its own webhook timeout is far shorter than a cloud escalation, so sync
+# mode makes it time out and redeliver every slow alert. Leave false only
+# if you rely on reading full results from the response body via curl.
+webhook_async: true
+
+# Optional. How long a SIGTERM'd process waits for in-flight analyses to
+# finish before exiting anyway (seconds; 0 = the 300s default). Pair it
+# with stop_grace_period on the compose service so Docker doesn't SIGKILL
+# the container mid-drain.
+# shutdown_grace_sec: 300
+
+# Optional. Multi-channel notification routing. Omit this whole block and
+# the `telegram` block above stays the single destination for everything —
+# exactly the old behavior. With this block, alerts are routed to the
+# first route whose matchers all match the alert's labels (same glob
+# syntax as maintenance_windows); a `default: true` route (last) catches
+# the rest. If the top-level `telegram` block is also set and no route is
+# marked default, it becomes the implicit default route.
+# notifications:
+#   channels:
+#     - name: "critical-ops"
+#       type: telegram
+#       bot_token: "REPLACE-bot-token"
+#       chat_id: 0
+#     - name: "itsm-webhook"
+#       type: webhook
+#       url: "http://REPLACE-itsm/api/v1/alerts"
+#       # method: POST            # optional, defaults to POST
+#       # headers:                # optional, sent verbatim
+#       #   Authorization: "Bearer REPLACE"
+#   routes:
+#     - matchers:
+#         severity: critical
+#       channels: ["critical-ops", "itsm-webhook"]
+#     - default: true
+#       channels: ["critical-ops"]

@@ -29,10 +29,21 @@ func NewClient(endpoint string) *Client {
 	}
 }
 
+// retrySleep is swapped out by tests so retry paths don't wait real
+// backoffs.
+var retrySleep = time.Sleep
+
 // QueryRange fetches log entries from Loki for the given host and time
 // window. The LogQL query is `{host="<host>"}` — the label name "host"
 // is fixed here; if the webhook uses "instance", the caller maps it
 // before calling this (see docs/_agent_handoff.md "已知落差" note).
+//
+// A transient failure (transport error or 5xx) is retried once after a
+// short pause: a Loki failure fails the whole alert analysis, and on a
+// home-lab network a single blip is common enough — and a duplicate
+// query cheap enough — that one retry meaningfully cuts the "analysis
+// died for nothing" rate. Anything 4xx fails immediately; the query
+// won't get better by asking again.
 func (c *Client) QueryRange(host string, start, end time.Time, limit int) ([]LogEntry, error) {
 	query := fmt.Sprintf(`{host="%s"}`, host)
 
@@ -46,22 +57,38 @@ func (c *Client) QueryRange(host string, start, end time.Time, limit int) ([]Log
 
 	reqURL := fmt.Sprintf("%s/loki/api/v1/query_range?%s", c.endpoint, params.Encode())
 
+	body, err := c.getWithOneRetry(reqURL)
+	if err != nil {
+		return nil, err
+	}
+	return parseLokiResponse(body)
+}
+
+func (c *Client) getWithOneRetry(reqURL string) ([]byte, error) {
+	body, retryable, err := c.getOnce(reqURL)
+	if err != nil && retryable {
+		retrySleep(500 * time.Millisecond)
+		body, _, err = c.getOnce(reqURL)
+	}
+	return body, err
+}
+
+func (c *Client) getOnce(reqURL string) (body []byte, retryable bool, err error) {
 	resp, err := c.httpClient.Get(reqURL)
 	if err != nil {
-		return nil, fmt.Errorf("loki: request failed: %w", err)
+		return nil, true, fmt.Errorf("loki: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("loki: read body: %w", err)
+		return nil, true, fmt.Errorf("loki: read body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("loki: HTTP %d: %s", resp.StatusCode, truncate(body, 200))
+		return nil, resp.StatusCode >= 500, fmt.Errorf("loki: HTTP %d: %s", resp.StatusCode, truncate(body, 200))
 	}
-
-	return parseLokiResponse(body)
+	return body, false, nil
 }
 
 // lokiResponse is the top-level Loki query_range JSON envelope.

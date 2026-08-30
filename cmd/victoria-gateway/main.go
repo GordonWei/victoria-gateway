@@ -17,13 +17,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"html"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
@@ -31,6 +32,7 @@ import (
 	"github.com/gordonwei/victoria-gateway/pkg/maintenance"
 	"github.com/gordonwei/victoria-gateway/pkg/metrics"
 	"github.com/gordonwei/victoria-gateway/pkg/model"
+	"github.com/gordonwei/victoria-gateway/pkg/notify"
 	"github.com/gordonwei/victoria-gateway/pkg/rag"
 	"github.com/gordonwei/victoria-gateway/pkg/tracker"
 )
@@ -94,7 +96,6 @@ func runServe(args []string) {
 		APIKey:   cfg.Summarizer.APIKey,
 	})
 	summarizer := aiops.NewSummarizer(llm)
-	telegram := aiops.NewTelegramNotifier(cfg.Telegram.BotToken, cfg.Telegram.ChatID)
 
 	var cloud model.LLM
 	if cfg.Cloud != nil {
@@ -133,14 +134,21 @@ func runServe(args []string) {
 	h := &handler{
 		loki:        lokiClient,
 		summarizer:  summarizer,
-		telegram:    telegram,
 		cloud:       cloud,
 		escalation:  cfg.Escalation,
 		lookback:    lookback,
 		limit:       limit,
 		webhookAuth: cfg.WebhookAuth,
 		metrics:     &metrics.Counters{},
+		async:       cfg.WebhookAsync,
 	}
+
+	notifier, err := buildNotifier(cfg, h.metrics)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+		os.Exit(1)
+	}
+	h.notifier = notifier
 
 	if len(cfg.MaintenanceWindows) > 0 {
 		mw, err := maintenance.ParseWindows(cfg.MaintenanceWindows)
@@ -165,6 +173,13 @@ func runServe(args []string) {
 		if h.ragTopK <= 0 {
 			h.ragTopK = 3
 		}
+		h.ragShowSimilar = cfg.RAG.ShowSimilarInNotification == nil || *cfg.RAG.ShowSimilarInNotification
+		h.ragSimThreshold = cfg.RAG.SimilarityThreshold
+		if h.ragSimThreshold == 0 {
+			h.ragSimThreshold = 0.75
+		}
+		h.publicBaseURL = strings.TrimRight(cfg.RAG.PublicBaseURL, "/")
+		h.issueURL = issueURLBuilder(cfg.RAG)
 		t, err := buildTracker(cfg.RAG)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "❌ %v\n", err)
@@ -180,34 +195,181 @@ func runServe(args []string) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.Handle("/metrics", h.metrics.Handler())
+	if ragEnabled {
+		mux.HandleFunc("/incidents", h.handleIncidentsList)
+		mux.HandleFunc("/incidents/", h.handleIncidentDetail)
+	}
 
-	fmt.Printf("🚀 victoria-gateway listening on %s (POST /webhook/alertmanager)\n", addr)
-	fmt.Printf("   loki: %s | summarizer: %s (%s) | telegram: %v | cloud: %v | rag: %v\n",
-		cfg.Loki.Endpoint, cfg.Summarizer.Endpoint, cfg.Summarizer.Model, telegram.Enabled(), cloud != nil, ragEnabled)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+		// A slow or stalled client mustn't pin a goroutine forever.
+		// ReadTimeout is generous because Alertmanager payloads are small
+		// and local — it's a stall guard, not a pacing device. No
+		// WriteTimeout: in sync mode the response legitimately takes as
+		// long as the slowest analysis (minutes on a cloud escalation).
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	fmt.Printf("🚀 victoria-gateway listening on %s (POST /webhook/alertmanager, async=%v)\n", addr, cfg.WebhookAsync)
+	fmt.Printf("   loki: %s | summarizer: %s (%s) | notify: %v | cloud: %v | rag: %v\n",
+		cfg.Loki.Endpoint, cfg.Summarizer.Endpoint, cfg.Summarizer.Model, h.notifier.Enabled(), cloud != nil, ragEnabled)
+
+	// Graceful shutdown: SIGTERM/SIGINT stops accepting new requests,
+	// then waits (bounded) for in-flight analyses — which may be running
+	// as background goroutines in async mode, invisible to
+	// http.Server.Shutdown — before exiting. Without this, a redeploy's
+	// SIGTERM killed analyses mid-flight: a wasted LLM/cloud call, and
+	// possibly a RAG capture or issue half-done.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-serveErr:
 		fmt.Fprintf(os.Stderr, "❌ serve: %v\n", err)
 		os.Exit(1)
+	case <-ctx.Done():
+	}
+
+	grace := time.Duration(cfg.ShutdownGraceSec) * time.Second
+	if grace <= 0 {
+		grace = 5 * time.Minute
+	}
+	log.Printf("shutdown: signal received, draining (grace %s)", grace)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown: server close: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() { h.inFlight.Wait(); close(done) }()
+	select {
+	case <-done:
+		log.Printf("shutdown: all in-flight analyses finished")
+	case <-time.After(grace):
+		log.Printf("shutdown: grace period expired with analyses still in flight, exiting anyway")
+	}
+}
+
+// buildNotifier assembles the notification router from config, honoring
+// the backward-compat contract in the design doc: no `notifications`
+// block means the top-level `telegram` block behaves exactly as before
+// (every alert to one chat); with both, the top-level telegram becomes
+// the implicit default route unless an explicit default exists, in which
+// case it's ignored with a warning.
+func buildNotifier(cfg *config.Config, m *metrics.Counters) (*notify.Router, error) {
+	onResult := func(channel string, err error) {
+		m.IncNotifyPush(channel, err != nil)
+		if err != nil && channel == implicitTelegramChannel {
+			// Keep the legacy counter moving for dashboards built before
+			// per-channel metrics existed.
+			m.IncTelegramPushFailuresTotal()
+		}
+	}
+
+	var channels []notify.Channel
+	var routes []notify.Route
+
+	if cfg.Notifications != nil {
+		for _, ch := range cfg.Notifications.Channels {
+			switch ch.Type {
+			case "telegram":
+				channels = append(channels, notify.NewTelegramChannel(ch.Name, ch.BotToken, ch.ChatID))
+			case "webhook":
+				channels = append(channels, notify.NewWebhookChannel(ch.Name, ch.URL, ch.Method, ch.Headers))
+			default:
+				// config.Validate already rejected anything else.
+				return nil, fmt.Errorf("notifications: unknown channel type %q", ch.Type)
+			}
+		}
+		hasExplicitDefault := false
+		for _, rt := range cfg.Notifications.Routes {
+			routes = append(routes, notify.Route{Matchers: rt.Matchers, Channels: rt.Channels, Default: rt.Default})
+			if rt.Default {
+				hasExplicitDefault = true
+			}
+		}
+		if cfg.Telegram.BotToken != "" {
+			if hasExplicitDefault {
+				log.Printf("notify: top-level telegram block ignored — notifications.routes already has a default route")
+			} else {
+				channels = append(channels, notify.NewTelegramChannel(implicitTelegramChannel, cfg.Telegram.BotToken, cfg.Telegram.ChatID))
+				routes = append(routes, notify.Route{Default: true, Channels: []string{implicitTelegramChannel}})
+			}
+		}
+	} else if cfg.Telegram.BotToken != "" {
+		channels = append(channels, notify.NewTelegramChannel(implicitTelegramChannel, cfg.Telegram.BotToken, cfg.Telegram.ChatID))
+		routes = append(routes, notify.Route{Default: true, Channels: []string{implicitTelegramChannel}})
+	}
+
+	return notify.NewRouter(channels, routes, onResult)
+}
+
+// implicitTelegramChannel names the channel synthesized from the
+// top-level `telegram` config block. Underscore-prefixed so it can't
+// collide with an operator-defined channel name (config validation
+// requires those to be non-empty, but doesn't reserve names).
+const implicitTelegramChannel = "_telegram"
+
+// issueURLBuilder returns a function mapping a tracker issue number to a
+// browsable URL, or nil when no tracker (or no URL scheme we can trust)
+// is configured. Gitea's browse URL is derivable from its endpoint;
+// github.com's is fixed; a GitHub Enterprise API endpoint is not
+// reliably mappable to its web UI, so that case yields no URL rather
+// than a guessed-wrong one.
+func issueURLBuilder(ragCfg *config.RAGConfig) func(int64) string {
+	switch {
+	case ragCfg.Gitea != nil:
+		base := strings.TrimRight(ragCfg.Gitea.Endpoint, "/")
+		owner, repo := ragCfg.Gitea.Owner, ragCfg.Gitea.Repo
+		return func(n int64) string {
+			return fmt.Sprintf("%s/%s/%s/issues/%d", base, owner, repo, n)
+		}
+	case ragCfg.GitHub != nil && ragCfg.GitHub.Endpoint == "":
+		owner, repo := ragCfg.GitHub.Owner, ragCfg.GitHub.Repo
+		return func(n int64) string {
+			return fmt.Sprintf("https://github.com/%s/%s/issues/%d", owner, repo, n)
+		}
+	default:
+		return nil
 	}
 }
 
 type handler struct {
 	loki        *aiops.Client
 	summarizer  *aiops.Summarizer
-	telegram    *aiops.TelegramNotifier
-	cloud       model.LLM // nil if no cloud escalation target configured
+	notifier    *notify.Router // nil-safe; nil or channel-less means "no pushes"
+	cloud       model.LLM      // nil if no cloud escalation target configured
 	escalation  config.EscalationConfig
 	lookback    time.Duration
 	limit       int
 	webhookAuth *config.WebhookAuthConfig // nil if the webhook endpoint requires no auth
+	async       bool                      // respond 202 and analyze in the background (config.webhook_async)
 
-	rag         rag.Store     // nil if RAG is disabled
-	ragEmbedder *rag.Embedder // nil if RAG is disabled
-	ragTopK     int
-	tracker     tracker.Tracker // nil if no issue tracker (Gitea/GitHub) is configured
+	rag             rag.Store     // nil if RAG is disabled
+	ragEmbedder     *rag.Embedder // nil if RAG is disabled
+	ragTopK         int
+	ragShowSimilar  bool
+	ragSimThreshold float64
+	publicBaseURL   string             // prefix for /incidents links in notifications; "" renders bare paths
+	issueURL        func(int64) string // issue number → browse URL; nil if not derivable
+	tracker         tracker.Tracker    // nil if no issue tracker (Gitea/GitHub) is configured
 
 	metrics *metrics.Counters // nil-safe; see pkg/metrics
 
 	maintenanceWindows []maintenance.Window
+
+	// inFlight counts running analyses (sync or async) so shutdown can
+	// drain them — http.Server.Shutdown only waits for open requests,
+	// which in async mode have long since returned 202.
+	inFlight sync.WaitGroup
 
 	dedupMu  sync.Mutex
 	recentFP map[string]time.Time // fingerprint -> last-processed time, see claimFingerprint
@@ -327,7 +489,9 @@ type alertResult struct {
 	Summary    string `json:"summary,omitempty"`
 	AnalyzedBy string `json:"analyzed_by,omitempty"` // "local" or "cloud" or "suppressed"
 	Error      string `json:"error,omitempty"`
-	muted      bool   // not exported to JSON; controls whether notification is skipped
+
+	muted   bool                     // not exported to JSON; controls whether notification is skipped
+	similar []notify.SimilarIncident // past confirmed incidents above the similarity threshold, for notifications
 }
 
 func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Request) {
@@ -398,17 +562,46 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 		toProcess = append(toProcess, alert)
 	}
 
+	// Async mode: the filtering/dedup above already decided what will be
+	// processed, so Alertmanager gets its answer now — a 202 with counts —
+	// instead of waiting out the slowest analysis (minutes, on a cloud
+	// escalation) and timing out. The analyses run as tracked background
+	// goroutines; their results reach humans via notification channels,
+	// which was always the real delivery path (the sync response body is
+	// read by nothing but curl).
+	if h.async {
+		for _, alert := range toProcess {
+			h.inFlight.Add(1)
+			go func(alert aiops.Alert) {
+				defer h.inFlight.Done()
+				res := h.summarizeOne(alert)
+				h.notifyResult(res, alert.Labels)
+			}(alert)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		if err := json.NewEncoder(w).Encode(struct {
+			Status   string `json:"status"`
+			Accepted int    `json:"accepted"`
+		}{Status: "accepted", Accepted: len(toProcess)}); err != nil {
+			log.Printf("aiops: encode response: %v", err)
+		}
+		return
+	}
+
 	// Each goroutine only ever writes its own index, so results needs no
 	// mutex — index isolation, not locking, is what makes this safe.
 	results := make([]alertResult, len(toProcess))
 	var wg sync.WaitGroup
 	for i, alert := range toProcess {
 		wg.Add(1)
+		h.inFlight.Add(1)
 		go func(i int, alert aiops.Alert) {
 			defer wg.Done()
+			defer h.inFlight.Done()
 			res := h.summarizeOne(alert)
 			results[i] = res
-			h.notifyTelegram(res)
+			h.notifyResult(res, alert.Labels)
 		}(i, alert)
 	}
 	wg.Wait()
@@ -427,7 +620,9 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 // multiple alerts, and one bad one shouldn't blank out the rest.
 func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	h.metrics.IncAlertsTotal()
+	analysisStart := time.Now()
 	defer func() {
+		h.metrics.ObserveAnalysisDuration(time.Since(analysisStart))
 		if res.Error != "" {
 			h.metrics.IncAlertsErrorTotal()
 		}
@@ -468,15 +663,20 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		return
 	}
 
+	lokiStart := time.Now()
 	logs, err := h.loki.QueryRange(host, start.Add(-h.lookback), time.Now(), h.limit)
+	h.metrics.ObserveLokiQueryDuration(time.Since(lokiStart))
 	if err != nil {
 		res.Error = fmt.Sprintf("loki query: %v", err)
 		return
 	}
 
-	ragContext := h.retrieveRAGContext(alert, logs)
+	ragContext, similar := h.retrieveRAGContext(alert, logs)
+	res.similar = similar
 
+	localStart := time.Now()
 	local, err := h.summarizer.Summarize(alert, logs, ragContext)
+	h.metrics.ObserveLocalLLMDuration(time.Since(localStart))
 	if err != nil {
 		res.Error = fmt.Sprintf("summarize: %v", err)
 		return
@@ -495,7 +695,9 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		escalate = false
 	}
 	if escalate && h.cloud != nil {
+		cloudStart := time.Now()
 		cloudResult, cloudErr := aiops.SummarizeWithLLM(h.cloud, alert, logs, ragContext)
+		h.metrics.ObserveCloudLLMDuration(time.Since(cloudStart))
 		if cloudErr != nil {
 			// Escalation failing isn't fatal to the alert — the local
 			// summary is still a real (if less confident) answer, and an
@@ -588,13 +790,17 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 }
 
 // retrieveRAGContext looks up past incidents similar to this alert, if
-// RAG is enabled. It's best-effort: any failure (embedding endpoint down,
-// Postgres unreachable) is logged and treated as "no context found"
+// RAG is enabled. It returns two views of one search: the formatted
+// prompt context (all top-K hits — a weak match is still context for the
+// model) and the similar-incident references worth showing a human
+// (filtered by the similarity threshold, since a notification link is a
+// claim, not a hint). It's best-effort: any failure (embedding endpoint
+// down, Postgres unreachable) is logged and treated as "nothing found"
 // rather than failing the alert — a broken RAG store shouldn't take down
 // the summarizer's core job.
-func (h *handler) retrieveRAGContext(alert aiops.Alert, logs []aiops.LogEntry) string {
+func (h *handler) retrieveRAGContext(alert aiops.Alert, logs []aiops.LogEntry) (string, []notify.SimilarIncident) {
 	if h.rag == nil || h.ragEmbedder == nil {
-		return ""
+		return "", nil
 	}
 
 	host, _ := alert.Host()
@@ -608,56 +814,73 @@ func (h *handler) retrieveRAGContext(alert aiops.Alert, logs []aiops.LogEntry) s
 	}
 	queryText := rag.BuildQueryText(alert.Labels["alertname"], host, description, logLines)
 
+	searchStart := time.Now()
+	defer func() { h.metrics.ObserveRAGSearchDuration(time.Since(searchStart)) }()
+
 	embedding, err := h.ragEmbedder.Embed(queryText)
 	if err != nil {
 		log.Printf("aiops: rag embed failed, continuing without past-incident context: %v", err)
 		h.metrics.IncRAGSearchFailuresTotal()
-		return ""
+		return "", nil
 	}
 
 	records, err := h.rag.Search(context.Background(), embedding, h.ragTopK)
 	if err != nil {
 		log.Printf("aiops: rag search failed, continuing without past-incident context: %v", err)
 		h.metrics.IncRAGSearchFailuresTotal()
-		return ""
+		return "", nil
 	}
-	return rag.FormatContext(records)
+	return rag.FormatContext(records), h.similarIncidents(records)
 }
 
-// notifyTelegram pushes one alert's outcome to Telegram, if a bot token is
-// configured. This is the only place the summary actually reaches a human
-// — the webhook's HTTP response body is read by nothing (Alertmanager
+// similarIncidents converts search hits above the similarity threshold
+// into notification references — issue URL when the record has one,
+// /incidents/{id} (prefixed with public_base_url if configured)
+// otherwise, so every confirmed record is reachable one way or the
+// other.
+func (h *handler) similarIncidents(records []rag.Record) []notify.SimilarIncident {
+	if !h.ragShowSimilar {
+		return nil
+	}
+	var out []notify.SimilarIncident
+	for _, r := range records {
+		if r.Similarity < h.ragSimThreshold {
+			continue
+		}
+		s := notify.SimilarIncident{Date: r.CreatedAt.Format("2006-01-02")}
+		if r.GiteaIssueNumber != 0 && h.issueURL != nil {
+			s.Ref = fmt.Sprintf("#%d %s (%s)", r.GiteaIssueNumber, r.AlertName, r.Host)
+			s.URL = h.issueURL(r.GiteaIssueNumber)
+		} else {
+			s.Ref = fmt.Sprintf("incident/%d — %s (%s)", r.ID, r.AlertName, r.Host)
+			s.URL = fmt.Sprintf("%s/incidents/%d", h.publicBaseURL, r.ID)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// notifyResult pushes one alert's outcome through the notification
+// router. This is the only place the summary actually reaches a human —
+// the webhook's HTTP response body is read by nothing (Alertmanager
 // discards it), so without this push the LLM's answer would be computed
-// and then thrown away. Failures here are logged, not returned: a broken
-// Telegram push shouldn't change the webhook's HTTP response to
-// Alertmanager, which would just make Alertmanager retry pointlessly.
-func (h *handler) notifyTelegram(res alertResult) {
-	if !h.telegram.Enabled() {
+// and then thrown away. Failures inside channels are logged and counted,
+// never returned: a broken push shouldn't change the webhook's HTTP
+// response to Alertmanager, which would just make Alertmanager retry
+// pointlessly.
+func (h *handler) notifyResult(res alertResult, labels map[string]string) {
+	if !h.notifier.Enabled() {
 		return
 	}
 	if res.muted {
 		return
 	}
-
-	// The alert name/host come from our own labels and are safe, but the
-	// summary (LLM output) and error (may embed raw log/error text) are
-	// not — Telegram's HTML parse_mode rejects the whole message on an
-	// unescaped '<', '>', or '&', so those two must be escaped.
-	var text string
-	switch {
-	case res.Error != "":
-		text = fmt.Sprintf("⚠️ <b>%s</b> (%s)\n無法產生摘要：%s",
-			html.EscapeString(res.AlertName), html.EscapeString(res.Host), html.EscapeString(res.Error))
-	case res.AnalyzedBy == "cloud":
-		text = fmt.Sprintf("🔍 <b>%s</b> (%s)\n<i>已升級至 cloud model 深度分析</i>\n\n%s",
-			html.EscapeString(res.AlertName), html.EscapeString(res.Host), html.EscapeString(res.Summary))
-	default:
-		text = fmt.Sprintf("🚨 <b>%s</b> (%s)\n\n%s",
-			html.EscapeString(res.AlertName), html.EscapeString(res.Host), html.EscapeString(res.Summary))
-	}
-
-	if err := h.telegram.SendMessage(text); err != nil {
-		log.Printf("aiops: telegram push failed for alert %q: %v", res.AlertName, err)
-		h.metrics.IncTelegramPushFailuresTotal()
-	}
+	h.notifier.Dispatch(notify.Message{
+		AlertName:  res.AlertName,
+		Host:       res.Host,
+		Summary:    res.Summary,
+		AnalyzedBy: res.AnalyzedBy,
+		Error:      res.Error,
+		Similar:    res.similar,
+	}, labels)
 }

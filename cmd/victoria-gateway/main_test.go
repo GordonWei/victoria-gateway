@@ -365,6 +365,23 @@ func (f *fakeRAGStore) PendingWithGiteaIssue(ctx context.Context) ([]rag.Record,
 func (f *fakeRAGStore) Confirm(ctx context.Context, id int64, resolution string) error {
 	return fmt.Errorf("not implemented in fake")
 }
+func (f *fakeRAGStore) GetConfirmed(ctx context.Context, id int64) (rag.Record, error) {
+	for _, r := range f.records {
+		if r.ID == id {
+			return r, nil
+		}
+	}
+	return rag.Record{}, rag.ErrNotFound
+}
+func (f *fakeRAGStore) ListConfirmed(ctx context.Context, limit int) ([]rag.Record, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if limit > 0 && len(f.records) > limit {
+		return f.records[:limit], nil
+	}
+	return f.records, nil
+}
 func (f *fakeRAGStore) Close() error { return nil }
 
 func TestSummarizeOne_RAGContext_InjectedIntoPrompt(t *testing.T) {

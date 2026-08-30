@@ -42,7 +42,18 @@ type Record struct {
 	GiteaIssueNumber int64
 	CreatedAt        time.Time
 	ConfirmedAt      time.Time // zero if not yet Confirmed
+
+	// Similarity is the cosine similarity (1 - cosine distance, so 1.0 is
+	// identical) between this record and the query embedding. Populated
+	// only by Search — a record fetched any other way has no query to be
+	// similar to, and carries 0 here.
+	Similarity float64
 }
+
+// ErrNotFound is returned by GetConfirmed when no confirmed record has
+// the requested id — distinct from a transport/query error so a web
+// handler can answer 404 instead of 500.
+var ErrNotFound = fmt.Errorf("rag: record not found")
 
 // Store is the persistence boundary rag talks to. It's an interface so
 // the retrieval/formatting logic in this package (and the handler wiring
@@ -69,6 +80,13 @@ type Store interface {
 	// Confirm attaches a resolution to an existing record (Pending or
 	// not) and marks it Confirmed, making it eligible for Search.
 	Confirm(ctx context.Context, id int64, resolution string) error
+	// GetConfirmed returns the Confirmed record with the given id, or
+	// ErrNotFound. Pending records are invisible here on purpose — the
+	// /incidents pages this feeds only ever show verified resolutions.
+	GetConfirmed(ctx context.Context, id int64) (Record, error)
+	// ListConfirmed returns up to limit Confirmed records, newest
+	// confirmation first.
+	ListConfirmed(ctx context.Context, limit int) ([]Record, error)
 	Close() error
 }
 
@@ -130,18 +148,21 @@ func scanRecord(row interface{ Scan(...any) error }) (Record, error) {
 
 // Search finds the topK Confirmed incidents whose embedding is closest to
 // the given one by cosine distance (the `<=>` operator, matching the
-// vector_cosine_ops index in schema.sql).
+// vector_cosine_ops index in schema.sql). Each returned Record carries
+// its cosine similarity (1 - distance) so callers can threshold what a
+// human gets shown, not just rank order.
 func (s *PGStore) Search(ctx context.Context, embedding []float32, topK int) ([]Record, error) {
 	if topK <= 0 {
 		topK = 3
 	}
+	vec := formatVector(embedding)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT `+recordColumns+`
+		SELECT `+recordColumns+`, 1 - (embedding <=> $1::vector) AS similarity
 		FROM incidents
 		WHERE status = 'confirmed'
 		ORDER BY embedding <=> $1::vector
 		LIMIT $2
-	`, formatVector(embedding), topK)
+	`, vec, topK)
 	if err != nil {
 		return nil, fmt.Errorf("rag search query: %w", err)
 	}
@@ -149,9 +170,13 @@ func (s *PGStore) Search(ctx context.Context, embedding []float32, topK int) ([]
 
 	var records []Record
 	for rows.Next() {
-		r, err := scanRecord(rows)
-		if err != nil {
+		var r Record
+		var confirmedAt time.Time
+		if err := rows.Scan(&r.ID, &r.AlertName, &r.Host, &r.LogExcerpt, &r.Summary, &r.Resolution, &r.Status, &r.GiteaIssueNumber, &r.CreatedAt, &confirmedAt, &r.Similarity); err != nil {
 			return nil, fmt.Errorf("rag search scan row: %w", err)
+		}
+		if !confirmedAt.IsZero() && confirmedAt.Unix() != 0 {
+			r.ConfirmedAt = confirmedAt
 		}
 		records = append(records, r)
 	}
@@ -159,6 +184,55 @@ func (s *PGStore) Search(ctx context.Context, embedding []float32, topK int) ([]
 		return nil, fmt.Errorf("rag search iterate rows: %w", err)
 	}
 	return records, nil
+}
+
+// GetConfirmed returns the Confirmed record with the given id, or
+// ErrNotFound (which covers both "no such row" and "row exists but is
+// still pending" — to the /incidents page those are the same "nothing
+// to show").
+func (s *PGStore) GetConfirmed(ctx context.Context, id int64) (Record, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT `+recordColumns+`
+		FROM incidents
+		WHERE status = 'confirmed' AND id = $1
+	`, id)
+	r, err := scanRecord(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return Record{}, ErrNotFound
+		}
+		return Record{}, fmt.Errorf("rag get confirmed: %w", err)
+	}
+	return r, nil
+}
+
+// ListConfirmed returns up to limit Confirmed records, most recently
+// confirmed first.
+func (s *PGStore) ListConfirmed(ctx context.Context, limit int) ([]Record, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+recordColumns+`
+		FROM incidents
+		WHERE status = 'confirmed'
+		ORDER BY confirmed_at DESC NULLS LAST, id DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("rag list confirmed: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var records []Record
+	for rows.Next() {
+		r, err := scanRecord(rows)
+		if err != nil {
+			return nil, fmt.Errorf("rag list confirmed scan row: %w", err)
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
 }
 
 // Insert stores a new Confirmed incident record. Resolution is required

@@ -35,13 +35,17 @@ func newMockStore(t *testing.T) (*PGStore, sqlmock.Sqlmock) {
 
 var recordRowCols = []string{"id", "alert_name", "host", "log_excerpt", "summary", "resolution", "status", "gitea_issue_number", "created_at", "confirmed_at"}
 
+// searchRowCols is recordRowCols plus the similarity column Search
+// computes (1 - cosine distance).
+var searchRowCols = append(append([]string{}, recordRowCols...), "similarity")
+
 func TestPGStore_Search(t *testing.T) {
 	store, mock := newMockStore(t)
 
 	createdAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	confirmedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
-	rows := sqlmock.NewRows(recordRowCols).
-		AddRow(int64(1), "InstanceDown", "192.0.2.7", "log excerpt", "old summary", "舊測試機殘留 target，已下線", "confirmed", int64(0), createdAt, confirmedAt)
+	rows := sqlmock.NewRows(searchRowCols).
+		AddRow(int64(1), "InstanceDown", "192.0.2.7", "log excerpt", "old summary", "舊測試機殘留 target，已下線", "confirmed", int64(0), createdAt, confirmedAt, 0.83)
 
 	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'confirmed'").
 		WithArgs("[0.1,0.2]", 3).
@@ -60,6 +64,9 @@ func TestPGStore_Search(t *testing.T) {
 	if records[0].Status != "confirmed" {
 		t.Errorf("status = %q, want confirmed", records[0].Status)
 	}
+	if records[0].Similarity != 0.83 {
+		t.Errorf("similarity = %v, want 0.83", records[0].Similarity)
+	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
@@ -69,7 +76,7 @@ func TestPGStore_Search(t *testing.T) {
 func TestPGStore_Search_DefaultsTopK(t *testing.T) {
 	store, mock := newMockStore(t)
 
-	rows := sqlmock.NewRows(recordRowCols)
+	rows := sqlmock.NewRows(searchRowCols)
 	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'confirmed'").
 		WithArgs("[1]", 3).
 		WillReturnRows(rows)
@@ -219,5 +226,58 @@ func TestPGStore_Confirm_NoSuchRecord(t *testing.T) {
 
 	if err := store.Confirm(context.Background(), 999, "x"); err == nil {
 		t.Error("expected error when no row matches the id")
+	}
+}
+
+func TestPGStore_GetConfirmed(t *testing.T) {
+	store, mock := newMockStore(t)
+
+	createdAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	confirmedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows(recordRowCols).
+		AddRow(int64(5), "DiskFull", "h1", "log", "summary", "清掉 /var/log", "confirmed", int64(0), createdAt, confirmedAt)
+	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'confirmed' AND id").
+		WithArgs(int64(5)).
+		WillReturnRows(rows)
+
+	rec, err := store.GetConfirmed(context.Background(), 5)
+	if err != nil {
+		t.Fatalf("GetConfirmed: %v", err)
+	}
+	if rec.Resolution != "清掉 /var/log" {
+		t.Errorf("unexpected record: %+v", rec)
+	}
+}
+
+func TestPGStore_GetConfirmed_NotFound(t *testing.T) {
+	store, mock := newMockStore(t)
+	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'confirmed' AND id").
+		WithArgs(int64(999)).
+		WillReturnRows(sqlmock.NewRows(recordRowCols))
+
+	_, err := store.GetConfirmed(context.Background(), 999)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPGStore_ListConfirmed(t *testing.T) {
+	store, mock := newMockStore(t)
+
+	createdAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	confirmedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows(recordRowCols).
+		AddRow(int64(2), "B", "h2", "", "s", "r2", "confirmed", int64(0), createdAt, confirmedAt).
+		AddRow(int64(1), "A", "h1", "", "s", "r1", "confirmed", int64(0), createdAt, confirmedAt)
+	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'confirmed'\\s+ORDER BY confirmed_at DESC").
+		WithArgs(20).
+		WillReturnRows(rows)
+
+	records, err := store.ListConfirmed(context.Background(), 0) // 0 falls back to 20
+	if err != nil {
+		t.Fatalf("ListConfirmed: %v", err)
+	}
+	if len(records) != 2 || records[0].ID != 2 {
+		t.Errorf("unexpected records: %+v", records)
 	}
 }

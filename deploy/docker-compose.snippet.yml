@@ -27,3 +27,7 @@ services:
       # (http://victoria-gateway:8090/webhook/alertmanager) and doesn't need
       # this mapping — drop it if you don't want the port exposed on the host.
       - "8090:8090"
+    # Give graceful shutdown room to drain in-flight analyses (a cloud
+    # escalation can run minutes); without this Docker SIGKILLs 10s after
+    # SIGTERM and the drain never happens. Keep >= shutdown_grace_sec.
+    stop_grace_period: 5m30s

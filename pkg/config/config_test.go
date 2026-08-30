@@ -108,3 +108,128 @@ func TestValidate_RAGDisabled_FieldsNotRequired(t *testing.T) {
 		t.Errorf("Validate() = %v, want nil when rag.enabled is false (fields shouldn't be required)", err)
 	}
 }
+
+// --- notifications block validation ---
+
+func validNotifications() *NotificationsConfig {
+	return &NotificationsConfig{
+		Channels: []NotifyChannelConfig{
+			{Name: "ops", Type: "telegram", BotToken: "t", ChatID: 1},
+			{Name: "itsm", Type: "webhook", URL: "http://itsm/api"},
+		},
+		Routes: []NotifyRouteConfig{
+			{Matchers: map[string]string{"severity": "critical"}, Channels: []string{"ops", "itsm"}},
+			{Default: true, Channels: []string{"ops"}},
+		},
+	}
+}
+
+func TestValidate_Notifications_OK(t *testing.T) {
+	c := validConfig()
+	c.Notifications = validNotifications()
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil", err)
+	}
+}
+
+func TestValidate_Notifications_NoRoutes(t *testing.T) {
+	c := validConfig()
+	c.Notifications = validNotifications()
+	c.Notifications.Routes = nil
+	if err := c.Validate(); err == nil {
+		t.Error("expected error when notifications has channels but no routes")
+	}
+}
+
+func TestValidate_Notifications_DuplicateChannelName(t *testing.T) {
+	c := validConfig()
+	c.Notifications = validNotifications()
+	c.Notifications.Channels = append(c.Notifications.Channels, NotifyChannelConfig{Name: "ops", Type: "webhook", URL: "http://x"})
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for duplicate channel name")
+	}
+}
+
+func TestValidate_Notifications_TelegramMissingToken(t *testing.T) {
+	c := validConfig()
+	c.Notifications = validNotifications()
+	c.Notifications.Channels[0].BotToken = ""
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for telegram channel without bot_token")
+	}
+}
+
+func TestValidate_Notifications_WebhookMissingURL(t *testing.T) {
+	c := validConfig()
+	c.Notifications = validNotifications()
+	c.Notifications.Channels[1].URL = ""
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for webhook channel without url")
+	}
+}
+
+func TestValidate_Notifications_UnknownChannelType(t *testing.T) {
+	c := validConfig()
+	c.Notifications = validNotifications()
+	c.Notifications.Channels[0].Type = "slack"
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for unknown channel type")
+	}
+}
+
+func TestValidate_Notifications_RouteUndefinedChannel(t *testing.T) {
+	c := validConfig()
+	c.Notifications = validNotifications()
+	c.Notifications.Routes[0].Channels = []string{"nope"}
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for route referencing undefined channel")
+	}
+}
+
+func TestValidate_Notifications_NonDefaultRouteNeedsMatchers(t *testing.T) {
+	c := validConfig()
+	c.Notifications = validNotifications()
+	c.Notifications.Routes[0].Matchers = nil
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for non-default route without matchers")
+	}
+}
+
+func TestValidate_Notifications_RouteAfterDefaultUnreachable(t *testing.T) {
+	c := validConfig()
+	c.Notifications = validNotifications()
+	c.Notifications.Routes = []NotifyRouteConfig{
+		{Default: true, Channels: []string{"ops"}},
+		{Matchers: map[string]string{"severity": "critical"}, Channels: []string{"ops"}},
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for a route after the default route")
+	}
+}
+
+func TestValidate_Notifications_DefaultWithMatchers(t *testing.T) {
+	c := validConfig()
+	c.Notifications = validNotifications()
+	c.Notifications.Routes[1].Matchers = map[string]string{"x": "y"}
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for a default route that also has matchers")
+	}
+}
+
+// --- rag similarity threshold / shutdown grace ---
+
+func TestValidate_RAGSimilarityThresholdOutOfRange(t *testing.T) {
+	c := validConfig()
+	c.RAG = &RAGConfig{Enabled: true, PostgresDSN: "d", EmbeddingEndpoint: "e", EmbeddingModel: "m", SimilarityThreshold: 1.5}
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for similarity_threshold > 1")
+	}
+}
+
+func TestValidate_NegativeShutdownGrace(t *testing.T) {
+	c := validConfig()
+	c.ShutdownGraceSec = -1
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for negative shutdown_grace_sec")
+	}
+}

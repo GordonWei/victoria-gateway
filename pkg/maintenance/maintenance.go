@@ -321,7 +321,18 @@ func (s *schedule) inOverflowPortion(now time.Time) bool {
 }
 
 func (w *Window) matchLabels(labels map[string]string) bool {
-	for matchKey, matchPattern := range w.Matchers {
+	return MatchLabels(w.Matchers, labels)
+}
+
+// MatchLabels reports whether every matcher (label name → glob pattern)
+// is satisfied by labels — AND semantics, with the same glob dialect as
+// maintenance windows. Exported because notification routing
+// (pkg/notify) deliberately shares this exact matcher syntax: an operator
+// who has learned to write `host: "192.0.2.*"` for a maintenance
+// window writes the identical thing in a notification route, instead of
+// two subtly different glob dialects drifting apart.
+func MatchLabels(matchers, labels map[string]string) bool {
+	for matchKey, matchPattern := range matchers {
 		labelVal, exists := labels[matchKey]
 		if !exists {
 			return false

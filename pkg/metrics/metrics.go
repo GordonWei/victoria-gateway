@@ -10,7 +10,10 @@ package metrics
 import (
 	"fmt"
 	"net/http"
+	"sort"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Counters holds victoria-gateway's counters. A nil *Counters is valid:
@@ -36,6 +39,65 @@ type Counters struct {
 	telegramPushFailuresTotal       atomic.Int64
 	maintenanceSuppressedTotal      atomic.Int64
 	maintenanceMutedTotal           atomic.Int64
+
+	// Per-channel notification delivery outcomes, labeled by channel
+	// name. A map behind a mutex rather than more atomic fields because
+	// channel names are config-defined, not known at compile time.
+	notifyPushTotal        labeledCounter
+	notifyPushFailureTotal labeledCounter
+
+	// Duration observations (sum + count pairs, enough for Grafana to
+	// graph an average) — deliberately not histograms: hand-rolling
+	// buckets buys little for a home-lab service, and this keeps the
+	// no-client_golang dependency stance.
+	analysisDuration  durationStat // whole summarizeOne, per analyzed alert
+	lokiQueryDuration durationStat
+	localLLMDuration  durationStat
+	cloudLLMDuration  durationStat
+	ragSearchDuration durationStat // embed + search, the retrieval side only
+}
+
+// labeledCounter is a counter family with one string label. Zero value
+// is ready to use.
+type labeledCounter struct {
+	mu   sync.Mutex
+	vals map[string]int64
+}
+
+func (l *labeledCounter) inc(label string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.vals == nil {
+		l.vals = make(map[string]int64)
+	}
+	l.vals[label]++
+}
+
+// snapshot returns the labels in sorted order for stable exposition
+// output (scrape diffs and tests both appreciate determinism).
+func (l *labeledCounter) snapshot() (labels []string, vals map[string]int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	vals = make(map[string]int64, len(l.vals))
+	for k, v := range l.vals {
+		vals[k] = v
+		labels = append(labels, k)
+	}
+	sort.Strings(labels)
+	return labels, vals
+}
+
+// durationStat accumulates observations as a sum (nanoseconds, in an
+// atomic int) and a count — the two series Prometheus needs to compute
+// an average rate. Zero value is ready to use.
+type durationStat struct {
+	sumNanos atomic.Int64
+	count    atomic.Int64
+}
+
+func (d *durationStat) observe(dur time.Duration) {
+	d.sumNanos.Add(int64(dur))
+	d.count.Add(1)
 }
 
 func (c *Counters) IncAlertsTotal() {
@@ -128,6 +190,49 @@ func (c *Counters) IncMaintenanceMutedTotal() {
 	}
 }
 
+// IncNotifyPush records one notification delivery attempt's outcome for
+// the named channel. Failures also bump the attempt counter — total is
+// attempts, not successes, so failure/total is a meaningful ratio.
+func (c *Counters) IncNotifyPush(channel string, failed bool) {
+	if c == nil {
+		return
+	}
+	c.notifyPushTotal.inc(channel)
+	if failed {
+		c.notifyPushFailureTotal.inc(channel)
+	}
+}
+
+func (c *Counters) ObserveAnalysisDuration(d time.Duration) {
+	if c != nil {
+		c.analysisDuration.observe(d)
+	}
+}
+
+func (c *Counters) ObserveLokiQueryDuration(d time.Duration) {
+	if c != nil {
+		c.lokiQueryDuration.observe(d)
+	}
+}
+
+func (c *Counters) ObserveLocalLLMDuration(d time.Duration) {
+	if c != nil {
+		c.localLLMDuration.observe(d)
+	}
+}
+
+func (c *Counters) ObserveCloudLLMDuration(d time.Duration) {
+	if c != nil {
+		c.cloudLLMDuration.observe(d)
+	}
+}
+
+func (c *Counters) ObserveRAGSearchDuration(d time.Duration) {
+	if c != nil {
+		c.ragSearchDuration.observe(d)
+	}
+}
+
 // counterDef pairs a counter's exposition name/help with a snapshot of its
 // current value, taken at Handler-call time.
 type counterDef struct {
@@ -159,6 +264,23 @@ func (c *Counters) snapshot() []counterDef {
 	}
 }
 
+// durationDef pairs one durationStat with its exposition base name.
+type durationDef struct {
+	name string
+	help string
+	stat *durationStat
+}
+
+func (c *Counters) durations() []durationDef {
+	return []durationDef{
+		{"victoria_gateway_analysis_duration_seconds", "Whole per-alert analysis time (Loki + LLM + escalation + RAG capture).", &c.analysisDuration},
+		{"victoria_gateway_loki_query_duration_seconds", "Loki query_range call time.", &c.lokiQueryDuration},
+		{"victoria_gateway_local_llm_duration_seconds", "Local summarizer LLM call time.", &c.localLLMDuration},
+		{"victoria_gateway_cloud_llm_duration_seconds", "Cloud escalation call time (successful or not).", &c.cloudLLMDuration},
+		{"victoria_gateway_rag_search_duration_seconds", "RAG retrieval time (embed + vector search).", &c.ragSearchDuration},
+	}
+}
+
 // Handler serves the counters at GET /metrics in Prometheus text
 // exposition format. Safe to call on a nil *Counters (renders every
 // counter as 0), matching the Inc methods' nil-safety above.
@@ -170,6 +292,32 @@ func (c *Counters) Handler() http.Handler {
 			// mid-scrape; nothing useful to do about it, and the next
 			// scrape interval will just try again.
 			_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n%s %d\n", d.name, d.help, d.name, d.name, d.val)
+		}
+		if c == nil {
+			return
+		}
+		for _, family := range []struct {
+			name string
+			lc   *labeledCounter
+		}{
+			{"victoria_gateway_notify_push_total", &c.notifyPushTotal},
+			{"victoria_gateway_notify_push_failure_total", &c.notifyPushFailureTotal},
+		} {
+			name, lc := family.name, family.lc
+			labels, vals := lc.snapshot()
+			if len(labels) == 0 {
+				continue
+			}
+			_, _ = fmt.Fprintf(w, "# TYPE %s counter\n", name)
+			for _, label := range labels {
+				_, _ = fmt.Fprintf(w, "%s{channel=%q} %d\n", name, label, vals[label])
+			}
+		}
+		for _, d := range c.durations() {
+			sum := time.Duration(d.stat.sumNanos.Load()).Seconds()
+			count := d.stat.count.Load()
+			_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s_sum counter\n%s_sum %.6f\n# TYPE %s_count counter\n%s_count %d\n",
+				d.name, d.help, d.name, d.name, sum, d.name, d.name, count)
 		}
 	})
 }

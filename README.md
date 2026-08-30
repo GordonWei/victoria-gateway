@@ -176,6 +176,92 @@ var), not per-window — if the container's `TZ` isn't what you expect, a
 "every Saturday 2am" window won't fire at 2am in the timezone you had in
 mind.
 
+## Notification routing: multiple channels
+
+By default there is one destination: the top-level `telegram` block, and
+every alert's summary goes there. The optional `notifications` block turns
+that into label-based routing across named channels:
+
+```yaml
+notifications:
+  channels:
+    - name: "critical-ops"
+      type: telegram
+      bot_token: "..."
+      chat_id: -100123456789
+    - name: "itsm-webhook"
+      type: webhook
+      url: "http://internal-itsm/api/v1/alerts"
+      # headers: { Authorization: "Bearer ..." }   # optional
+      # method: POST                                # optional
+  routes:
+    - matchers: { severity: critical, alertname: "Instance*" }
+      channels: ["critical-ops", "itsm-webhook"]
+    - default: true
+      channels: ["critical-ops"]
+```
+
+Routes are a flat, first-match list — matchers use the exact same
+label-glob syntax as maintenance windows (AND across matchers, `*`/`?`
+globs that cross `/`). A `default: true` route matches everything and must
+come last; a route with no default means unmatched alerts are deliberately
+not delivered. One route can fan out to several channels; each delivery is
+independent (one channel failing never blocks the others) and counted
+per-channel at `/metrics` (`victoria_gateway_notify_push_total{channel=...}`
+and `..._failure_total`).
+
+Backward compatibility: with no `notifications` block, nothing changes.
+With both, the top-level `telegram` becomes the implicit default route —
+unless the routes already declare their own `default: true`, in which case
+the top-level block is ignored (with a startup log line saying so).
+
+`type: webhook` channels POST a JSON body mirroring the analysis
+response's `alert_result` shape (`alert_name`, `host`, `summary`,
+`analyzed_by`, plus `similar_incidents` when present).
+
+Delivery reliability, both channel types: messages that fail on a
+transient error (network error, 429, 5xx) are retried twice with short
+backoff; permanent rejections (4xx) are not retried. Telegram messages are
+truncated below the API's 4096-character limit (without splitting an HTML
+entity or tag) instead of being silently rejected whole — the failure mode
+before this existed was "long cloud analysis = no notification at all".
+
+## Similar incidents in notifications, and the /incidents pages
+
+When RAG is enabled, each notification can end with a "相似歷史事件"
+section linking past *confirmed* incidents whose cosine similarity clears
+`rag.similarity_threshold` (default 0.75; the summarizer prompt still gets
+all `top_k` hits regardless — the threshold only gates what humans see).
+Records that filed a tracker issue link to the issue; records without one
+link to this service's own read-only pages:
+
+- `GET /incidents` — recent confirmed incidents (`?limit=`, default 20)
+- `GET /incidents/{id}` — one record: resolution, capture-time summary, log excerpt
+
+Set `rag.public_base_url` to the address a human's browser can actually
+reach so those links are absolute; disable the whole section with
+`rag.show_similar_in_notification: false`.
+
+## Async webhook mode and graceful shutdown
+
+`webhook_async: true` makes `POST /webhook/alertmanager` answer
+`202 Accepted` (with `{"status":"accepted","accepted":N}`) right after
+filtering/dedup and run the analyses in background goroutines. Recommended
+whenever a real Alertmanager is the caller: its webhook timeout is far
+shorter than a minutes-long cloud escalation, so in the default
+synchronous mode every slow analysis makes Alertmanager time out and
+redeliver (absorbed by dedup, but noisy and pointless). The default stays
+synchronous because the full-results response body is handy for curl-based
+testing.
+
+On SIGTERM/SIGINT the server stops accepting requests and waits up to
+`shutdown_grace_sec` (default 300s) for in-flight analyses — including
+async background ones — to finish before exiting, so a redeploy doesn't
+kill a half-done escalation, RAG capture, or issue filing. Pair it with
+`stop_grace_period` on the compose service (see
+`deploy/docker-compose.snippet.yml`), or Docker's default 10s SIGKILL
+lands first and the drain never happens.
+
 ## Triage: escalating a hard alert to a cloud model
 
 The local model is fast and free, but it's a small quantized model — it can
@@ -449,12 +535,16 @@ from the config file if you need to override it without editing the file.
 `GET /healthz` returns `200 ok` once the process is up — use it for a
 container healthcheck or a quick "is this running" check.
 
-`GET /metrics` exposes a handful of counters in Prometheus text exposition
-format — alerts processed/errored, dedup/resolved skips, webhook auth
-rejections, escalation attempts/failures/rate-limits, RAG capture/search
-failures, tracker issue-creation failures, Telegram push failures. No
-external dependency for this (`pkg/metrics` is hand-rolled, not
-`prometheus/client_golang`) — point a Prometheus scrape config at this
+`GET /metrics` exposes counters in Prometheus text exposition format —
+alerts processed/errored, dedup/resolved skips, webhook auth rejections,
+escalation attempts/failures/rate-limits, RAG capture/search failures,
+tracker issue-creation failures, per-channel notification pushes/failures
+(`victoria_gateway_notify_push_total{channel=...}`) — plus duration
+sum/count pairs (`victoria_gateway_analysis_duration_seconds_sum`/`_count`,
+and the same for `loki_query`, `local_llm`, `cloud_llm`, `rag_search`)
+so a dashboard can graph average latencies ("is the local model slower
+today"). No external dependency for this (`pkg/metrics` is hand-rolled,
+not `prometheus/client_golang`) — point a Prometheus scrape config at this
 port's `/metrics` path if you want them collected.
 
 Or via Docker — see `Dockerfile` and `deploy/`:
@@ -487,6 +577,15 @@ against the live deployment (a synthetic alert matching a temporary test
 window was confirmed suppressed; a non-matching one correctly proceeded
 through the full pipeline). See `pkg/maintenance/maintenance_test.go` for
 the regression cases.
+
+2026-08-31 batch (notification routing, similar-incident references, the
+`/incidents` pages, async webhook mode, graceful shutdown, Telegram
+truncation/retry, Loki/embedder retry, duration metrics): implemented with
+unit coverage across `pkg/notify`, `pkg/config`, `pkg/rag`, and
+`cmd/victoria-gateway`; not yet exercised against the production
+deployment — deploy + end-to-end verification on the monitoring host is
+the remaining step before these count as "running in production" like the
+features above.
 
 Started as a subcommand of a larger CLI project; this repo is that logic
 extracted and trimmed down to just what the service needs (no CLI, REPL, or

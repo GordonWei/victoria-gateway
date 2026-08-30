@@ -39,16 +39,33 @@ func NewEmbedder(endpoint, model, apiKey string) *Embedder {
 	}
 }
 
-// Embed returns the embedding vector for one piece of text.
+// retrySleep is swapped out by tests so retry paths don't wait real
+// backoffs.
+var retrySleep = time.Sleep
+
+// Embed returns the embedding vector for one piece of text. A transient
+// failure (transport error or 5xx) is retried once after a short pause —
+// an embed failure either drops past-incident context from the prompt or
+// (worse) silently skips capturing an incident into RAG, and a single
+// network blip shouldn't be what decides that.
 func (e *Embedder) Embed(text string) ([]float32, error) {
+	vec, retryable, err := e.embedOnce(text)
+	if err != nil && retryable {
+		retrySleep(500 * time.Millisecond)
+		vec, _, err = e.embedOnce(text)
+	}
+	return vec, err
+}
+
+func (e *Embedder) embedOnce(text string) (vec []float32, retryable bool, err error) {
 	reqBody, err := json.Marshal(embeddingRequest{Model: e.model, Input: text})
 	if err != nil {
-		return nil, fmt.Errorf("marshal embedding request: %w", err)
+		return nil, false, fmt.Errorf("marshal embedding request: %w", err)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, e.endpoint+"/v1/embeddings", bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("build embedding request: %w", err)
+		return nil, false, fmt.Errorf("build embedding request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if e.apiKey != "" {
@@ -57,23 +74,23 @@ func (e *Embedder) Embed(text string) ([]float32, error) {
 
 	resp, err := e.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("embedding request failed: %w", err)
+		return nil, true, fmt.Errorf("embedding request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("embedding endpoint returned %d: %s", resp.StatusCode, string(body))
+		return nil, resp.StatusCode >= 500, fmt.Errorf("embedding endpoint returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result embeddingResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode embedding response: %w", err)
+		return nil, false, fmt.Errorf("decode embedding response: %w", err)
 	}
 	if len(result.Data) == 0 || len(result.Data[0].Embedding) == 0 {
-		return nil, fmt.Errorf("embedding endpoint returned no vector")
+		return nil, false, fmt.Errorf("embedding endpoint returned no vector")
 	}
-	return result.Data[0].Embedding, nil
+	return result.Data[0].Embedding, false, nil
 }
 
 type embeddingRequest struct {
