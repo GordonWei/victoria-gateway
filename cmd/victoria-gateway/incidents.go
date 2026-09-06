@@ -35,11 +35,25 @@ th { color: #8b90a0; font-weight: 600; white-space: nowrap; }
 .muted { color: #6a6f7f; font-size: .85em; }
 `
 
+const incidentsFormCSS = `
+form.filter { display: flex; gap: .6rem; flex-wrap: wrap; align-items: end; margin: 1rem 0; }
+form.filter label { display: flex; flex-direction: column; font-size: .8rem; color: #8b90a0; gap: .2rem; }
+form.filter input { background: #1d2430; border: 1px solid #2a2e37; color: #d7dae0; padding: .35rem .5rem; border-radius: 4px; font-size: .9rem; }
+form.filter button { background: #2a2e37; border: 1px solid #3a3f4c; color: #d7dae0; padding: .4rem .9rem; border-radius: 4px; cursor: pointer; }
+form.filter button:hover { background: #343a46; }
+`
+
 var incidentListTmpl = template.Must(template.New("list").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>victoria-gateway incidents</title><style>` + incidentsBaseCSS + `</style></head>
+<title>victoria-gateway incidents</title><style>` + incidentsBaseCSS + incidentsFormCSS + `</style></head>
 <body>
-<h1>已確認事件（最近 {{len .Records}} 筆）</h1>
+<h1>已確認事件（{{if or .AlertName .Host}}符合篩選條件{{else}}最近{{end}} {{len .Records}} 筆）</h1>
+<form class="filter" method="get" action="/incidents">
+  <label>告警名稱<input type="text" name="alertname" value="{{.AlertName}}" placeholder="alertname 子字串"></label>
+  <label>主機<input type="text" name="host" value="{{.Host}}" placeholder="host 子字串"></label>
+  <label>筆數上限<input type="number" name="limit" value="{{.Limit}}" min="1" max="100" style="width:5rem"></label>
+  <button type="submit">篩選</button>
+</form>
 {{if .Records}}
 <table>
 <tr><th>ID</th><th>告警</th><th>主機</th><th>確認時間</th><th>處置摘要</th></tr>
@@ -56,7 +70,7 @@ var incidentListTmpl = template.Must(template.New("list").Parse(`<!doctype html>
 {{else}}
 <p class="muted">還沒有任何已確認的事件。</p>
 {{end}}
-<p class="muted">victoria-gateway · 只列 Confirmed 記錄；?limit=N 可調（上限 100）</p>
+<p class="muted">victoria-gateway · 只列 Confirmed 記錄；?limit=N 可調（上限 100）、?alertname=/?host= 可做子字串篩選</p>
 </body></html>`))
 
 var incidentDetailTmpl = template.Must(template.New("detail").Parse(`<!doctype html>
@@ -97,14 +111,24 @@ func (h *handler) handleIncidentsList(w http.ResponseWriter, r *http.Request) {
 	if limit > 100 {
 		limit = 100
 	}
-	records, err := h.rag.ListConfirmed(r.Context(), limit)
+	filter := rag.ListFilter{
+		AlertName: r.URL.Query().Get("alertname"),
+		Host:      r.URL.Query().Get("host"),
+	}
+	records, err := h.rag.ListConfirmed(r.Context(), filter, limit)
 	if err != nil {
 		log.Printf("incidents: list failed: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := incidentListTmpl.Execute(w, struct{ Records []rag.Record }{records}); err != nil {
+	page := struct {
+		Records   []rag.Record
+		AlertName string
+		Host      string
+		Limit     int
+	}{records, filter.AlertName, filter.Host, limit}
+	if err := incidentListTmpl.Execute(w, page); err != nil {
 		log.Printf("incidents: render list: %v", err)
 	}
 }

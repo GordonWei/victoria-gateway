@@ -158,6 +158,7 @@ func runServe(args []string) {
 			os.Exit(1)
 		}
 		h.maintenanceWindows = mw
+		h.maintenanceWindowDefs = cfg.MaintenanceWindows
 	}
 
 	ragEnabled := cfg.RAG != nil && cfg.RAG.Enabled
@@ -200,6 +201,7 @@ func runServe(args []string) {
 		mux.HandleFunc("/incidents", h.handleIncidentsList)
 		mux.HandleFunc("/incidents/", h.handleIncidentDetail)
 	}
+	mux.HandleFunc("/maintenance-windows", h.handleMaintenanceWindows)
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -365,7 +367,19 @@ type handler struct {
 
 	metrics *metrics.Counters // nil-safe; see pkg/metrics
 
+	// maintenanceMu guards maintenanceWindows and maintenanceWindowDefs.
+	// Both were write-once-at-startup, read-only-after fields until PUT
+	// /maintenance-windows (maintenance_api.go) made them mutable at
+	// runtime from a different goroutine than the many concurrent
+	// summarizeOne calls reading them — hence the lock, where before
+	// there was none.
+	maintenanceMu      sync.RWMutex
 	maintenanceWindows []maintenance.Window
+	// maintenanceWindowDefs mirrors maintenanceWindows in its original,
+	// GET-able form: maintenance.Window's schedule/start/end fields are
+	// unexported (parsed, not serializable), so this is what GET
+	// /maintenance-windows actually returns.
+	maintenanceWindowDefs []config.MaintenanceWindow
 
 	// inFlight counts running analyses (sync or async) so shutdown can
 	// drain them — http.Server.Shutdown only waits for open requests,
@@ -378,6 +392,15 @@ type handler struct {
 	escalationMu          sync.Mutex
 	escalationWindowStart time.Time
 	escalationCount       int
+}
+
+// currentMaintenanceWindows returns the currently-active maintenance
+// windows under a read lock. Always call this instead of reading
+// h.maintenanceWindows directly — see maintenanceMu's doc comment.
+func (h *handler) currentMaintenanceWindows() []maintenance.Window {
+	h.maintenanceMu.RLock()
+	defer h.maintenanceMu.RUnlock()
+	return h.maintenanceWindows
 }
 
 // allowEscalation reports whether an escalation to Cloud is still within
@@ -635,8 +658,8 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	// this alert is suppressed (skip entirely) or muted (analyze but
 	// don't push). Check uses the alert's full label set so matchers can
 	// reference any label, not just host/alertname.
-	if len(h.maintenanceWindows) > 0 {
-		action, windowName := maintenance.CheckAll(h.maintenanceWindows, time.Now(), alert.Labels)
+	if windows := h.currentMaintenanceWindows(); len(windows) > 0 {
+		action, windowName := maintenance.CheckAll(windows, time.Now(), alert.Labels)
 		switch action {
 		case maintenance.ActionSuppress:
 			log.Printf("aiops: alert %q suppressed by maintenance window %q", res.AlertName, windowName)

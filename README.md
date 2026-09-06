@@ -141,6 +141,7 @@ maintenance_windows:
     matchers:
       job: "postgres-backup"       # label name -> glob pattern
     action: "suppress"             # "suppress" or "mute"
+    timezone: "Asia/Taipei"        # optional; see "Timezones" below
 
   - name: "one-off-migration"
     start: "2026-09-01T22:00:00Z"  # one-time: ISO8601, use this OR schedule
@@ -173,10 +174,59 @@ supports `*`/`?` wildcards as a normal string glob — including across `/`
 (e.g. `"/api/*"` matches `/api/v1/checkout`), unlike Go's `filepath.Match`
 which treats `/` as a path separator boundary.
 
-Times in `schedule` are evaluated in the process's local timezone (`TZ` env
-var), not per-window — if the container's `TZ` isn't what you expect, a
-"every Saturday 2am" window won't fire at 2am in the timezone you had in
-mind.
+### Timezones
+
+By default, `schedule` times are evaluated in the process's local timezone
+(`TZ` env var) — if the container's `TZ` isn't what you expect, a "every
+Saturday 2am" window won't fire at 2am in the timezone you had in mind. Set
+the optional per-window `timezone` field (an IANA zone name, e.g.
+`"Asia/Taipei"`) to pin that window's schedule to a specific zone regardless
+of what the process itself runs in — useful when the gateway runs in one
+zone (say, a cloud region's UTC container) but the infrastructure the
+window is really about "means" a different one. `timezone` only affects
+`schedule`-based windows; a one-time `start`/`end` window is already an
+absolute instant (RFC3339 carries its own offset) and ignores it. An
+invalid zone name is rejected at config load / API validation time, same as
+any other malformed window field.
+
+### Hot-reloading windows: `GET`/`PUT /maintenance-windows`
+
+Changing `maintenance_windows` normally means editing `config.yaml` and
+restarting. `GET`/`PUT /maintenance-windows` let you inspect and replace the
+whole window set at runtime — handy for a one-off "quiet this for the next
+two hours" without a redeploy.
+
+Gated by the same `webhook_auth` Basic Auth as `POST
+/webhook/alertmanager`, when configured (unset means unauthenticated, same
+as the webhook) — this endpoint can suppress or mute alert delivery, so
+treat it as at least as sensitive.
+
+```bash
+# See what's currently in effect
+curl -s http://localhost:8090/maintenance-windows | jq
+# {"maintenance_windows":[{"name":"weekly-db-backup","schedule":"SAT 02:00-04:00", ...}]}
+
+# Replace the whole set (not a merge — this is the complete new list)
+curl -s -X PUT http://localhost:8090/maintenance-windows \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"name": "tonight-only", "start": "2026-09-06T22:00:00+08:00", "end": "2026-09-07T02:00:00+08:00",
+     "matchers": {"host": "172.16.100.6"}, "action": "suppress"}
+  ]'
+# {"status":"ok","count":1}
+```
+
+The JSON body is an array of the same object shape as one
+`maintenance_windows:` YAML entry (field names match: `name`, `schedule`,
+`start`, `end`, `matchers`, `action`, `timezone`). `PUT` is all-or-nothing:
+the whole array is validated and parsed before anything about the live
+window set is touched, so an invalid submission (bad action, empty
+matchers, unparseable schedule/timezone, ...) returns `400` with the
+`config.Validate`-equivalent error message and leaves whatever was
+previously in effect completely unchanged — never a partial replace.
+Changes made this way don't touch `config.yaml` on disk; a process restart
+reverts to whatever the file says, so a change you want to survive a
+restart still needs to be written back to the file separately.
 
 ## Notification routing: multiple channels
 
@@ -237,7 +287,13 @@ all `top_k` hits regardless — the threshold only gates what humans see).
 Records that filed a tracker issue link to the issue; records without one
 link to this service's own read-only pages:
 
-- `GET /incidents` — recent confirmed incidents (`?limit=`, default 20)
+- `GET /incidents` — recent confirmed incidents (`?limit=`, default 20, max
+  100). Optional `?alertname=` and `?host=` narrow the list to records whose
+  alert name / host contain that substring (case-insensitive, both filters
+  ANDed together when both are given); the page also has a small filter
+  form so this doesn't require hand-editing the URL, and the current
+  filter values stay filled in after submitting. No filter means the same
+  "just the recent list" behavior as before this existed.
 - `GET /incidents/{id}` — one record: resolution, capture-time summary, log excerpt
 
 Set `rag.public_base_url` to the address a human's browser can actually

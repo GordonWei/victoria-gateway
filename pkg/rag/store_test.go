@@ -273,11 +273,58 @@ func TestPGStore_ListConfirmed(t *testing.T) {
 		WithArgs(20).
 		WillReturnRows(rows)
 
-	records, err := store.ListConfirmed(context.Background(), 0) // 0 falls back to 20
+	records, err := store.ListConfirmed(context.Background(), ListFilter{}, 0) // 0 falls back to 20
 	if err != nil {
 		t.Fatalf("ListConfirmed: %v", err)
 	}
 	if len(records) != 2 || records[0].ID != 2 {
+		t.Errorf("unexpected records: %+v", records)
+	}
+}
+
+func TestPGStore_ListConfirmed_FilterByAlertNameAndHost(t *testing.T) {
+	store, mock := newMockStore(t)
+
+	createdAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	confirmedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows(recordRowCols).
+		AddRow(int64(3), "DiskSpaceWarning", "h3.example.com", "", "s", "r3", "confirmed", int64(0), createdAt, confirmedAt)
+
+	// Both filters set: expect both ILIKE conditions ANDed in, args in
+	// the order limit, alert_name, host (filter fields are appended in
+	// that order by PGStore.ListConfirmed).
+	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'confirmed' AND alert_name ILIKE \\$2 AND host ILIKE \\$3\\s+ORDER BY confirmed_at DESC").
+		WithArgs(10, "%DiskSpace%", "%h3%").
+		WillReturnRows(rows)
+
+	records, err := store.ListConfirmed(context.Background(), ListFilter{AlertName: "DiskSpace", Host: "h3"}, 10)
+	if err != nil {
+		t.Fatalf("ListConfirmed: %v", err)
+	}
+	if len(records) != 1 || records[0].ID != 3 {
+		t.Errorf("unexpected records: %+v", records)
+	}
+}
+
+func TestPGStore_ListConfirmed_FilterByHostOnly(t *testing.T) {
+	store, mock := newMockStore(t)
+
+	createdAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	confirmedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows(recordRowCols).
+		AddRow(int64(4), "AnyAlert", "172.16.100.6", "", "s", "r4", "confirmed", int64(0), createdAt, confirmedAt)
+
+	// Only Host set: alert_name clause must be absent, and the sole
+	// filter arg lands at $2 (not $3) since it's the only one appended.
+	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'confirmed' AND host ILIKE \\$2\\s+ORDER BY confirmed_at DESC").
+		WithArgs(20, "%172.16.100.6%").
+		WillReturnRows(rows)
+
+	records, err := store.ListConfirmed(context.Background(), ListFilter{Host: "172.16.100.6"}, 0)
+	if err != nil {
+		t.Fatalf("ListConfirmed: %v", err)
+	}
+	if len(records) != 1 || records[0].ID != 4 {
 		t.Errorf("unexpected records: %+v", records)
 	}
 }

@@ -298,6 +298,6 @@ Phase 3 — 相似事件呈現（功能 1）
 ## 未涵蓋 / 未來方向
 
 - Slack/Discord channel type — 架構已預留（`Channel` interface），等有需求再加。
-- `/incidents` 頁面加搜尋/篩選 — 第一版只做分頁列表，不做全文搜尋。
-- 維護窗的動態管理 API（runtime 新增/取消 window）— 先只走 config 重啟，之後可加 `PUT /maintenance-windows` 熱更新。
-- 跨日 schedule 的 timezone 處理 — 第一版用 process 本地時區（`time.Now()`），不做 per-window TZ 設定。
+- ~~`/incidents` 頁面加搜尋/篩選~~ ✅ **已完成（2026-09-06）**：`?alertname=`/`?host=` 子字串篩選（大小寫不敏感，兩者 AND），頁面加 sticky 篩選表單。`pkg/rag.Store.ListConfirmed` 簽名改為吃 `ListFilter`。仍不做全文搜尋（只比對 alert_name/host 兩欄）。
+- ~~維護窗的動態管理 API（runtime 新增/取消 window）~~ ✅ **已完成（2026-09-06）**：`GET`/`PUT /maintenance-windows`，沿用 `webhook_auth` 同一套 Basic Auth；`PUT` 全量替換、驗證失敗不動現有生效中的窗口。詳見 README「Hot-reloading windows」章節。
+- ~~跨日 schedule 的 timezone 處理~~ ✅ **已完成（2026-09-06）**：`MaintenanceWindow` 新增 `timezone`（IANA 時區名，選填），只影響 `schedule` 窗口；沒設就維持原本用呼叫端 `time.Time` 自帶時區的行為，完全回歸相容。

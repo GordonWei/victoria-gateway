@@ -516,3 +516,134 @@ func TestConfigValidate_MaintenanceWindow_Valid(t *testing.T) {
 		t.Errorf("Validate() = %v, want nil", err)
 	}
 }
+
+func TestConfigValidate_MaintenanceWindow_InvalidTimezone(t *testing.T) {
+	c := &config.Config{
+		Loki:       config.LokiConfig{Endpoint: "http://loki:3100"},
+		Summarizer: config.LLMConfig{Endpoint: "http://llm:1234", Model: "m"},
+		MaintenanceWindows: []config.MaintenanceWindow{
+			{
+				Name:     "bad-tz",
+				Schedule: "SAT 02:00-04:00",
+				Matchers: map[string]string{"host": "*"},
+				Action:   "suppress",
+				Timezone: "Not/A_Real_Zone",
+			},
+		},
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for invalid timezone")
+	}
+}
+
+func TestConfigValidate_MaintenanceWindow_ValidTimezone(t *testing.T) {
+	c := &config.Config{
+		Loki:       config.LokiConfig{Endpoint: "http://loki:3100"},
+		Summarizer: config.LLMConfig{Endpoint: "http://llm:1234", Model: "m"},
+		MaintenanceWindows: []config.MaintenanceWindow{
+			{
+				Name:     "ok-tz",
+				Schedule: "SAT 02:00-04:00",
+				Matchers: map[string]string{"host": "*"},
+				Action:   "suppress",
+				Timezone: "Asia/Taipei",
+			},
+		},
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil", err)
+	}
+}
+
+// TestParseWindows_Timezone_SetsLoc verifies a schedule window with a
+// Timezone def carries a parsed *time.Location, and one without keeps
+// loc nil (the original, unchanged behavior — Check uses whatever zone
+// the caller's time.Time already carries).
+func TestParseWindows_Timezone_SetsLoc(t *testing.T) {
+	defs := []config.MaintenanceWindow{
+		{
+			Name:     "with-tz",
+			Schedule: "SAT 23:00-02:00",
+			Matchers: map[string]string{"host": "*"},
+			Action:   "suppress",
+			Timezone: "Asia/Taipei",
+		},
+		{
+			Name:     "without-tz",
+			Schedule: "SAT 23:00-02:00",
+			Matchers: map[string]string{"host": "*"},
+			Action:   "suppress",
+		},
+	}
+	windows, err := ParseWindows(defs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if windows[0].loc == nil || windows[0].loc.String() != "Asia/Taipei" {
+		t.Errorf("window 0 loc = %v, want Asia/Taipei", windows[0].loc)
+	}
+	if windows[1].loc != nil {
+		t.Errorf("window 1 loc = %v, want nil (no timezone set)", windows[1].loc)
+	}
+}
+
+func TestParseWindows_Timezone_Invalid(t *testing.T) {
+	defs := []config.MaintenanceWindow{
+		{
+			Name:     "bad-tz",
+			Schedule: "SAT 02:00-04:00",
+			Matchers: map[string]string{"host": "*"},
+			Action:   "suppress",
+			Timezone: "Not/A_Real_Zone",
+		},
+	}
+	if _, err := ParseWindows(defs); err == nil {
+		t.Error("expected error for invalid timezone")
+	}
+}
+
+// TestIsActive_Timezone_SameInstantDifferentZones is the point of this
+// feature: the same UTC instant should be judged against a "SAT
+// 23:00-02:00" cross-midnight schedule differently depending on which
+// zone the window is configured to evaluate in — that's what an operator
+// running the gateway in one zone but maintaining infra that "means"
+// another zone's clock actually needs. Pick a UTC instant that's
+// Saturday 23:30 in Asia/Taipei (UTC+8) — inside the window — but a
+// Saturday morning (well outside 23:00-02:00) in America/Los_Angeles.
+func TestIsActive_Timezone_SameInstantDifferentZones(t *testing.T) {
+	taipei, err := ParseWindows([]config.MaintenanceWindow{{
+		Name: "taipei", Schedule: "SAT 23:00-02:00",
+		Matchers: map[string]string{"host": "*"}, Action: "suppress",
+		Timezone: "Asia/Taipei",
+	}})
+	if err != nil {
+		t.Fatalf("parse taipei window: %v", err)
+	}
+	laNoTZ, err := ParseWindows([]config.MaintenanceWindow{{
+		Name: "no-tz", Schedule: "SAT 23:00-02:00",
+		Matchers: map[string]string{"host": "*"}, Action: "suppress",
+		// no Timezone: evaluated in whatever zone the caller's time.Time carries.
+	}})
+	if err != nil {
+		t.Fatalf("parse no-tz window: %v", err)
+	}
+
+	la, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatalf("load America/Los_Angeles: %v", err)
+	}
+	// 2026-08-29 15:30 UTC = Sat 23:30 in Asia/Taipei (UTC+8) = Sat 08:30
+	// in America/Los_Angeles (UTC-7, PDT in August).
+	instant := time.Date(2026, 8, 29, 15, 30, 0, 0, time.UTC)
+	labels := map[string]string{"host": "anything"}
+
+	if !taipei[0].Check(instant, labels) {
+		t.Error("expected active: Sat 23:30 Asia/Taipei falls in SAT 23:00-02:00")
+	}
+	// Same instant, viewed in the caller's own America/Los_Angeles zone
+	// (no window Timezone override) — Sat 08:30, well outside the window.
+	instantLA := instant.In(la)
+	if laNoTZ[0].Check(instantLA, labels) {
+		t.Error("expected inactive: Sat 08:30 America/Los_Angeles is outside SAT 23:00-02:00")
+	}
+}

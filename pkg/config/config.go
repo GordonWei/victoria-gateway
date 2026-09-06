@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -85,13 +86,26 @@ type NotifyRouteConfig struct {
 // (analyzed and captured for RAG, but not pushed to Telegram). Useful for
 // planned maintenance where you know alerts will fire and don't want to be
 // notified or waste LLM calls on expected noise.
+//
+// JSON tags mirror the YAML tags (same snake_case names) so this struct
+// can also be sent/received verbatim by the PUT /maintenance-windows
+// admin API — an operator who's written `maintenance_windows:` YAML
+// writes the same field names in the JSON body.
 type MaintenanceWindow struct {
-	Name     string            `yaml:"name"`     // human-readable, printed in logs
-	Schedule string            `yaml:"schedule"` // periodic: "SAT 02:00-04:00", "DAILY 04:00-04:30", "1st-SUN 03:00-06:00"
-	Start    string            `yaml:"start"`    // one-time: ISO8601 start time
-	End      string            `yaml:"end"`      // one-time: ISO8601 end time
-	Matchers map[string]string `yaml:"matchers"` // label name → value (supports glob with *)
-	Action   string            `yaml:"action"`   // "suppress" or "mute"
+	Name     string            `yaml:"name" json:"name"`         // human-readable, printed in logs
+	Schedule string            `yaml:"schedule" json:"schedule"` // periodic: "SAT 02:00-04:00", "DAILY 04:00-04:30", "1st-SUN 03:00-06:00"
+	Start    string            `yaml:"start" json:"start"`       // one-time: ISO8601 start time
+	End      string            `yaml:"end" json:"end"`           // one-time: ISO8601 end time
+	Matchers map[string]string `yaml:"matchers" json:"matchers"` // label name → value (supports glob with *)
+	Action   string            `yaml:"action" json:"action"`     // "suppress" or "mute"
+
+	// Timezone is an optional IANA zone name (e.g. "Asia/Taipei") the
+	// `schedule` form is evaluated in. Empty (the default) keeps the
+	// original behavior: the process's local time zone. Only meaningful
+	// for `schedule`-based windows — a one-time `start`/`end` window is
+	// already an absolute instant (RFC3339 carries its own offset), so
+	// Timezone doesn't change how it's matched.
+	Timezone string `yaml:"timezone" json:"timezone"`
 }
 
 // WebhookAuthConfig, if set, makes the webhook handler require HTTP
@@ -310,7 +324,21 @@ func (c *Config) Validate() error {
 	if err := c.validateNotifications(); err != nil {
 		return err
 	}
-	for i, mw := range c.MaintenanceWindows {
+	if err := ValidateMaintenanceWindows(c.MaintenanceWindows); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateMaintenanceWindows checks a set of maintenance window
+// definitions in isolation — the same rules config.yaml's
+// `maintenance_windows:` block is held to via Config.Validate, factored
+// out so the PUT /maintenance-windows admin API (see
+// cmd/victoria-gateway/maintenance_api.go) can validate a submitted batch
+// before ever touching the live windows, without constructing a whole
+// fake Config.
+func ValidateMaintenanceWindows(defs []MaintenanceWindow) error {
+	for i, mw := range defs {
 		label := fmt.Sprintf("maintenance_windows[%d]", i)
 		if mw.Name != "" {
 			label = fmt.Sprintf("maintenance_windows[%d] (%s)", i, mw.Name)
@@ -331,6 +359,11 @@ func (c *Config) Validate() error {
 		}
 		if mw.Action != "suppress" && mw.Action != "mute" {
 			return fmt.Errorf("%s: action must be \"suppress\" or \"mute\", got %q", label, mw.Action)
+		}
+		if mw.Timezone != "" {
+			if _, err := time.LoadLocation(mw.Timezone); err != nil {
+				return fmt.Errorf("%s: invalid timezone %q: %w", label, mw.Timezone, err)
+			}
 		}
 	}
 	return nil
