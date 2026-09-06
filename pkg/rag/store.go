@@ -84,10 +84,19 @@ type Store interface {
 	// ErrNotFound. Pending records are invisible here on purpose — the
 	// /incidents pages this feeds only ever show verified resolutions.
 	GetConfirmed(ctx context.Context, id int64) (Record, error)
-	// ListConfirmed returns up to limit Confirmed records, newest
-	// confirmation first.
-	ListConfirmed(ctx context.Context, limit int) ([]Record, error)
+	// ListConfirmed returns up to limit Confirmed records matching
+	// filter, newest confirmation first.
+	ListConfirmed(ctx context.Context, filter ListFilter, limit int) ([]Record, error)
 	Close() error
+}
+
+// ListFilter narrows ListConfirmed to records whose AlertName/Host
+// contain the given substring (case-insensitive). An empty field means
+// "don't filter on this" — ListFilter{} matches everything, same as
+// calling ListConfirmed used to with no filtering at all.
+type ListFilter struct {
+	AlertName string
+	Host      string
 }
 
 // PGStore is a Store backed by PostgreSQL + the pgvector extension. See
@@ -206,19 +215,41 @@ func (s *PGStore) GetConfirmed(ctx context.Context, id int64) (Record, error) {
 	return r, nil
 }
 
-// ListConfirmed returns up to limit Confirmed records, most recently
-// confirmed first.
-func (s *PGStore) ListConfirmed(ctx context.Context, limit int) ([]Record, error) {
+// ListConfirmed returns up to limit Confirmed records matching filter,
+// most recently confirmed first. filter's fields are ANDed together and
+// matched as a case-insensitive substring (ILIKE '%...%'); an empty
+// field is not filtered on.
+func (s *PGStore) ListConfirmed(ctx context.Context, filter ListFilter, limit int) ([]Record, error) {
 	if limit <= 0 {
 		limit = 20
 	}
+
+	// Values are always passed as bind parameters, never interpolated
+	// into the query text — fmt.Sprintf here only builds up placeholder
+	// numbers and the WHERE clause's static structure, so a filter value
+	// containing SQL metacharacters is inert.
+	where := "status = 'confirmed'"
+	args := make([]any, 0, 3)
+	argN := 1
+	if filter.AlertName != "" {
+		argN++
+		where += fmt.Sprintf(" AND alert_name ILIKE $%d", argN)
+		args = append(args, "%"+filter.AlertName+"%")
+	}
+	if filter.Host != "" {
+		argN++
+		where += fmt.Sprintf(" AND host ILIKE $%d", argN)
+		args = append(args, "%"+filter.Host+"%")
+	}
+	args = append([]any{limit}, args...) // $1 is always the limit; filter args follow in the order added above
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+recordColumns+`
 		FROM incidents
-		WHERE status = 'confirmed'
+		WHERE `+where+`
 		ORDER BY confirmed_at DESC NULLS LAST, id DESC
 		LIMIT $1
-	`, limit)
+	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("rag list confirmed: %w", err)
 	}

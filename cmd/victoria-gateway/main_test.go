@@ -373,14 +373,27 @@ func (f *fakeRAGStore) GetConfirmed(ctx context.Context, id int64) (rag.Record, 
 	}
 	return rag.Record{}, rag.ErrNotFound
 }
-func (f *fakeRAGStore) ListConfirmed(ctx context.Context, limit int) ([]rag.Record, error) {
+func (f *fakeRAGStore) ListConfirmed(ctx context.Context, filter rag.ListFilter, limit int) ([]rag.Record, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	if limit > 0 && len(f.records) > limit {
-		return f.records[:limit], nil
+	matched := f.records
+	if filter.AlertName != "" || filter.Host != "" {
+		matched = nil
+		for _, r := range f.records {
+			if filter.AlertName != "" && !strings.Contains(strings.ToLower(r.AlertName), strings.ToLower(filter.AlertName)) {
+				continue
+			}
+			if filter.Host != "" && !strings.Contains(strings.ToLower(r.Host), strings.ToLower(filter.Host)) {
+				continue
+			}
+			matched = append(matched, r)
+		}
 	}
-	return f.records, nil
+	if limit > 0 && len(matched) > limit {
+		return matched[:limit], nil
+	}
+	return matched, nil
 }
 func (f *fakeRAGStore) Close() error { return nil }
 

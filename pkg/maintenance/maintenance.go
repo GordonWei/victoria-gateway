@@ -36,6 +36,14 @@ type Window struct {
 	schedule *schedule // periodic
 	start    time.Time // one-time
 	end      time.Time // one-time
+
+	// loc is the IANA time zone a `schedule` window is evaluated in
+	// (config.MaintenanceWindow.Timezone), nil when unset — in which case
+	// Check uses the time.Time it's given as-is (its own zone, normally
+	// the process's local zone; the original, unchanged behavior). Only
+	// consulted for schedule windows: a one-time start/end window is
+	// already an absolute instant, so there's nothing to reinterpret.
+	loc *time.Location
 }
 
 // schedule represents a parsed periodic time expression.
@@ -71,6 +79,13 @@ func ParseWindows(defs []config.MaintenanceWindow) ([]Window, error) {
 				return nil, fmt.Errorf("%s: %w", label, err)
 			}
 			w.schedule = s
+			if def.Timezone != "" {
+				loc, err := time.LoadLocation(def.Timezone)
+				if err != nil {
+					return nil, fmt.Errorf("%s: invalid timezone %q: %w", label, def.Timezone, err)
+				}
+				w.loc = loc
+			}
 		} else {
 			start, err := time.Parse(time.RFC3339, def.Start)
 			if err != nil {
@@ -242,6 +257,9 @@ func (w *Window) Check(now time.Time, labels map[string]string) bool {
 
 func (w *Window) isTimeActive(now time.Time) bool {
 	if w.schedule != nil {
+		if w.loc != nil {
+			now = now.In(w.loc)
+		}
 		return w.schedule.isActive(now)
 	}
 	return !now.Before(w.start) && now.Before(w.end)
