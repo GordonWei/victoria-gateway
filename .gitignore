@@ -25,3 +25,8 @@ coverage.html
 .env
 .envrc
 config.yaml
+
+# 本機工作草稿，不進版控（docs/ 底下其他 .md 是會 commit 的，避免被 git add -A 掃進去）
+docs/_draft_improvement_ideas_20260831.md
+docs/_draft_kiro_review_round2.md
+docs/_agent_handoff.md
