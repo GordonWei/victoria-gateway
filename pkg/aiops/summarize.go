@@ -168,14 +168,14 @@ func ShouldEscalate(alertName string, local SummarizeResult, alwaysCloud []strin
 }
 
 func buildPrompt(alert Alert, logs []LogEntry, ragContext string) (string, error) {
-	host, ok := alert.Host()
+	display, _, ok := alert.AffectedIdentity()
 	if !ok {
-		return "", fmt.Errorf("alert has neither \"host\" nor \"instance\" label, fingerprint=%s", alert.Fingerprint)
+		return "", fmt.Errorf("alert has neither \"host\"/\"instance\" nor \"namespace\"+\"pod\" labels, fingerprint=%s", alert.Fingerprint)
 	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "告警名稱：%s\n", alert.Labels["alertname"])
-	fmt.Fprintf(&b, "主機：%s\n", host)
+	fmt.Fprintf(&b, "主機：%s\n", display)
 	fmt.Fprintf(&b, "狀態：%s\n", alert.Status)
 	if summary, ok := alert.Annotations["summary"]; ok && summary != "" {
 		fmt.Fprintf(&b, "告警描述：%s\n", summary)

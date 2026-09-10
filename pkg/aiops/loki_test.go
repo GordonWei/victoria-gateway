@@ -41,7 +41,7 @@ func TestQueryRange_Success(t *testing.T) {
 	start := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 8, 20, 11, 0, 0, 0, time.UTC)
 
-	entries, err := client.QueryRange("web-01", start, end, 10)
+	entries, err := client.QueryRange(`{host="web-01"}`, start, end, 10)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestQueryRange_EmptyResult(t *testing.T) {
 	start := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 8, 20, 11, 0, 0, 0, time.UTC)
 
-	entries, err := client.QueryRange("ghost-host", start, end, 10)
+	entries, err := client.QueryRange(`{host="ghost-host"}`, start, end, 10)
 	if err != nil {
 		t.Fatalf("unexpected error for empty result: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestQueryRange_HTTP500(t *testing.T) {
 	start := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 8, 20, 11, 0, 0, 0, time.UTC)
 
-	_, err := client.QueryRange("web-01", start, end, 10)
+	_, err := client.QueryRange(`{host="web-01"}`, start, end, 10)
 	if err == nil {
 		t.Fatal("expected error for HTTP 500, got nil")
 	}
@@ -120,7 +120,7 @@ func TestQueryRange_HTTP200_StatusError(t *testing.T) {
 	start := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 8, 20, 11, 0, 0, 0, time.UTC)
 
-	_, err := client.QueryRange("web-01", start, end, 10)
+	_, err := client.QueryRange(`{host="web-01"}`, start, end, 10)
 	if err == nil {
 		t.Fatal("expected an error when the response body's status is \"error\" despite HTTP 200, got nil")
 	}
