@@ -8,7 +8,10 @@
 // contributors — compiling against one definition instead of drifting.
 package aiops
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // WebhookPayload mirrors the JSON body Alertmanager's webhook receiver POSTs.
 // Field set and shapes are the official format documented at
@@ -52,6 +55,37 @@ func (a Alert) Host() (host string, ok bool) {
 		return v, true
 	}
 	return "", false
+}
+
+// AffectedIdentity returns what this alert is about, in the two shapes
+// callers need: a human-readable display string (used for res.Host, RAG's
+// Record.Host, Gitea issue titles, and the LLM prompt's "主機：" line) and
+// the LogQL stream selector that actually finds this alert's logs in Loki.
+//
+// Two label vocabularies exist in this environment and they don't share a
+// dimension. node_exporter/domain-exporter/blackbox alerts carry
+// host/instance (an IP:port) and match syslog/journald logs, which Loki
+// labels by machine `host`. kube-state-metrics-sourced alerts
+// (KubePodCrashLooping, KubePodNotReady, KubeDeploymentReplicasMismatch —
+// see homelab-infra clusters/home/kube-state-metrics/) carry
+// `namespace`+`pod` instead — their `instance` label is kube-state-metrics'
+// own scrape address, not the affected pod's host, and using it against
+// Loki finds nothing. Pod logs are shipped by the in-cluster Alloy
+// DaemonSet (loki.source.kubernetes.pods) and labeled by
+// `namespace`/`pod`/`container`, a completely different vocabulary.
+// Matching a K8s alert's instance against Loki's host label doesn't
+// error — it's a well-formed query that always returns zero rows, which
+// is exactly the silent-failure shape this method exists to close.
+// namespace+pod is preferred when present; host/instance is the fallback
+// for traditional infrastructure alerts.
+func (a Alert) AffectedIdentity() (display, lokiSelector string, ok bool) {
+	if ns, pod := a.Labels["namespace"], a.Labels["pod"]; ns != "" && pod != "" {
+		return ns + "/" + pod, fmt.Sprintf(`{namespace=%q,pod=%q}`, ns, pod), true
+	}
+	if h, hostOK := a.Host(); hostOK {
+		return h, fmt.Sprintf(`{host=%q}`, h), true
+	}
+	return "", "", false
 }
 
 // StartTime parses StartsAt as RFC3339. Returns the zero Time and an error

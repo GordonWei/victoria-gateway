@@ -685,12 +685,12 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		}
 	}
 
-	host, ok := alert.Host()
+	display, lokiSelector, ok := alert.AffectedIdentity()
 	if !ok {
-		res.Error = fmt.Sprintf("alert has no \"host\" or \"instance\" label (fingerprint=%s)", alert.Fingerprint)
+		res.Error = fmt.Sprintf("alert has neither \"host\"/\"instance\" nor \"namespace\"+\"pod\" labels (fingerprint=%s)", alert.Fingerprint)
 		return
 	}
-	res.Host = host
+	res.Host = display
 
 	start, err := alert.StartTime()
 	if err != nil {
@@ -699,7 +699,7 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	}
 
 	lokiStart := time.Now()
-	logs, err := h.loki.QueryRange(host, start.Add(-h.lookback), time.Now(), h.limit)
+	logs, err := h.loki.QueryRange(lokiSelector, start.Add(-h.lookback), time.Now(), h.limit)
 	h.metrics.ObserveLokiQueryDuration(time.Since(lokiStart))
 	if err != nil {
 		res.Error = fmt.Sprintf("loki query: %v", err)
@@ -766,7 +766,7 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 		return
 	}
 
-	host, _ := alert.Host()
+	host, _, _ := alert.AffectedIdentity()
 	logLines := make([]string, len(logs))
 	for i, l := range logs {
 		logLines[i] = l.Line
@@ -839,7 +839,7 @@ func (h *handler) retrieveRAGContext(alert aiops.Alert, logs []aiops.LogEntry) (
 		return "", nil
 	}
 
-	host, _ := alert.Host()
+	host, _, _ := alert.AffectedIdentity()
 	description := alert.Annotations["description"]
 	if description == "" {
 		description = alert.Annotations["summary"]

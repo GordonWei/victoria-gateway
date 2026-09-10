@@ -33,10 +33,13 @@ func NewClient(endpoint string) *Client {
 // backoffs.
 var retrySleep = time.Sleep
 
-// QueryRange fetches log entries from Loki for the given host and time
-// window. The LogQL query is `{host="<host>"}` — the label name "host"
-// is fixed here; if the webhook uses "instance", the caller maps it
-// before calling this (see docs/_agent_handoff.md "已知落差" note).
+// QueryRange fetches log entries from Loki matching selector (a complete
+// LogQL stream selector, e.g. `{host="web-01"}` or
+// `{namespace="gitea",pod="gitea-585b7c9565-r2lc7"}`) within the given
+// time window. Building the right selector for a given alert is the
+// caller's job — see Alert.AffectedIdentity — since which label
+// vocabulary applies depends on where the alert came from, not on
+// anything this client can infer.
 //
 // A transient failure (transport error or 5xx) is retried once after a
 // short pause: a Loki failure fails the whole alert analysis, and on a
@@ -44,11 +47,9 @@ var retrySleep = time.Sleep
 // query cheap enough — that one retry meaningfully cuts the "analysis
 // died for nothing" rate. Anything 4xx fails immediately; the query
 // won't get better by asking again.
-func (c *Client) QueryRange(host string, start, end time.Time, limit int) ([]LogEntry, error) {
-	query := fmt.Sprintf(`{host="%s"}`, host)
-
+func (c *Client) QueryRange(selector string, start, end time.Time, limit int) ([]LogEntry, error) {
 	params := url.Values{}
-	params.Set("query", query)
+	params.Set("query", selector)
 	params.Set("start", strconv.FormatInt(start.UnixNano(), 10))
 	params.Set("end", strconv.FormatInt(end.UnixNano(), 10))
 	if limit > 0 {
