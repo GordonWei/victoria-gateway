@@ -436,6 +436,72 @@ alert and searches a Postgres+pgvector store for similar past incidents,
 inserting whatever it finds into the prompt as reference context (both the
 local and any escalated cloud call see it).
 
+### The shape of this RAG, and its edges
+
+If you've come in expecting document-RAG concerns — chunk size, overlap,
+splitting strategy — this doesn't have any of that, on purpose. Each row in
+`incidents` is one past alert: an alert name, a host, and a few hundred
+characters of log/summary text. There's no long document to split, so
+there's nothing to chunk.
+
+What it does instead, deliberately:
+
+- **Query and stored text are built the same shape.** `rag.BuildQueryText`
+  is used for both what gets embedded when a record is captured and what
+  gets embedded when a new alert is searched for — a query and the records
+  it's meant to match need to look like the same *kind* of text for cosine
+  similarity to mean anything. Field labels in that text are plain
+  `key=value` ASCII tokens, not natural-language words, so the repo works
+  the same whether `embedding_model` is a multilingual model or not.
+- **Log context is the last N lines, not the first.** An incident's log
+  excerpt is truncated to the most recent lines — the error is usually at
+  the tail, not the head.
+- **Only Confirmed records are retrieved.** Pending (unconfirmed, auto-
+  captured) records are excluded from `Search` — an LLM's own guess isn't
+  ground truth, and surfacing it as a "similar past incident" risks
+  reinforcing a wrong guess.
+- **Two thresholds, on purpose different.** `top_k` controls how many
+  records the *summarizer prompt* sees (a weak match is still useful
+  context for a model). `similarity_threshold` separately gates what a
+  *human* sees in a notification (a weak match shown to a person reads as
+  a claim, not a hint) — see [Similar incidents in
+  notifications](#similar-incidents-in-notifications-and-the-incidents-pages).
+- **A known, unresolved asymmetry.** The text embedded when a record is
+  *captured* is built from the LLM's analysis summary (richer, written
+  after investigation); the text embedded when a new alert is *queried*
+  is built from Alertmanager's own (usually terse, templated)
+  `description`/`summary` annotation. That's deliberate — the stored side
+  is meant to be the more useful, information-dense half — but it rests on
+  an unverified assumption that the two stay close enough in vector space
+  for cosine similarity to still connect them. If your alerts' Alertmanager
+  descriptions are very short relative to your summarizer's output, this is
+  worth measuring for your own data before trusting retrieval quality.
+
+What this means for scale: at home-lab volume (tens to low hundreds of
+confirmed incidents), none of the usual document-RAG tuning knobs —
+reranking, hybrid search, HNSW `ef_search`/`m` tuning — are worth adding.
+`schema.sql` builds the HNSW index with pgvector's defaults, and at this
+scale recall is not the bottleneck. If you're running this against a much
+larger incident history (many thousands of confirmed rows), HNSW recall
+under default parameters is where you'd start looking — but that's a
+decision for whoever has that data and that failure mode in front of them,
+not something this repo should preemptively build in.
+
+**One failure mode is worth calling out specifically because it's silent.**
+pgvector enforces the `embedding` column's *dimension*, not which model
+produced a given vector. Swap `rag.embedding_model` to a different model
+(same output dimension, or the same model name re-released with different
+weights) and every write and read still succeeds — old rows just live in a
+different coordinate space than new queries, so `Search` keeps returning
+results, they're just increasingly meaningless, and nothing about that
+errors. Every row records the `embedding_model` that actually produced its
+vector, and victoria-gateway checks this at startup: if any row's recorded
+model doesn't match what's currently configured (including rows from before
+this column existed, which read as unknown), it logs a warning naming which
+rows are affected. It's a warning, not a hard failure — you may already be
+mid-migration — but it's the only thing standing between a silent model
+swap and slowly-degrading answers nobody notices.
+
 No Postgres already running? `deploy/rag-quickstart/` has a
 `docker-compose.yml` that stands up pgvector and applies `schema.sql`
 automatically — `cd deploy/rag-quickstart && docker compose up -d` gets you
@@ -552,8 +618,10 @@ Setup, once, before turning `rag.enabled` on:
    binary isn't installed) and run `pkg/rag/schema.sql` against the target
    database by hand (already-deployed databases from before the
    Pending/Confirmed split should run `pkg/rag/migrate_0001_pending_status.sql`
-   instead, which upgrades an existing `incidents` table in place). Both
-   schema files default the embedding column to `vector(1024)`, matching
+   instead, and databases from before the `embedding_model` column existed
+   should also run `pkg/rag/migrate_0002_embedding_model.sql` — both upgrade
+   an existing `incidents` table in place, a fresh install needs neither).
+   Both schema files default the embedding column to `vector(1024)`, matching
    `bge-m3`'s output dimension — if you use a different embedding model,
    check its dimension and edit the column definition before running either
    one.

@@ -33,7 +33,7 @@ func newMockStore(t *testing.T) (*PGStore, sqlmock.Sqlmock) {
 	return &PGStore{db: db}, mock
 }
 
-var recordRowCols = []string{"id", "alert_name", "host", "log_excerpt", "summary", "resolution", "status", "gitea_issue_number", "created_at", "confirmed_at"}
+var recordRowCols = []string{"id", "alert_name", "host", "log_excerpt", "summary", "resolution", "status", "gitea_issue_number", "created_at", "confirmed_at", "embedding_model"}
 
 // searchRowCols is recordRowCols plus the similarity column Search
 // computes (1 - cosine distance).
@@ -45,7 +45,7 @@ func TestPGStore_Search(t *testing.T) {
 	createdAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	confirmedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
 	rows := sqlmock.NewRows(searchRowCols).
-		AddRow(int64(1), "InstanceDown", "172.16.100.7", "log excerpt", "old summary", "舊測試機殘留 target，已下線", "confirmed", int64(0), createdAt, confirmedAt, 0.83)
+		AddRow(int64(1), "InstanceDown", "172.16.100.7", "log excerpt", "old summary", "舊測試機殘留 target，已下線", "confirmed", int64(0), createdAt, confirmedAt, "bge-m3", 0.83)
 
 	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'confirmed'").
 		WithArgs("[0.1,0.2]", 3).
@@ -66,6 +66,9 @@ func TestPGStore_Search(t *testing.T) {
 	}
 	if records[0].Similarity != 0.83 {
 		t.Errorf("similarity = %v, want 0.83", records[0].Similarity)
+	}
+	if records[0].EmbeddingModel != "bge-m3" {
+		t.Errorf("embedding model = %q, want bge-m3", records[0].EmbeddingModel)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -105,15 +108,16 @@ func TestPGStore_Insert(t *testing.T) {
 	store, mock := newMockStore(t)
 
 	mock.ExpectExec("INSERT INTO incidents").
-		WithArgs("InstanceDown", "172.16.100.7", "log", "summary", "舊測試機，已下線", "[0.1,0.2]", sqlmock.AnyArg()).
+		WithArgs("InstanceDown", "172.16.100.7", "log", "summary", "舊測試機，已下線", "[0.1,0.2]", "bge-m3", sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	rec := Record{
-		AlertName:  "InstanceDown",
-		Host:       "172.16.100.7",
-		LogExcerpt: "log",
-		Summary:    "summary",
-		Resolution: "舊測試機，已下線",
+		AlertName:      "InstanceDown",
+		Host:           "172.16.100.7",
+		LogExcerpt:     "log",
+		Summary:        "summary",
+		Resolution:     "舊測試機，已下線",
+		EmbeddingModel: "bge-m3",
 	}
 	if err := store.Insert(context.Background(), rec, []float32{0.1, 0.2}); err != nil {
 		t.Fatalf("Insert: %v", err)
@@ -137,7 +141,7 @@ func TestPGStore_InsertPending(t *testing.T) {
 	store, mock := newMockStore(t)
 
 	mock.ExpectQuery("INSERT INTO incidents").
-		WithArgs("InstanceDown", "172.16.100.7", "log", "summary", int64(42), "[0.1,0.2]", sqlmock.AnyArg()).
+		WithArgs("InstanceDown", "172.16.100.7", "log", "summary", int64(42), "[0.1,0.2]", "bge-m3", sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(9)))
 
 	rec := Record{
@@ -146,6 +150,7 @@ func TestPGStore_InsertPending(t *testing.T) {
 		LogExcerpt:       "log",
 		Summary:          "summary",
 		GiteaIssueNumber: 42,
+		EmbeddingModel:   "bge-m3",
 	}
 	id, err := store.InsertPending(context.Background(), rec, []float32{0.1, 0.2})
 	if err != nil {
@@ -163,10 +168,10 @@ func TestPGStore_InsertPending_NoGiteaIssue(t *testing.T) {
 	store, mock := newMockStore(t)
 
 	mock.ExpectQuery("INSERT INTO incidents").
-		WithArgs("InstanceDown", "172.16.100.7", "log", "summary", nil, "[0.1]", sqlmock.AnyArg()).
+		WithArgs("InstanceDown", "172.16.100.7", "log", "summary", nil, "[0.1]", "bge-m3", sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(3)))
 
-	rec := Record{AlertName: "InstanceDown", Host: "172.16.100.7", LogExcerpt: "log", Summary: "summary"}
+	rec := Record{AlertName: "InstanceDown", Host: "172.16.100.7", LogExcerpt: "log", Summary: "summary", EmbeddingModel: "bge-m3"}
 	if _, err := store.InsertPending(context.Background(), rec, []float32{0.1}); err != nil {
 		t.Fatalf("InsertPending: %v", err)
 	}
@@ -180,7 +185,7 @@ func TestPGStore_PendingWithGiteaIssue(t *testing.T) {
 
 	createdAt := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
 	rows := sqlmock.NewRows(recordRowCols).
-		AddRow(int64(5), "InstanceDown", "172.16.100.7", "log", "summary", "", "pending", int64(42), createdAt, time.Time{})
+		AddRow(int64(5), "InstanceDown", "172.16.100.7", "log", "summary", "", "pending", int64(42), createdAt, time.Time{}, "bge-m3")
 	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'pending'").
 		WillReturnRows(rows)
 
@@ -235,7 +240,7 @@ func TestPGStore_GetConfirmed(t *testing.T) {
 	createdAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	confirmedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
 	rows := sqlmock.NewRows(recordRowCols).
-		AddRow(int64(5), "DiskFull", "h1", "log", "summary", "清掉 /var/log", "confirmed", int64(0), createdAt, confirmedAt)
+		AddRow(int64(5), "DiskFull", "h1", "log", "summary", "清掉 /var/log", "confirmed", int64(0), createdAt, confirmedAt, "bge-m3")
 	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'confirmed' AND id").
 		WithArgs(int64(5)).
 		WillReturnRows(rows)
@@ -267,8 +272,8 @@ func TestPGStore_ListConfirmed(t *testing.T) {
 	createdAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	confirmedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
 	rows := sqlmock.NewRows(recordRowCols).
-		AddRow(int64(2), "B", "h2", "", "s", "r2", "confirmed", int64(0), createdAt, confirmedAt).
-		AddRow(int64(1), "A", "h1", "", "s", "r1", "confirmed", int64(0), createdAt, confirmedAt)
+		AddRow(int64(2), "B", "h2", "", "s", "r2", "confirmed", int64(0), createdAt, confirmedAt, "bge-m3").
+		AddRow(int64(1), "A", "h1", "", "s", "r1", "confirmed", int64(0), createdAt, confirmedAt, "bge-m3")
 	mock.ExpectQuery("SELECT (.|\n)*FROM incidents\\s+WHERE status = 'confirmed'\\s+ORDER BY confirmed_at DESC").
 		WithArgs(20).
 		WillReturnRows(rows)
@@ -288,7 +293,7 @@ func TestPGStore_ListConfirmed_FilterByAlertNameAndHost(t *testing.T) {
 	createdAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	confirmedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
 	rows := sqlmock.NewRows(recordRowCols).
-		AddRow(int64(3), "DiskSpaceWarning", "h3.example.com", "", "s", "r3", "confirmed", int64(0), createdAt, confirmedAt)
+		AddRow(int64(3), "DiskSpaceWarning", "h3.example.com", "", "s", "r3", "confirmed", int64(0), createdAt, confirmedAt, "bge-m3")
 
 	// Both filters set: expect both ILIKE conditions ANDed in, args in
 	// the order limit, alert_name, host (filter fields are appended in
@@ -312,7 +317,7 @@ func TestPGStore_ListConfirmed_FilterByHostOnly(t *testing.T) {
 	createdAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	confirmedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
 	rows := sqlmock.NewRows(recordRowCols).
-		AddRow(int64(4), "AnyAlert", "172.16.100.6", "", "s", "r4", "confirmed", int64(0), createdAt, confirmedAt)
+		AddRow(int64(4), "AnyAlert", "172.16.100.6", "", "s", "r4", "confirmed", int64(0), createdAt, confirmedAt, "bge-m3")
 
 	// Only Host set: alert_name clause must be absent, and the sole
 	// filter arg lands at $2 (not $3) since it's the only one appended.
@@ -326,5 +331,48 @@ func TestPGStore_ListConfirmed_FilterByHostOnly(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].ID != 4 {
 		t.Errorf("unexpected records: %+v", records)
+	}
+}
+
+func TestPGStore_DistinctEmbeddingModels(t *testing.T) {
+	store, mock := newMockStore(t)
+
+	rows := sqlmock.NewRows([]string{"embedding_model"}).
+		AddRow("bge-m3").
+		AddRow("")
+	mock.ExpectQuery("SELECT DISTINCT embedding_model FROM incidents").
+		WillReturnRows(rows)
+
+	models, err := store.DistinctEmbeddingModels(context.Background())
+	if err != nil {
+		t.Fatalf("DistinctEmbeddingModels: %v", err)
+	}
+	if len(models) != 2 || models[0] != "bge-m3" || models[1] != "" {
+		t.Errorf("models = %v, want [bge-m3 \"\"]", models)
+	}
+}
+
+func TestPGStore_DistinctEmbeddingModels_Empty(t *testing.T) {
+	store, mock := newMockStore(t)
+
+	mock.ExpectQuery("SELECT DISTINCT embedding_model FROM incidents").
+		WillReturnRows(sqlmock.NewRows([]string{"embedding_model"}))
+
+	models, err := store.DistinctEmbeddingModels(context.Background())
+	if err != nil {
+		t.Fatalf("DistinctEmbeddingModels: %v", err)
+	}
+	if len(models) != 0 {
+		t.Errorf("models = %v, want empty", models)
+	}
+}
+
+func TestPGStore_DistinctEmbeddingModels_QueryError(t *testing.T) {
+	store, mock := newMockStore(t)
+	mock.ExpectQuery("SELECT DISTINCT embedding_model FROM incidents").
+		WillReturnError(errors.New("connection reset"))
+
+	if _, err := store.DistinctEmbeddingModels(context.Background()); err == nil {
+		t.Error("expected error when the query fails")
 	}
 }

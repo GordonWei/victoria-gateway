@@ -89,11 +89,12 @@ func runNote(args []string) {
 	}
 
 	rec := rag.Record{
-		AlertName:  *alertName,
-		Host:       *host,
-		LogExcerpt: *logExcerpt,
-		Summary:    *summary,
-		Resolution: *resolution,
+		AlertName:      *alertName,
+		Host:           *host,
+		LogExcerpt:     *logExcerpt,
+		Summary:        *summary,
+		Resolution:     *resolution,
+		EmbeddingModel: embedder.Model(),
 	}
 	if err := store.Insert(ctx, rec, embedding); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ %v\n", err)

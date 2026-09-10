@@ -11,15 +11,23 @@ import (
 // (alert name + host + a log/description snippet) — a query and the
 // records it's meant to match need to live in the same "kind of text"
 // for cosine similarity to mean anything.
+//
+// Field labels are plain ASCII key=value tokens, not natural-language
+// words in any one language. This is public source under an MIT license;
+// someone can point rag.embedding_model at a different (non-multilingual)
+// model, and a hardcoded "告警：...主機：..." sentence would then embed as
+// Chinese labels wrapped around whatever-language content — pure noise to
+// a model that isn't bge-m3. key=value tokens carry the same structure
+// without asserting a language.
 func BuildQueryText(alertName, host, description string, logLines []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "告警：%s 主機：%s", alertName, host)
+	fmt.Fprintf(&b, "alert=%s host=%s", alertName, host)
 	if description != "" {
-		fmt.Fprintf(&b, " 描述：%s", description)
+		fmt.Fprintf(&b, " description=%s", description)
 	}
 	const maxLines = 10
 	if len(logLines) > 0 {
-		b.WriteString(" log：")
+		b.WriteString(" log=")
 		lines := logLines
 		if len(lines) > maxLines {
 			lines = lines[len(lines)-maxLines:]

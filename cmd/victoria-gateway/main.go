@@ -171,6 +171,17 @@ func runServe(args []string) {
 		defer func() { _ = store.Close() }()
 		h.rag = store
 		h.ragEmbedder = rag.NewEmbedder(cfg.RAG.EmbeddingEndpoint, cfg.RAG.EmbeddingModel, cfg.RAG.EmbeddingAPIKey)
+		// Warn (don't fail startup — an operator mid-migration may already
+		// know) if existing rows were embedded with a different model than
+		// what's configured now. pgvector enforces vector dimension, not
+		// which model produced a vector, so this drift is otherwise
+		// invisible: Search keeps returning results, they're just
+		// increasingly meaningless. See rag.CheckEmbeddingModelDrift.
+		if models, err := store.DistinctEmbeddingModels(context.Background()); err != nil {
+			log.Printf("rag: could not check embedding model drift: %v", err)
+		} else if warning, ok := rag.CheckEmbeddingModelDrift(cfg.RAG.EmbeddingModel, models); !ok {
+			log.Printf("⚠️  %s", warning)
+		}
 		h.ragTopK = cfg.RAG.TopK
 		if h.ragTopK <= 0 {
 			h.ragTopK = 3
@@ -798,6 +809,7 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 		LogExcerpt:       logExcerpt,
 		Summary:          result.Summary,
 		GiteaIssueNumber: issueNumber,
+		EmbeddingModel:   h.ragEmbedder.Model(),
 	}
 	id, err := h.rag.InsertPending(context.Background(), rec, embedding)
 	if err != nil {

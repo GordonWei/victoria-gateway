@@ -15,6 +15,24 @@ func TestBuildQueryText(t *testing.T) {
 	}
 }
 
+// Field labels are plain ASCII key=value tokens (not a natural-language
+// sentence in any one language) so an embedding model other than the
+// multilingual default doesn't see hardcoded Chinese wrapped around
+// otherwise-English content as noise.
+func TestBuildQueryText_LabelsAreLanguageNeutral(t *testing.T) {
+	got := BuildQueryText("InstanceDown", "h", "node down", []string{"line1"})
+	for _, notWant := range []string{"告警", "主機", "描述"} {
+		if strings.Contains(got, notWant) {
+			t.Errorf("BuildQueryText() = %q, expected no hardcoded Chinese labels, found %q", got, notWant)
+		}
+	}
+	for _, want := range []string{"alert=InstanceDown", "host=h", "description=node down"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("BuildQueryText() = %q, missing %q", got, want)
+		}
+	}
+}
+
 func TestBuildQueryText_TruncatesLogLines(t *testing.T) {
 	lines := make([]string, 20)
 	for i := range lines {
