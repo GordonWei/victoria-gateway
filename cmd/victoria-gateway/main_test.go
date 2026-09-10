@@ -342,6 +342,9 @@ type fakeRAGStore struct {
 	// wrote, so tests can confirm auto-capture actually happens.
 	insertPendingCalled bool
 	lastPending         rag.Record
+	// distinctModels is what DistinctEmbeddingModels returns — tests that
+	// don't care about drift checking leave this nil (no rows yet).
+	distinctModels []string
 }
 
 func (f *fakeRAGStore) Search(ctx context.Context, embedding []float32, topK int) ([]rag.Record, error) {
@@ -394,6 +397,9 @@ func (f *fakeRAGStore) ListConfirmed(ctx context.Context, filter rag.ListFilter,
 		return matched[:limit], nil
 	}
 	return matched, nil
+}
+func (f *fakeRAGStore) DistinctEmbeddingModels(ctx context.Context) ([]string, error) {
+	return f.distinctModels, nil
 }
 func (f *fakeRAGStore) Close() error { return nil }
 

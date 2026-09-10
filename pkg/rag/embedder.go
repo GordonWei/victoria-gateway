@@ -39,6 +39,15 @@ func NewEmbedder(endpoint, model, apiKey string) *Embedder {
 	}
 }
 
+// Model returns the embedding model this Embedder was configured with —
+// what actually produced (or will produce) every vector it returns. Used
+// to stamp Record.EmbeddingModel at write time, so a later drift check
+// (see CheckEmbeddingModelDrift) compares against what a row was really
+// embedded with, not just whatever config.yaml currently says.
+func (e *Embedder) Model() string {
+	return e.model
+}
+
 // retrySleep is swapped out by tests so retry paths don't wait real
 // backoffs.
 var retrySleep = time.Sleep

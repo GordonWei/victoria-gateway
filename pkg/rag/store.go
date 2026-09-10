@@ -43,6 +43,13 @@ type Record struct {
 	CreatedAt        time.Time
 	ConfirmedAt      time.Time // zero if not yet Confirmed
 
+	// EmbeddingModel is the rag.embedding_model that actually produced
+	// this row's vector (from Embedder.Model(), stamped at write time —
+	// not read back from config, so it reflects what really generated
+	// this row even if config.yaml later changes). Empty for rows written
+	// before this field existed. See CheckEmbeddingModelDrift.
+	EmbeddingModel string
+
 	// Similarity is the cosine similarity (1 - cosine distance, so 1.0 is
 	// identical) between this record and the query embedding. Populated
 	// only by Search — a record fetched any other way has no query to be
@@ -87,6 +94,13 @@ type Store interface {
 	// ListConfirmed returns up to limit Confirmed records matching
 	// filter, newest confirmation first.
 	ListConfirmed(ctx context.Context, filter ListFilter, limit int) ([]Record, error)
+	// DistinctEmbeddingModels returns every distinct embedding_model value
+	// recorded across all rows (pending and confirmed — a drift check
+	// cares about every vector that could ever be compared, not just
+	// currently-searchable ones), including "" if any row predates the
+	// column. Empty slice, nil error means the table has no rows yet. Used
+	// at startup to warn about CheckEmbeddingModelDrift's scenario.
+	DistinctEmbeddingModels(ctx context.Context) ([]string, error)
 	Close() error
 }
 
@@ -140,12 +154,12 @@ func formatVector(v []float32) string {
 	return "[" + strings.Join(parts, ",") + "]"
 }
 
-const recordColumns = "id, alert_name, host, log_excerpt, summary, resolution, status, COALESCE(gitea_issue_number, 0), created_at, COALESCE(confirmed_at, 'epoch'::timestamptz)"
+const recordColumns = "id, alert_name, host, log_excerpt, summary, resolution, status, COALESCE(gitea_issue_number, 0), created_at, COALESCE(confirmed_at, 'epoch'::timestamptz), embedding_model"
 
 func scanRecord(row interface{ Scan(...any) error }) (Record, error) {
 	var r Record
 	var confirmedAt time.Time
-	err := row.Scan(&r.ID, &r.AlertName, &r.Host, &r.LogExcerpt, &r.Summary, &r.Resolution, &r.Status, &r.GiteaIssueNumber, &r.CreatedAt, &confirmedAt)
+	err := row.Scan(&r.ID, &r.AlertName, &r.Host, &r.LogExcerpt, &r.Summary, &r.Resolution, &r.Status, &r.GiteaIssueNumber, &r.CreatedAt, &confirmedAt, &r.EmbeddingModel)
 	if err != nil {
 		return Record{}, err
 	}
@@ -181,7 +195,7 @@ func (s *PGStore) Search(ctx context.Context, embedding []float32, topK int) ([]
 	for rows.Next() {
 		var r Record
 		var confirmedAt time.Time
-		if err := rows.Scan(&r.ID, &r.AlertName, &r.Host, &r.LogExcerpt, &r.Summary, &r.Resolution, &r.Status, &r.GiteaIssueNumber, &r.CreatedAt, &confirmedAt, &r.Similarity); err != nil {
+		if err := rows.Scan(&r.ID, &r.AlertName, &r.Host, &r.LogExcerpt, &r.Summary, &r.Resolution, &r.Status, &r.GiteaIssueNumber, &r.CreatedAt, &confirmedAt, &r.EmbeddingModel, &r.Similarity); err != nil {
 			return nil, fmt.Errorf("rag search scan row: %w", err)
 		}
 		if !confirmedAt.IsZero() && confirmedAt.Unix() != 0 {
@@ -266,6 +280,28 @@ func (s *PGStore) ListConfirmed(ctx context.Context, filter ListFilter, limit in
 	return records, rows.Err()
 }
 
+// DistinctEmbeddingModels returns every distinct embedding_model value
+// recorded on rows in incidents (pending and confirmed alike), including
+// "" if any row predates the column. See CheckEmbeddingModelDrift for how
+// this is used.
+func (s *PGStore) DistinctEmbeddingModels(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT embedding_model FROM incidents`)
+	if err != nil {
+		return nil, fmt.Errorf("rag distinct embedding models: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var models []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return nil, fmt.Errorf("rag distinct embedding models scan row: %w", err)
+		}
+		models = append(models, m)
+	}
+	return models, rows.Err()
+}
+
 // Insert stores a new Confirmed incident record. Resolution is required
 // (an empty resolution isn't useful reference material for a future
 // alert) — callers (the `note` CLI) should validate this before calling
@@ -278,9 +314,9 @@ func (s *PGStore) Insert(ctx context.Context, rec Record, embedding []float32) e
 		rec.CreatedAt = time.Now()
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO incidents (alert_name, host, log_excerpt, summary, resolution, status, embedding, created_at, confirmed_at)
-		VALUES ($1, $2, $3, $4, $5, 'confirmed', $6::vector, $7, $7)
-	`, rec.AlertName, rec.Host, rec.LogExcerpt, rec.Summary, rec.Resolution, formatVector(embedding), rec.CreatedAt)
+		INSERT INTO incidents (alert_name, host, log_excerpt, summary, resolution, status, embedding, embedding_model, created_at, confirmed_at)
+		VALUES ($1, $2, $3, $4, $5, 'confirmed', $6::vector, $7, $8, $8)
+	`, rec.AlertName, rec.Host, rec.LogExcerpt, rec.Summary, rec.Resolution, formatVector(embedding), rec.EmbeddingModel, rec.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("rag insert: %w", err)
 	}
@@ -301,10 +337,10 @@ func (s *PGStore) InsertPending(ctx context.Context, rec Record, embedding []flo
 		issueNumber = rec.GiteaIssueNumber
 	}
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO incidents (alert_name, host, log_excerpt, summary, resolution, status, gitea_issue_number, embedding, created_at)
-		VALUES ($1, $2, $3, $4, '', 'pending', $5, $6::vector, $7)
+		INSERT INTO incidents (alert_name, host, log_excerpt, summary, resolution, status, gitea_issue_number, embedding, embedding_model, created_at)
+		VALUES ($1, $2, $3, $4, '', 'pending', $5, $6::vector, $7, $8)
 		RETURNING id
-	`, rec.AlertName, rec.Host, rec.LogExcerpt, rec.Summary, issueNumber, formatVector(embedding), rec.CreatedAt).Scan(&id)
+	`, rec.AlertName, rec.Host, rec.LogExcerpt, rec.Summary, issueNumber, formatVector(embedding), rec.EmbeddingModel, rec.CreatedAt).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("rag insert pending: %w", err)
 	}

@@ -31,9 +31,15 @@ CREATE TABLE IF NOT EXISTS incidents (
     status             TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed')),
     gitea_issue_number BIGINT,
     embedding          vector(1024) NOT NULL,
+    embedding_model    TEXT NOT NULL DEFAULT '',
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     confirmed_at       TIMESTAMPTZ
 );
+
+-- A fresh install gets embedding_model for free from CREATE TABLE above.
+-- An existing deployment from before this column existed should run
+-- migrate_0002_embedding_model.sql instead (see that file) — a fresh
+-- install does not need it.
 
 -- HNSW over cosine distance, matching the `<=>` operator PGStore.Search
 -- uses in pkg/rag/store.go. Built after rows exist (or empty is fine too
