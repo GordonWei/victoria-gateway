@@ -67,20 +67,29 @@ Alerts arrive from two different worlds here, and they don't share a label
 vocabulary. A `node_exporter`/blackbox-style alert (`InstanceDown`, disk,
 CPU) carries `host` or `instance` — an IP:port or hostname — and its logs
 live in Loki under the machine's `host` label (shipped by syslog/journald).
-A Kubernetes alert sourced from `kube-state-metrics`
-(`KubePodCrashLooping`, `KubePodNotReady`, a replica-mismatch check) carries
-`namespace`+`pod` instead — its `instance` label is kube-state-metrics' own
-scrape address, not the affected pod's host, and its logs live in Loki
-under `namespace`/`pod`/`container` (shipped by an in-cluster log agent
-such as Grafana Alloy), a completely different set of labels.
+A Kubernetes alert sourced from `kube-state-metrics` carries `namespace`
+instead — its `instance` label is kube-state-metrics' own scrape address,
+not the affected workload's host — and its logs live in Loki under
+`namespace`/`pod`/`container` (shipped by an in-cluster log agent such as
+Grafana Alloy), a completely different set of labels.
+
+The kube-state-metrics side further splits in two: a pod-level alert
+(`KubePodCrashLooping`, `KubePodNotReady`) carries `namespace`+`pod` — the
+most specific selector available. A workload-level alert (a Deployment or
+StatefulSet replica-mismatch check) describes the Deployment/StatefulSet
+object itself, which kube-state-metrics never attaches a `pod` label to —
+there's no single pod the alert is "about" — so it falls back to a
+namespace-only selector instead, which returns every pod's logs in that
+namespace rather than a scoped-but-empty one.
 
 Querying Loki with the wrong vocabulary doesn't error — `{host="..."}`
 against a K8s alert is a perfectly well-formed query that always returns
 zero rows, which silently starves both the LLM prompt and RAG capture of
 log context while looking like everything worked. `Alert.AffectedIdentity()`
-(`pkg/aiops/types.go`) is what closes that gap: it prefers `namespace`+`pod`
-when both are present, falling back to `host`/`instance` otherwise, and
-returns both a human-readable display string (used for the LLM prompt, RAG's
+(`pkg/aiops/types.go`) is what closes that gap: pod-scoped when a `pod`
+label is present, namespace-scoped when a `deployment`/`statefulset` label
+confirms a workload-level alert, `host`/`instance` otherwise — and returns
+both a human-readable display string (used for the LLM prompt, RAG's
 stored record, and tracker issue titles — so a K8s alert reads
 `gitea/gitea-585b7c9565-r2lc7` instead of a meaningless scrape address) and
 the LogQL selector that actually finds the right logs. If you're adding a

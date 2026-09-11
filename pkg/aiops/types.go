@@ -65,22 +65,48 @@ func (a Alert) Host() (host string, ok bool) {
 // Two label vocabularies exist in this environment and they don't share a
 // dimension. node_exporter/domain-exporter/blackbox alerts carry
 // host/instance (an IP:port) and match syslog/journald logs, which Loki
-// labels by machine `host`. kube-state-metrics-sourced alerts
-// (KubePodCrashLooping, KubePodNotReady, KubeDeploymentReplicasMismatch —
-// see homelab-infra clusters/home/kube-state-metrics/) carry
-// `namespace`+`pod` instead — their `instance` label is kube-state-metrics'
-// own scrape address, not the affected pod's host, and using it against
+// labels by machine `host`. kube-state-metrics-sourced alerts carry
+// `namespace` instead — their `instance` label is kube-state-metrics' own
+// scrape address, not the affected workload's host, and using it against
 // Loki finds nothing. Pod logs are shipped by the in-cluster Alloy
 // DaemonSet (loki.source.kubernetes.pods) and labeled by
 // `namespace`/`pod`/`container`, a completely different vocabulary.
 // Matching a K8s alert's instance against Loki's host label doesn't
 // error — it's a well-formed query that always returns zero rows, which
 // is exactly the silent-failure shape this method exists to close.
-// namespace+pod is preferred when present; host/instance is the fallback
-// for traditional infrastructure alerts.
+//
+// kube-state-metrics alerts split into two shapes that need different
+// selectors:
+//   - Pod-level (KubePodCrashLooping, KubePodNotReady) carry `namespace`+
+//     `pod` — the most specific selector available, preferred whenever
+//     both are present.
+//   - Workload-level (KubeDeploymentReplicasMismatch,
+//     KubeStatefulSetReplicasMismatch — see homelab-infra
+//     clusters/home/kube-state-metrics/) describe a Deployment or
+//     StatefulSet object, which kube-state-metrics never attaches a `pod`
+//     label to (there's no single pod the alert is "about"). Falling back
+//     straight to host/instance here would hit the exact meaningless
+//     scrape-address problem this method exists to avoid. A
+//     namespace-only selector is broader than a pod-scoped one — it
+//     returns every pod's logs in that namespace, not just the troubled
+//     workload's — but broader-and-real beats narrower-and-empty, so it's
+//     used whenever a `deployment` or `statefulset` label confirms this is
+//     actually a workload-level alert (not just an alert that happens to
+//     carry a stray `namespace` label — see
+//     TestAffectedIdentity_PartialNamespacePodFallsBackToHost).
+//
+// host/instance is the last-resort fallback for traditional infrastructure
+// alerts that carry neither shape.
 func (a Alert) AffectedIdentity() (display, lokiSelector string, ok bool) {
-	if ns, pod := a.Labels["namespace"], a.Labels["pod"]; ns != "" && pod != "" {
+	ns := a.Labels["namespace"]
+	if pod := a.Labels["pod"]; ns != "" && pod != "" {
 		return ns + "/" + pod, fmt.Sprintf(`{namespace=%q,pod=%q}`, ns, pod), true
+	}
+	if workload := a.Labels["deployment"]; ns != "" && workload != "" {
+		return ns + "/" + workload, fmt.Sprintf(`{namespace=%q}`, ns), true
+	}
+	if workload := a.Labels["statefulset"]; ns != "" && workload != "" {
+		return ns + "/" + workload, fmt.Sprintf(`{namespace=%q}`, ns), true
 	}
 	if h, hostOK := a.Host(); hostOK {
 		return h, fmt.Sprintf(`{host=%q}`, h), true
