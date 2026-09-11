@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/victoria-gateway.jpg" alt="Victoria Gateway" width="820">
+</p>
+
 # Victoria Gateway
 
 [![CI](https://github.com/GordonWei/victoria-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/GordonWei/victoria-gateway/actions/workflows/ci.yml)
@@ -767,6 +771,13 @@ unrelated routing/session code came along).
 ```bash
 go test ./...
 ```
+
+## Artwork
+
+The header image (`docs/images/victoria-gateway.jpg`) and the repository's
+social preview (`docs/images/social-preview.jpg`) were generated with ChatGPT.
+Both are the same artwork; the preview is only re-framed to 1280x640 so that
+link unfurls do not crop it.
 
 ## License
 
