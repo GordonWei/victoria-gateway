@@ -53,11 +53,40 @@ Alertmanager --webhook--> victoria-gateway
 ```
 
 `POST /webhook/alertmanager` accepts Alertmanager's standard webhook payload
-(one or more alerts). Each alert must carry a `host` or `instance` label —
-that's what scopes the Loki query. Alerts without one are reported back as
-an error entry rather than failing the whole request. `resolved` deliveries
-are never analyzed — they just clear the dedup entry for that fingerprint so
-a genuinely new firing of the same alert isn't mistaken for a duplicate.
+(one or more alerts). Each alert must carry either a `host`/`instance` label
+or a `namespace`+`pod` pair — see **Identifying what an alert is about**,
+below, for why there are two and how the right one is picked. Alerts with
+neither are reported back as an error entry rather than failing the whole
+request. `resolved` deliveries are never analyzed — they just clear the
+dedup entry for that fingerprint so a genuinely new firing of the same
+alert isn't mistaken for a duplicate.
+
+### Identifying what an alert is about
+
+Alerts arrive from two different worlds here, and they don't share a label
+vocabulary. A `node_exporter`/blackbox-style alert (`InstanceDown`, disk,
+CPU) carries `host` or `instance` — an IP:port or hostname — and its logs
+live in Loki under the machine's `host` label (shipped by syslog/journald).
+A Kubernetes alert sourced from `kube-state-metrics`
+(`KubePodCrashLooping`, `KubePodNotReady`, a replica-mismatch check) carries
+`namespace`+`pod` instead — its `instance` label is kube-state-metrics' own
+scrape address, not the affected pod's host, and its logs live in Loki
+under `namespace`/`pod`/`container` (shipped by an in-cluster log agent
+such as Grafana Alloy), a completely different set of labels.
+
+Querying Loki with the wrong vocabulary doesn't error — `{host="..."}`
+against a K8s alert is a perfectly well-formed query that always returns
+zero rows, which silently starves both the LLM prompt and RAG capture of
+log context while looking like everything worked. `Alert.AffectedIdentity()`
+(`pkg/aiops/types.go`) is what closes that gap: it prefers `namespace`+`pod`
+when both are present, falling back to `host`/`instance` otherwise, and
+returns both a human-readable display string (used for the LLM prompt, RAG's
+stored record, and tracker issue titles — so a K8s alert reads
+`gitea/gitea-585b7c9565-r2lc7` instead of a meaningless scrape address) and
+the LogQL selector that actually finds the right logs. If you're adding a
+third alert source with its own label shape, this is the function to teach
+about it — the Loki client itself has no way to infer which selector shape
+applies.
 
 Everything in brackets above is optional and off unless configured:
 authenticating the webhook (see **Securing the webhook**, below), grounding
