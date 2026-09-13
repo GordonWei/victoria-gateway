@@ -160,10 +160,27 @@ type LLMConfig struct {
 // trigger, or the local model's own structured reply asks for escalation
 // — see pkg/aiops.ShouldEscalate.
 type CloudConfig struct {
-	Provider string `yaml:"provider"` // "gemini" (default), "anthropic", or "aws-devops-agent"
-	Endpoint string `yaml:"endpoint"` // optional; each provider has its own default
-	APIKey   string `yaml:"api_key"`
-	Model    string `yaml:"model"` // e.g. "gemini-2.5-flash" or "claude-haiku-4-5"
+	Provider string `yaml:"provider"` // "gemini" (default), "anthropic", "bedrock", "azure-openai", or "aws-devops-agent"
+	Endpoint string `yaml:"endpoint"` // optional; each provider has its own default. Ignored by "bedrock" (region-based, see Region) and by "azure-openai" (required there instead, as the resource base URL)
+	APIKey   string `yaml:"api_key"`  // ignored by "bedrock", which uses the AWS SDK's own credential chain instead — see model.BedrockClient
+	Model    string `yaml:"model"`    // e.g. "gemini-2.5-flash", "claude-haiku-4-5", or a Bedrock model ID. Ignored by "azure-openai" — see Deployment
+
+	// Region is the AWS region "bedrock" calls Bedrock in, e.g.
+	// "us-east-1". Bedrock model availability varies by region. Ignored
+	// by every other provider.
+	Region string `yaml:"region"`
+
+	// Deployment is the Azure deployment name "azure-openai" sends
+	// requests to — not the underlying model name; see
+	// model.AzureOpenAIClientConfig.Deployment for why these are
+	// different things in Azure OpenAI. Ignored by every other provider.
+	Deployment string `yaml:"deployment"`
+
+	// APIVersion is the api-version query parameter "azure-openai" sends.
+	// Optional; empty uses model.AzureOpenAIClient's own current default
+	// rather than a value duplicated (and liable to go stale) here.
+	// Ignored by every other provider.
+	APIVersion string `yaml:"api_version"`
 
 	// DevOpsAgent configures the "aws-devops-agent" provider. Ignored by
 	// every other provider — see
