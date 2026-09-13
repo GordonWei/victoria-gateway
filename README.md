@@ -43,11 +43,12 @@ Alertmanager --webhook--> victoria-gateway
                                |
                        [escalate]                 optional (cloud + escalation)
                                |
-                 +------+------+------+
-                 v      v             v
-              Gemini  Anthropic   AWS DevOps Agent
-              (re-analyze logs)   (MCP → investigate
-                                   AWS account directly)
+        +------------+------------+------------+------------+------------+
+              v            v            v            v            v
+            Gemini     Anthropic     Bedrock       Azure      AWS DevOps
+                                                   OpenAI        Agent
+          (re-analyze the same log excerpt)               (MCP → investigate
+                                                             AWS account directly)
                                |
                  +-------------+-------------+
                  v                           v
@@ -369,8 +370,11 @@ misdiagnose alerts that need broader reasoning or turn up nothing when a
 host's logs don't cover the real cause. Add a `cloud` block and victoria-gateway
 can re-run the analysis against a stronger cloud model for alerts that need
 it, while everything else still stays local. Gemini is the default provider
-(`pkg/model.GeminiClient`); Anthropic is also supported
-(`pkg/model.AnthropicClient`) via `provider: "anthropic"`:
+(`pkg/model.GeminiClient`); Anthropic (`pkg/model.AnthropicClient`), AWS
+Bedrock (`pkg/model.BedrockClient`), and Azure OpenAI
+(`pkg/model.AzureOpenAIClient`) are also supported, so the three major
+public clouds each have a native option — see the dedicated sections below
+for Bedrock and Azure OpenAI's extra setup:
 
 ```yaml
 cloud:
@@ -406,6 +410,53 @@ failing the alert outright — check the process logs for
 
 Leaving `cloud` unset (the default) disables all of this — `escalation` with
 no `cloud` configured is a startup error rather than a silent no-op.
+
+### AWS Bedrock
+
+`provider: "bedrock"` escalates to an Anthropic Claude model hosted on Amazon
+Bedrock, for operators who want the escalation target to live inside AWS
+rather than call Anthropic or Google directly:
+
+```yaml
+cloud:
+  provider: "bedrock"
+  region: "us-east-1"
+  model: "anthropic.claude-3-5-sonnet-20241022-v2:0"   # a Bedrock model ID; check AWS's per-region model support first
+```
+
+Unlike every other provider here, `pkg/model.BedrockClient` uses the AWS SDK
+for Go v2 instead of a hand-rolled HTTP request — Bedrock's `InvokeModel`
+requires AWS SigV4 request signing, not a bearer token, and reimplementing
+that by hand is the wrong place to introduce a subtle bug. There's
+deliberately no `api_key` field for this provider: credentials come from the
+SDK's standard chain (environment variables, `~/.aws/credentials`, an
+EC2/ECS/EKS instance role, SSO, ...), the same way any other AWS CLI/SDK tool
+on the host already authenticates. The IAM identity used needs
+`bedrock:InvokeModel` on the configured model.
+
+### Azure OpenAI
+
+`provider: "azure-openai"` escalates to a chat completions deployment on
+Azure OpenAI / Microsoft Foundry:
+
+```yaml
+cloud:
+  provider: "azure-openai"
+  endpoint: "https://myresource.openai.azure.com"   # resource base URL, no path suffix
+  deployment: "prod-gpt4o"   # the Azure *deployment* name, not the underlying model name
+  api_key: "..."
+  # api_version: "v1"   # optional; defaults to Microsoft's current documented default for this endpoint shape
+```
+
+`deployment` and `model` are easy to conflate but aren't the same thing in
+Azure OpenAI: a deployment is a named, customer-created binding to a base
+model (e.g. a deployment called `prod-gpt4o` backed by `gpt-4o`), and
+requests address the deployment. `pkg/model.AzureOpenAIClient` targets the
+current unified data-plane API
+(`{endpoint}/openai/v1/chat/completions?api-version=...`) rather than the
+older per-deployment-path API — if Microsoft's documented default
+`api_version` ever looks stale, override it here rather than waiting on a
+code change.
 
 ### Optional: escalating to AWS DevOps Agent instead of a chat completion
 

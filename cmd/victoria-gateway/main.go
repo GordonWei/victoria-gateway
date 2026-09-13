@@ -113,6 +113,35 @@ func runServe(args []string) {
 				APIKey:   cfg.Cloud.APIKey,
 				Model:    cfg.Cloud.Model,
 			})
+		case "bedrock":
+			if cfg.Cloud.Region == "" {
+				fmt.Fprintln(os.Stderr, "❌ cloud.provider is \"bedrock\" but cloud.region is not set")
+				os.Exit(1)
+			}
+			if cfg.Cloud.Model == "" {
+				fmt.Fprintln(os.Stderr, "❌ cloud.provider is \"bedrock\" but cloud.model is not set")
+				os.Exit(1)
+			}
+			cloud = model.NewBedrockClient(model.BedrockClientConfig{
+				Region:   cfg.Cloud.Region,
+				Model:    cfg.Cloud.Model,
+				Endpoint: cfg.Cloud.Endpoint,
+			})
+		case "azure-openai":
+			if cfg.Cloud.Endpoint == "" {
+				fmt.Fprintln(os.Stderr, "❌ cloud.provider is \"azure-openai\" but cloud.endpoint is not set")
+				os.Exit(1)
+			}
+			if cfg.Cloud.Deployment == "" {
+				fmt.Fprintln(os.Stderr, "❌ cloud.provider is \"azure-openai\" but cloud.deployment is not set")
+				os.Exit(1)
+			}
+			cloud = model.NewAzureOpenAIClient(model.AzureOpenAIClientConfig{
+				Endpoint:   cfg.Cloud.Endpoint,
+				Deployment: cfg.Cloud.Deployment,
+				APIKey:     cfg.Cloud.APIKey,
+				APIVersion: cfg.Cloud.APIVersion,
+			})
 		case "aws-devops-agent":
 			da := cfg.Cloud.DevOpsAgent
 			if da == nil {
@@ -127,7 +156,7 @@ func runServe(args []string) {
 				Priority:   da.Priority,
 			})
 		default:
-			fmt.Fprintf(os.Stderr, "❌ unknown cloud.provider %q (must be \"gemini\", \"anthropic\", or \"aws-devops-agent\")\n", cfg.Cloud.Provider)
+			fmt.Fprintf(os.Stderr, "❌ unknown cloud.provider %q (must be \"gemini\", \"anthropic\", \"bedrock\", \"azure-openai\", or \"aws-devops-agent\")\n", cfg.Cloud.Provider)
 			os.Exit(1)
 		}
 	}

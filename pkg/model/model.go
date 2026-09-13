@@ -223,6 +223,33 @@ func NewAnthropicClient(cfg AnthropicClientConfig) *AnthropicClient {
 	}
 }
 
+// splitSystemMessage pulls any role="system" messages out of a
+// conversation and concatenates them into a single string, returning the
+// remaining messages unchanged. It exists because several cloud providers
+// (Anthropic, and Anthropic-family models served through other clouds
+// like Bedrock) take the system prompt as a separate top-level request
+// field rather than a message with role "system" — Gemini has the same
+// shape but with a structured (not plain-string) system field, so it
+// doesn't share this helper.
+func splitSystemMessage(messages []Message) (system string, rest []Message) {
+	rest = make([]Message, 0, len(messages))
+	for _, m := range messages {
+		if m.Role == "system" {
+			// Only one system prompt is meaningful downstream; later ones
+			// (there shouldn't be more than one in practice) get appended
+			// rather than silently dropped.
+			if system == "" {
+				system = m.Content
+			} else {
+				system += "\n\n" + m.Content
+			}
+			continue
+		}
+		rest = append(rest, m)
+	}
+	return system, rest
+}
+
 // Chat maps the shared Message/ChatOptions shape onto Anthropic's Messages
 // API. Anthropic takes the system prompt as a separate top-level field
 // rather than a message with role "system", so any such messages are
@@ -239,22 +266,7 @@ func (c *AnthropicClient) Chat(messages []Message, opts *ChatOptions) (string, e
 		}
 	}
 
-	var system string
-	chatMessages := make([]Message, 0, len(messages))
-	for _, m := range messages {
-		if m.Role == "system" {
-			// Anthropic only accepts one system prompt; later ones (there
-			// shouldn't be more than one in practice) get appended rather
-			// than silently dropped.
-			if system == "" {
-				system = m.Content
-			} else {
-				system += "\n\n" + m.Content
-			}
-			continue
-		}
-		chatMessages = append(chatMessages, m)
-	}
+	system, chatMessages := splitSystemMessage(messages)
 
 	reqBody := anthropicRequest{
 		Model:       c.model,
