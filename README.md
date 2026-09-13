@@ -421,7 +421,7 @@ rather than call Anthropic or Google directly:
 cloud:
   provider: "bedrock"
   region: "us-east-1"
-  model: "anthropic.claude-3-5-sonnet-20241022-v2:0"   # a Bedrock model ID; check AWS's per-region model support first
+  model: "us.anthropic.claude-haiku-4-5-20251001-v1:0"   # a cross-region inference profile ID, not the bare model ID -- see below
 ```
 
 Unlike every other provider here, `pkg/model.BedrockClient` uses the AWS SDK
@@ -432,7 +432,26 @@ deliberately no `api_key` field for this provider: credentials come from the
 SDK's standard chain (environment variables, `~/.aws/credentials`, an
 EC2/ECS/EKS instance role, SSO, ...), the same way any other AWS CLI/SDK tool
 on the host already authenticates. The IAM identity used needs
-`bedrock:InvokeModel` on the configured model.
+`bedrock:InvokeModel` on the configured model (or inference profile — see
+next paragraph).
+
+⚠️ **Confirmed against a real account (2026-09-13)**: several current-generation
+models reject a bare model ID for on-demand `InvokeModel` calls outright —
+
+```
+ValidationException: Invocation of model ID anthropic.claude-haiku-4-5-20251001-v1:0
+with on-demand throughput isn't supported. Retry your request with the ID or ARN
+of an inference profile that contains this model.
+```
+
+— and need the region-prefixed cross-region inference profile ID instead
+(the `us.` prefix above, not a bare `anthropic.` one; list what's available
+with `aws bedrock list-inference-profiles` or the SDK equivalent). Older
+models like Claude 3 Haiku still accept the bare ID directly; which form a
+given model needs isn't predictable from the ID alone. If `InvokeModel`
+returns the error above, this is the fix. This provider has been verified
+end-to-end in production — a real Alertmanager-triggered alert, escalated
+through Bedrock, filed a Gitea incident with no errors.
 
 ### Azure OpenAI
 
