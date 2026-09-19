@@ -34,42 +34,33 @@ flowchart LR
     AM(["Alertmanager<br/>fires alert"]) -->|webhook| B1
 
     subgraph VG["Victoria Gateway"]
-        direction TB
-        B1["Basic Auth check<br/><i>optional — webhook_auth</i>"]
-        B2["dedup by fingerprint<br/><i>always on, 10 min window</i>"]
-        B3["query Loki for logs"]
-        B4["search past incidents<br/><i>optional — rag</i><br/>↳ added to the prompt as context"]
-        B1 --> B2 --> B3 --> B4
+        direction LR
+        B1["Basic Auth check<br/><i>optional</i>"] --> B2["dedup by fingerprint<br/><i>always on</i>"] --> B3["query Loki<br/>for logs"] --> B4["search past incidents<br/><i>optional — rag</i>"]
     end
 
     subgraph LLM["Local LLM"]
-        C1["summarize"]
+        C1["summarize<br/><i>past incidents (if any) are<br/>added to the prompt as context</i>"]
     end
 
     B4 --> C1
-    C1 --> ESC{"escalate?<br/><i>optional — cloud + escalation</i>"}
+    C1 --> CLOUD
 
-    subgraph CLOUD["Cloud escalation — one of these"]
+    subgraph CLOUD["Escalate to cloud <i>(optional)</i> — one of these"]
         direction TB
         D1["Gemini"]
         D2["Anthropic"]
         D3["Bedrock"]
         D4["Azure OpenAI"]
-        D5["AWS DevOps Agent<br/><i>MCP → investigates the AWS<br/>account directly</i>"]
+        D5["AWS DevOps Agent<br/><i>MCP, investigates the<br/>AWS account directly</i>"]
     end
 
-    ESC -->|yes, re-analyze<br/>the same log excerpt| D1
-    ESC -.->|no| MERGE((" "))
-    D1 & D2 & D3 & D4 & D5 --> MERGE
+    CLOUD --> OUT
 
     subgraph OUT["Output"]
         direction TB
         E1["Telegram push"]
         E2["capture incident +<br/>file tracker issue<br/><i>optional — rag</i>"]
     end
-
-    MERGE --> E1
-    MERGE --> E2
 ```
 
 `POST /webhook/alertmanager` accepts Alertmanager's standard webhook payload
