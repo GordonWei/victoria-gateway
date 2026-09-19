@@ -56,6 +56,25 @@ flowchart LR
         direction TB
         E1["Telegram push"] ~~~ E2["capture incident +<br/>file tracker issue<br/><i>optional — rag</i>"]
     end
+
+    classDef trigger fill:#8ecae6,stroke:#0b5f7a,stroke-width:1.5px,color:#03045e;
+    classDef gateway fill:#95d5b2,stroke:#2d6a4f,stroke-width:1.5px,color:#1b4332;
+    classDef llm fill:#cdb4db,stroke:#5a189a,stroke-width:1.5px,color:#3c096c;
+    classDef cloud fill:#ffd166,stroke:#b07d1a,stroke-width:1.5px,color:#5c3d05;
+    classDef output fill:#ffafcc,stroke:#c9184a,stroke-width:1.5px,color:#590d22;
+
+    class AM trigger;
+    class B1,B2,B3,B4 gateway;
+    class C1 llm;
+    class D1,D2,D3,D4,D5 cloud;
+    class E1,E2 output;
+
+    style VG fill:#eafaf1,stroke:#2d6a4f,stroke-width:1.5px;
+    style LLM fill:#f3ecf9,stroke:#5a189a,stroke-width:1.5px;
+    style CLOUD fill:#fff6e0,stroke:#b07d1a,stroke-width:1.5px;
+    style OUT fill:#ffeef4,stroke:#c9184a,stroke-width:1.5px;
+
+    linkStyle default stroke:#6c757d,stroke-width:1.5px;
 ```
 
 `summarize` uses whatever the local LLM produces on its own, plus — when RAG
