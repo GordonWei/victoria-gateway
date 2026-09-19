@@ -30,3 +30,8 @@ config.yaml
 docs/_draft_improvement_ideas_20260831.md
 docs/_draft_kiro_review_round2.md
 docs/_agent_handoff.md
+# 2026-09-19 補：這兩份草稿內文引用了非公開的內部脈絡，
+# 在改寫成通用敘述前絕對不能進版控，之前漏加清單導致 git add -A 會掃到它們。
+docs/_draft_oss_gap_analysis.md
+docs/_draft_enterprise_features_proposal.md
+docs/_handoff_archive.md

@@ -3,12 +3,14 @@
 // local LLM to summarize what's going on, and pushes that summary to
 // Telegram. See pkg/aiops and config.yaml.
 //
-// Three entry points share this binary: `victoria-gateway [flags]`
+// Four entry points share this binary: `victoria-gateway [flags]`
 // (default) runs the server; `victoria-gateway note [flags]` records a
 // confirmed incident resolution into the RAG store directly, or confirms
 // an existing pending one by id — see note.go; `victoria-gateway sync`
 // pulls resolutions back from closed Gitea issues linked to pending
-// records — see sync.go.
+// records — see sync.go; `victoria-gateway suppression-candidates` prints
+// (never applies) candidate Alertmanager suppression rules derived from
+// confirmed-incident history — see suppression.go.
 package main
 
 import (
@@ -30,6 +32,7 @@ import (
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
 	"github.com/gordonwei/victoria-gateway/pkg/config"
 	"github.com/gordonwei/victoria-gateway/pkg/maintenance"
+	"github.com/gordonwei/victoria-gateway/pkg/mask"
 	"github.com/gordonwei/victoria-gateway/pkg/metrics"
 	"github.com/gordonwei/victoria-gateway/pkg/model"
 	"github.com/gordonwei/victoria-gateway/pkg/notify"
@@ -45,6 +48,9 @@ func main() {
 			return
 		case "sync":
 			runSync(os.Args[2:])
+			return
+		case "suppression-candidates":
+			runSuppressionCandidates(os.Args[2:])
 			return
 		}
 	}
@@ -220,6 +226,7 @@ func runServe(args []string) {
 		if h.ragSimThreshold == 0 {
 			h.ragSimThreshold = 0.75
 		}
+		h.maskLogExcerpt = cfg.RAG.MaskLogExcerpt
 		h.publicBaseURL = strings.TrimRight(cfg.RAG.PublicBaseURL, "/")
 		h.issueURL = issueURLBuilder(cfg.RAG)
 		t, err := buildTracker(cfg.RAG)
@@ -230,6 +237,11 @@ func runServe(args []string) {
 		h.tracker = t
 	}
 
+	// webUI wraps a web-page handler with cfg.WebUIAuth's check — nil
+	// (the default) makes this a no-op, preserving every existing
+	// deployment's behavior exactly. See auth.go.
+	webUI := webUIAuthMiddleware(cfg.WebUIAuth)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook/alertmanager", h.handleAlertmanagerWebhook)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -238,10 +250,12 @@ func runServe(args []string) {
 	})
 	mux.Handle("/metrics", h.metrics.Handler())
 	if ragEnabled {
-		mux.HandleFunc("/incidents", h.handleIncidentsList)
-		mux.HandleFunc("/incidents/", h.handleIncidentDetail)
+		mux.Handle("/incidents", webUI(http.HandlerFunc(h.handleIncidentsList)))
+		mux.Handle("/incidents/", webUI(http.HandlerFunc(h.handleIncidentDetail)))
+		mux.Handle("/pending", webUI(http.HandlerFunc(h.handlePendingList)))
+		mux.Handle("/pending/", webUI(http.HandlerFunc(h.handlePendingDetail)))
 	}
-	mux.HandleFunc("/maintenance-windows", h.handleMaintenanceWindows)
+	mux.Handle("/maintenance-windows", webUI(http.HandlerFunc(h.handleMaintenanceWindows)))
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -401,6 +415,7 @@ type handler struct {
 	ragTopK         int
 	ragShowSimilar  bool
 	ragSimThreshold float64
+	maskLogExcerpt  bool               // config.RAGConfig.MaskLogExcerpt — see pkg/mask
 	publicBaseURL   string             // prefix for /incidents links in notifications; "" renders bare paths
 	issueURL        func(int64) string // issue number → browse URL; nil if not derivable
 	tracker         tracker.Tracker    // nil if no issue tracker (Gitea/GitHub) is configured
@@ -830,6 +845,13 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 	const maxLogExcerpt = 4000 // keep the stored row a reasonable size; the full log is in Loki anyway
 	if len(logExcerpt) > maxLogExcerpt {
 		logExcerpt = logExcerpt[len(logExcerpt)-maxLogExcerpt:]
+	}
+	// Opt-in only (rag.mask_log_excerpt) — off by default because the
+	// actual content of a log line is usually the root-cause signal, not
+	// noise. See pkg/mask's package doc and the README's "What data this
+	// stores, and where it goes" section for the reasoning.
+	if h.maskLogExcerpt {
+		logExcerpt = mask.RedactLikelyCredentials(logExcerpt)
 	}
 
 	rec := rag.Record{

@@ -13,16 +13,26 @@ import (
 )
 
 type Config struct {
-	ListenAddr         string               `yaml:"listen_addr"` // e.g. ":8090"
-	Loki               LokiConfig           `yaml:"loki"`
-	Summarizer         LLMConfig            `yaml:"summarizer"`
-	Cloud              *CloudConfig         `yaml:"cloud"`      // optional: cloud model for escalated alerts
-	Escalation         EscalationConfig     `yaml:"escalation"` // rules for when to escalate to Cloud
-	RAG                *RAGConfig           `yaml:"rag"`        // optional: past-incident retrieval
-	Telegram           TelegramConfig       `yaml:"telegram"`
-	Notifications      *NotificationsConfig `yaml:"notifications"`       // optional: multi-channel routing; nil keeps the single-Telegram behavior
-	WebhookAuth        *WebhookAuthConfig   `yaml:"webhook_auth"`        // optional: require HTTP Basic Auth on the webhook endpoint
-	MaintenanceWindows []MaintenanceWindow  `yaml:"maintenance_windows"` // optional: suppress or mute alerts during scheduled windows
+	ListenAddr    string               `yaml:"listen_addr"` // e.g. ":8090"
+	Loki          LokiConfig           `yaml:"loki"`
+	Summarizer    LLMConfig            `yaml:"summarizer"`
+	Cloud         *CloudConfig         `yaml:"cloud"`      // optional: cloud model for escalated alerts
+	Escalation    EscalationConfig     `yaml:"escalation"` // rules for when to escalate to Cloud
+	RAG           *RAGConfig           `yaml:"rag"`        // optional: past-incident retrieval
+	Telegram      TelegramConfig       `yaml:"telegram"`
+	Notifications *NotificationsConfig `yaml:"notifications"` // optional: multi-channel routing; nil keeps the single-Telegram behavior
+	WebhookAuth   *WebhookAuthConfig   `yaml:"webhook_auth"`  // optional: require HTTP Basic Auth on the webhook endpoint
+	// WebUIAuth, if set, requires HTTP Basic Auth on the read/write web
+	// pages (/incidents, /pending, /maintenance-windows) — separately from
+	// WebhookAuth, since the caller is a human browser rather than
+	// Alertmanager and the risk profile changes once /pending gained a
+	// POST confirm form (see cmd/victoria-gateway/auth.go). Nil (the
+	// default) leaves these endpoints exactly as unauthenticated as they
+	// were before this existed — see the README's "Securing the web UI"
+	// section for why that's a real decision an operator has to make, not
+	// a safe default this package can pick for them.
+	WebUIAuth          *WebhookAuthConfig  `yaml:"webui_auth"`
+	MaintenanceWindows []MaintenanceWindow `yaml:"maintenance_windows"` // optional: suppress or mute alerts during scheduled windows
 
 	// WebhookAsync, when true, makes POST /webhook/alertmanager respond
 	// 202 Accepted immediately after filtering/dedup and run the analyses
@@ -247,6 +257,16 @@ type RAGConfig struct {
 	// context, not a claim.
 	SimilarityThreshold float64 `yaml:"similarity_threshold"`
 
+	// MaskLogExcerpt, when true, redacts substrings in a captured log
+	// excerpt that look like credential assignments (password=, token:,
+	// Authorization: Bearer ...) before it's stored, using
+	// pkg/mask.RedactLikelyCredentials — a shape-preserving, irreversible
+	// rewrite. Off by default: for most alerts the actual content of an
+	// error message is the root-cause signal, not something to hide, and
+	// masking indiscriminately would defeat that. See the README's "What
+	// data this stores, and where it goes" section before turning this on.
+	MaskLogExcerpt bool `yaml:"mask_log_excerpt"`
+
 	// PublicBaseURL, e.g. "http://172.16.100.6:8090", is what /incidents
 	// links in notifications are prefixed with — the address a human's
 	// browser can actually reach, which the process can't reliably guess
@@ -326,6 +346,9 @@ func (c *Config) Validate() error {
 	// secret" behavior an operator setting webhook_auth actually wants.
 	if c.WebhookAuth != nil && (c.WebhookAuth.Username == "" || c.WebhookAuth.Password == "") {
 		return fmt.Errorf("webhook_auth is set but username/password is empty — set both, or remove the webhook_auth block to leave the endpoint unauthenticated")
+	}
+	if c.WebUIAuth != nil && (c.WebUIAuth.Username == "" || c.WebUIAuth.Password == "") {
+		return fmt.Errorf("webui_auth is set but username/password is empty — set both, or remove the webui_auth block to leave the web pages unauthenticated")
 	}
 	if c.RAG != nil && c.RAG.Enabled {
 		if c.RAG.PostgresDSN == "" || c.RAG.EmbeddingEndpoint == "" || c.RAG.EmbeddingModel == "" {

@@ -12,6 +12,16 @@ listen_addr: ":8090"
 #   username: "alertmanager"
 #   password: "REPLACE-a-real-secret"
 
+# Optional. Requires HTTP Basic Auth on the web pages instead
+# (/incidents, /pending, /maintenance-windows) — separate from
+# webhook_auth above since the caller there is a human browser, not
+# Alertmanager. Unauthenticated by default; see README's "Securing the
+# web UI" section for why that stops being an easy default once /pending
+# gained a confirm form.
+# webui_auth:
+#   username: "ops"
+#   password: "REPLACE-a-real-secret"
+
 loki:
   endpoint: "http://loki:3100"   # Loki's service name on the same docker network
   lookback_sec: 300
@@ -74,6 +84,13 @@ summarizer:
 #   embedding_model: "bge-m3"
 #   # embedding_api_key: ""   # optional; only if embedding_endpoint requires auth
 #   top_k: 3
+#   # Redacts substrings that look like credential assignments
+#   # (password=, token:, Authorization: Bearer ...) in captured log
+#   # excerpts before they're stored. Off by default — see README's "What
+#   # data this stores, and where it goes" before turning this on; for
+#   # most alerts the log content itself is the root-cause signal, not
+#   # noise to hide.
+#   # mask_log_excerpt: false
 #   # Similar-incident references in notifications (on by default when RAG
 #   # is on): past confirmed incidents with cosine similarity >= the
 #   # threshold get linked at the bottom of each push — issue URL when the

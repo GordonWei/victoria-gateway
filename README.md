@@ -343,6 +343,89 @@ Set `rag.public_base_url` to the address a human's browser can actually
 reach so those links are absolute; disable the whole section with
 `rag.show_similar_in_notification: false`.
 
+There's also a Pending side, for records auto-captured right after an
+alert fires but not yet confirmed by anyone:
+
+- `GET /pending` — recent pending records, same `?limit=`/`?alertname=`/
+  `?host=` filtering as `/incidents`. Rendered with a clear "unverified LLM
+  guess" label and never mixed into the same table as confirmed records —
+  a pending summary hasn't been checked by anyone yet.
+- `GET /pending/{id}` — one pending record, with a form to confirm it:
+  type in what it actually turned out to be, submit, and it moves to
+  Confirmed (same as running `victoria-gateway note --id {id} --resolution
+  "..."`). Confirming redirects nowhere special — the page re-renders
+  showing the confirmation succeeded, with a link back to `/pending` — so
+  this is usable end-to-end from a phone, matching the "on-call, on a
+  phone, at night" assumption the dark theme was already built for.
+  Submitting twice (a double tap, or a mail/IM client prefetching the
+  link) is safe: only the first submission takes effect, the second sees
+  "already confirmed" instead of silently overwriting the first answer.
+
+### What data this stores, and where it goes
+
+Enabling RAG means every analyzed alert's log excerpt (up to 4,000
+characters) ends up in three places: written into Postgres
+(`incidents.log_excerpt`), sent to whichever LLM does the summarizing
+(local and/or cloud), and rendered in plain text on `/incidents/{id}` and
+`/pending/{id}` — both of which have **no authentication by default** (see
+"Securing the web UI" below).
+
+If the Loki you're pointing this at is a real production instance, this
+matters: production logs routinely contain passwords, tokens, and other
+things you didn't mean to publish on an open port. `rag.mask_log_excerpt:
+true` (off by default — see its doc comment in `pkg/config` for why
+enabling it is not automatically the right call) redacts substrings that
+look like credential assignments before they're stored; it's not a
+substitute for not logging secrets in the first place, and it only
+recognizes common `key=value`/`Bearer <token>` shapes, not every
+application's log format.
+
+### RAG has nothing to retrieve until something is Confirmed
+
+`Search` only returns Confirmed records, and a fresh install starts with
+zero of them. Until you've confirmed at least a few incidents (via
+`/pending`, the confirm form, or `victoria-gateway note --alert-name ...`
+for backfilling history from before RAG was enabled), the "相似歷史事件"
+section simply won't have anything to show — RAG isn't broken, there's
+just nothing in the store yet to be similar to.
+
+### Turning repeat confirmations into suppression rule candidates
+
+`victoria-gateway suppression-candidates` groups the confirmed-incident
+history by (alertname, host) and prints every pair that's been confirmed
+the same way at least `--min-count` times (default 3) — a signal that
+alert keeps firing and getting manually waved off as known-noise. For
+each candidate it prints a permanent Alertmanager `route` you could add
+to stop being notified about it entirely, and a time-bounded `amtool
+silence` command as the more conservative alternative. It only ever
+prints — it never edits Alertmanager's config or calls its API, and
+applying either option is entirely up to you. See `pkg/suppress`'s
+package doc for exactly what the confirmation count does and doesn't
+tell you (it's not the same thing as how often the alert actually fires).
+
+### Securing the web UI
+
+`/incidents`, `/pending`, and `/maintenance-windows` have no authentication
+by default — the original assumption was a private network and a
+read-only link to click from a notification. `/pending/{id}` now also
+accepts a POST (the confirm form above), which changes that calculus:
+anyone who can reach the port can now write a resolution, not just read
+one. Set `webui_auth` in config.yaml (same shape as `webhook_auth`) to
+require HTTP Basic Auth on all of these:
+
+```yaml
+webui_auth:
+  username: ops
+  password: "change-me"
+```
+
+This isn't multi-user or role-based — it's one shared credential, the
+same tier of protection `webhook_auth` already offers the webhook
+endpoint. If you need real SSO/OIDC, the auth check is a swappable
+`AuthMiddleware` (see `cmd/victoria-gateway/auth.go`); basic auth is the
+only implementation shipped today, but plugging in something else there
+doesn't require touching any handler.
+
 ## Async webhook mode and graceful shutdown
 
 `webhook_async: true` makes `POST /webhook/alertmanager` answer
