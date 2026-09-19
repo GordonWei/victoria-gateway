@@ -26,6 +26,80 @@ func TestValidate_MissingLokiEndpoint(t *testing.T) {
 	}
 }
 
+func TestValidate_LogSourceNil_LokiEndpointStillRequired(t *testing.T) {
+	c := validConfig()
+	c.Loki.Endpoint = ""
+	c.LogSource = nil
+	if err := c.Validate(); err == nil {
+		t.Error("expected an error when log_source is nil (defaults to loki) and loki.endpoint is empty")
+	}
+}
+
+func TestValidate_LogSourceExplicitLoki_LokiEndpointRequired(t *testing.T) {
+	c := validConfig()
+	c.Loki.Endpoint = ""
+	c.LogSource = &LogSourceConfig{Type: "loki"}
+	if err := c.Validate(); err == nil {
+		t.Error("expected an error when log_source.type is explicitly \"loki\" and loki.endpoint is empty")
+	}
+}
+
+func TestValidate_LogSourceCloudWatch_LokiEndpointNotRequired(t *testing.T) {
+	c := validConfig()
+	c.Loki.Endpoint = "" // cloudwatch doesn't need it
+	c.LogSource = &LogSourceConfig{
+		Type: "cloudwatch",
+		CloudWatch: &CloudWatchConfig{
+			Region:        "us-east-1",
+			LogGroupNames: []string{"/aws/lambda/my-fn"},
+		},
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil when cloudwatch is fully configured", err)
+	}
+}
+
+func TestValidate_LogSourceCloudWatch_MissingFields(t *testing.T) {
+	c := validConfig()
+	c.LogSource = &LogSourceConfig{Type: "cloudwatch"} // no CloudWatch block at all
+	if err := c.Validate(); err == nil {
+		t.Error("expected an error when log_source.type is cloudwatch but log_source.cloudwatch is missing")
+	}
+
+	c.LogSource.CloudWatch = &CloudWatchConfig{Region: "us-east-1"} // no log group names
+	if err := c.Validate(); err == nil {
+		t.Error("expected an error when cloudwatch.log_group_names is empty")
+	}
+}
+
+func TestValidate_LogSourceGCPLogging_LokiEndpointNotRequired(t *testing.T) {
+	c := validConfig()
+	c.Loki.Endpoint = ""
+	c.LogSource = &LogSourceConfig{
+		Type:       "gcp_logging",
+		GCPLogging: &GCPLoggingConfig{ProjectID: "my-project"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil when gcp_logging is fully configured", err)
+	}
+}
+
+func TestValidate_LogSourceGCPLogging_MissingProjectID(t *testing.T) {
+	c := validConfig()
+	c.LogSource = &LogSourceConfig{Type: "gcp_logging", GCPLogging: &GCPLoggingConfig{}}
+	if err := c.Validate(); err == nil {
+		t.Error("expected an error when gcp_logging.project_id is empty")
+	}
+}
+
+func TestValidate_LogSourceUnknownType(t *testing.T) {
+	c := validConfig()
+	c.LogSource = &LogSourceConfig{Type: "splunk"}
+	if err := c.Validate(); err == nil {
+		t.Error("expected an error for an unrecognized log_source.type")
+	}
+}
+
 func TestValidate_MissingSummarizerEndpoint(t *testing.T) {
 	c := validConfig()
 	c.Summarizer.Endpoint = ""

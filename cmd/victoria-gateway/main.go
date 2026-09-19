@@ -94,7 +94,15 @@ func runServe(args []string) {
 		limit = 200
 	}
 
-	lokiClient := aiops.NewClient(cfg.Loki.Endpoint)
+	// cfg.Validate already confirmed whichever block this selects has its
+	// required fields, so an error here would mean Validate itself has a
+	// gap — worth failing loudly on rather than silently, but not a path
+	// a correctly-validated config can reach.
+	logs, err := buildLogSource(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+		os.Exit(1)
+	}
 	llm := model.NewOpenAIClient(model.OpenAIClientConfig{
 		Endpoint: cfg.Summarizer.Endpoint,
 		Model:    cfg.Summarizer.Model,
@@ -168,7 +176,7 @@ func runServe(args []string) {
 	}
 
 	h := &handler{
-		loki:        lokiClient,
+		logs:        logs,
 		summarizer:  summarizer,
 		cloud:       cloud,
 		escalation:  cfg.Escalation,
@@ -285,9 +293,14 @@ func runServe(args []string) {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	srcType := logSourceType(cfg)
+	logSourceDesc := cfg.Loki.Endpoint
+	if srcType != "loki" {
+		logSourceDesc = srcType
+	}
 	fmt.Printf("🚀 victoria-gateway listening on %s (POST /webhook/alertmanager, async=%v)\n", addr, cfg.WebhookAsync)
-	fmt.Printf("   loki: %s | summarizer: %s (%s) | notify: %v | cloud: %v | rag: %v\n",
-		cfg.Loki.Endpoint, cfg.Summarizer.Endpoint, cfg.Summarizer.Model, h.notifier.Enabled(), cloud != nil, ragEnabled)
+	fmt.Printf("   log source (%s): %s | summarizer: %s (%s) | notify: %v | cloud: %v | rag: %v\n",
+		srcType, logSourceDesc, cfg.Summarizer.Endpoint, cfg.Summarizer.Model, h.notifier.Enabled(), cloud != nil, ragEnabled)
 
 	// Graceful shutdown: SIGTERM/SIGINT stops accepting new requests,
 	// then waits (bounded) for in-flight analyses — which may be running
@@ -415,7 +428,7 @@ func issueURLBuilder(ragCfg *config.RAGConfig) func(int64) string {
 }
 
 type handler struct {
-	loki        *aiops.Client
+	logs        aiops.LogSource
 	summarizer  *aiops.Summarizer
 	notifier    *notify.Router // nil-safe; nil or channel-less means "no pushes"
 	cloud       model.LLM      // nil if no cloud escalation target configured
@@ -749,7 +762,7 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		}
 	}
 
-	display, lokiSelector, ok := alert.AffectedIdentity()
+	display, identity, ok := alert.LogIdentity()
 	if !ok {
 		res.Error = fmt.Sprintf("alert has neither \"host\"/\"instance\" nor \"namespace\"+\"pod\" labels (fingerprint=%s)", alert.Fingerprint)
 		return
@@ -762,11 +775,11 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		return
 	}
 
-	lokiStart := time.Now()
-	logs, err := h.loki.QueryRange(lokiSelector, start.Add(-h.lookback), time.Now(), h.limit)
-	h.metrics.ObserveLokiQueryDuration(time.Since(lokiStart))
+	logQueryStart := time.Now()
+	logs, err := h.logs.QueryRange(context.Background(), identity, start.Add(-h.lookback), time.Now(), h.limit)
+	h.metrics.ObserveLokiQueryDuration(time.Since(logQueryStart))
 	if err != nil {
-		res.Error = fmt.Sprintf("loki query: %v", err)
+		res.Error = fmt.Sprintf("log query: %v", err)
 		return
 	}
 
