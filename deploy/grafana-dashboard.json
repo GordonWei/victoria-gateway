@@ -1,0 +1,84 @@
+{
+  "uid": "victoria-gateway-incidents",
+  "title": "Victoria Gateway — Incidents",
+  "tags": ["victoria-gateway", "aiops"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "1m",
+  "time": { "from": "now-30d", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Confirmed",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "victoria-gateway-postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT count(*) FROM incidents WHERE status = 'confirmed'",
+          "rawQuery": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "fixed", "fixedColor": "green" } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Pending",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "victoria-gateway-postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT count(*) FROM incidents WHERE status = 'pending'",
+          "rawQuery": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "fixed", "fixedColor": "yellow" } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "All Incidents",
+      "gridPos": { "h": 16, "w": 24, "x": 0, "y": 4 },
+      "datasource": { "type": "postgres", "uid": "victoria-gateway-postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT id, alert_name AS alert, host, status, gitea_issue_number AS issue, log_excerpt, summary, resolution, created_at, confirmed_at FROM incidents ORDER BY created_at DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "cellOptions": { "type": "auto", "wrapText": true },
+            "minWidth": 100
+          }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "created_at" }, "properties": [{ "id": "custom.width", "value": 160 }] },
+          { "matcher": { "id": "byName", "options": "id" }, "properties": [{ "id": "custom.width", "value": 50 }] },
+          { "matcher": { "id": "byName", "options": "status" }, "properties": [{ "id": "custom.width", "value": 90 }] },
+          { "matcher": { "id": "byName", "options": "issue" }, "properties": [{ "id": "custom.width", "value": 70 }] }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "created_at", "desc": true }]
+      }
+    }
+  ]
+}

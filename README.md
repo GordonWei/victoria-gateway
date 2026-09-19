@@ -384,6 +384,14 @@ alert fires but not yet confirmed by anyone:
   link) is safe: only the first submission takes effect, the second sees
   "already confirmed" instead of silently overwriting the first answer.
 
+Every Telegram push for a newly analyzed alert also links directly to
+*that alert's own* `/pending/{id}` page (a "確認這筆" line, separate from
+and above the "相似歷史事件" section, which only ever links to *other*,
+already-confirmed incidents) — so confirming what you were just paged
+about is one tap, not a detour through `/pending`'s list to find the
+right row. Only appears when RAG capture actually produced a record
+(RAG off, or the capture itself failed, means no link).
+
 ### What data this stores, and where it goes
 
 Enabling RAG means every analyzed alert's log excerpt (up to 4,000
@@ -820,6 +828,65 @@ running — one pass, then exit. An issue closed with no comment is left
 Pending; there's nothing to confirm it with, and `note --id` still works on
 it by hand later.
 
+That leaves two independent ways to confirm a record — the `/pending/{id}`
+web form, or closing the linked issue yourself — and by default they don't
+talk to each other: confirming via the web form only writes to the
+database, the issue stays open until `sync` or someone notices. Set
+`rag.close_issue_on_web_confirm: true` to keep them in sync in that
+direction too: confirming via `/pending/{id}` then also closes the linked
+issue, posting the typed-in resolution as the closing comment. Off by
+default — some setups deliberately want the issue tracker to stay the
+single source of truth (e.g. an existing on-call process built around
+"closing the issue is the confirmation"), and this toggle exists so the web
+form doesn't quietly become a second one behind their back. A failure to
+reach the tracker here is logged, not surfaced to whoever just confirmed
+(they have no tracker credentials to act on it anyway) — the database
+confirmation already succeeded and is never rolled back for it; the issue
+just stays open until the next `sync` tick or a manual close.
+
+```yaml
+rag:
+  close_issue_on_web_confirm: true   # optional, defaults to false
+```
+
+**Real-time sync via webhook.** `sync` only runs when its cron job fires —
+however often that's scheduled (commonly every 30 minutes), that's the
+worst-case lag between closing an issue and the database/notifications/
+Grafana reflecting it. Configuring a
+`webhook_secret` under `gitea:` or `github:` turns on an endpoint that
+resyncs the one issue that just closed, immediately:
+
+```yaml
+rag:
+  gitea:
+    # ...endpoint/token/owner/repo as above...
+    webhook_secret: "..."   # enables POST /webhook/gitea-issues
+  # or, symmetrically:
+  # github:
+  #   webhook_secret: "..."   # enables POST /webhook/github-issues
+```
+
+Each endpoint is disabled (404s unconditionally) unless its `webhook_secret`
+is set, and verifies every request against it before doing anything else:
+Gitea's `X-Gitea-Signature` header (hex HMAC-SHA256 of the raw body) or
+GitHub's `X-Hub-Signature-256` header (`sha256=` + hex HMAC-SHA256),
+matching each tracker's own documented scheme. Only the `issues` event's
+`closed` action triggers a resync; anything else (opened, edited, reopened,
+a non-issue event) is accepted and ignored. Register it on the *issues*
+repo (`rag.gitea.repo`/`rag.github.repo` — the dedicated repo issues get
+filed to, not the code repo) pointing at
+`http://<this-host>:<port>/webhook/gitea-issues` (or `/webhook/github-issues`),
+subscribed to the "Issues" event, with the same secret configured above.
+
+`sync` isn't replaced by this — it keeps running as the fallback for any
+delivery the webhook missed (the service was down, the request timed out,
+network hiccup) or for issues closed before the webhook was ever set up.
+If both `close_issue_on_web_confirm` and a webhook are enabled, confirming
+via the web form closes the issue, which then fires the webhook back at
+this same service — handled as an expected no-op (the record is already
+Confirmed by then), not an error, so the two features don't chase each
+other in a loop.
+
 Retrieval and capture failures (embedding endpoint down, Postgres or the
 issue tracker unreachable) are logged and treated as "skip this part" rather
 than failing the alert — none of RAG is a dependency the core summarizer
@@ -860,6 +927,24 @@ Setup, once, before turning `rag.enabled` on:
 2. Send any message to your new bot (DM it directly, or add it to a group).
 3. Hit `https://api.telegram.org/bot<token>/getUpdates` in a browser or with
    curl. The `chat.id` field in the response is your `chat_id`.
+
+### Grafana dashboard
+
+`deploy/grafana-dashboard.json` is a 3-panel dashboard over the `incidents`
+table — Confirmed count, Pending count, and a sortable/filterable table of
+every incident (alert, host, status, linked issue number, log excerpt,
+summary, resolution, timestamps). Requires `rag.enabled` (it reads straight
+from Postgres, not through victoria-gateway's own API) and a Grafana
+Postgres datasource pointed at that same database.
+
+Import it either through Grafana's UI (Dashboards → New → Import, paste the
+file's contents or upload it) or by dropping it into a
+[dashboard provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/#dashboards)
+directory for GitOps-style setups. Either way, the datasource UID the
+dashboard's panels reference (`victoria-gateway-postgres`) needs to match an
+actual datasource in your Grafana — either name/configure your Postgres
+datasource with that UID, or re-point each panel's datasource after
+importing.
 
 ## Running
 

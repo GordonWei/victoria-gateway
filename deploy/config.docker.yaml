@@ -98,6 +98,13 @@ summarizer:
 #   # show_similar_in_notification: true
 #   # similarity_threshold: 0.75
 #   # public_base_url: "http://REPLACE-host:8090"   # what /incidents links are prefixed with
+#   # Optional. Off by default. When true, confirming a record via the
+#   # /pending/{id} web form also closes its linked tracker issue (posting
+#   # the typed-in resolution as the closing comment) — keeps the web form
+#   # and "close the issue yourself" in sync regardless of which one you
+#   # actually use. Leave false if the issue tracker should stay the sole
+#   # source of truth for confirmation.
+#   # close_issue_on_web_confirm: false
 #   # Optional. Files an issue per analyzed alert on whichever tracker you
 #   # configure; `victoria-gateway sync` (run on a schedule) reads closed
 #   # issues' last comment back in as the resolution. Omit both to skip
@@ -109,11 +116,21 @@ summarizer:
 #     token: "REPLACE-gitea-token"   # needs write:issue scope
 #     owner: "REPLACE-owner"
 #     repo: "victoria-gateway-incidents"   # a dedicated repo, not the code repo
+#     # Optional. Set to enable POST /webhook/gitea-issues: an "Issues"
+#     # webhook event from this repo, verified against this secret
+#     # (X-Gitea-Signature), triggers an immediate resync of that one
+#     # issue instead of waiting for the next `sync` cron tick. See
+#     # README's "Real-time sync via webhook" for the Gitea-side setup.
+#     # webhook_secret: "REPLACE-a-real-secret"
 #   # github:
 #   #   endpoint: ""   # optional, defaults to https://api.github.com (set for GitHub Enterprise Server)
 #   #   token: "REPLACE-github-token"   # needs the "issues" repo permission
 #   #   owner: "REPLACE-owner"
 #   #   repo: "victoria-gateway-incidents"   # a dedicated repo, not the code repo
+#   #   # Optional. Same idea as gitea.webhook_secret above, but enables
+#   #   # POST /webhook/github-issues, verified against GitHub's
+#   #   # X-Hub-Signature-256 header instead.
+#   #   # webhook_secret: "REPLACE-a-real-secret"
 
 telegram:
   # Push each alert's LLM summary to this chat. Leave bot_token empty to
