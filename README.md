@@ -30,36 +30,32 @@ at a glance what's Victoria Gateway's own logic versus an external system
 it's calling out to.
 
 ```mermaid
-flowchart LR
+flowchart TB
     AM(["Alertmanager<br/>fires alert"]) -->|webhook| B1
 
     subgraph VG["Victoria Gateway"]
-        direction LR
-        B1["Basic Auth check<br/><i>optional</i>"] --> B2["dedup by fingerprint<br/><i>always on</i>"] --> B3["query Loki<br/>for logs"] --> B4["search past incidents<br/><i>optional — rag</i>"]
+        direction TB
+        B1["Basic Auth check<br/><i>optional</i>"] --> B2["dedup by fingerprint<br/><i>always on</i>"] --> B3["query Loki for logs"] --> B4["search past incidents<br/><i>optional — rag</i>"]
     end
+
+    B4 --> C1
 
     subgraph LLM["Local LLM"]
         C1["summarize<br/><i>past incidents (if any) are<br/>added to the prompt as context</i>"]
     end
 
-    B4 --> C1
     C1 --> CLOUD
 
     subgraph CLOUD["Escalate to cloud <i>(optional)</i> — one of these"]
         direction TB
-        D1["Gemini"]
-        D2["Anthropic"]
-        D3["Bedrock"]
-        D4["Azure OpenAI"]
-        D5["AWS DevOps Agent<br/><i>MCP, investigates the<br/>AWS account directly</i>"]
+        D1["Gemini"] ~~~ D2["Anthropic"] ~~~ D3["Bedrock"] ~~~ D4["Azure OpenAI"] ~~~ D5["AWS DevOps Agent<br/><i>MCP, investigates the<br/>AWS account directly</i>"]
     end
 
     CLOUD --> OUT
 
     subgraph OUT["Output"]
         direction TB
-        E1["Telegram push"]
-        E2["capture incident +<br/>file tracker issue<br/><i>optional — rag</i>"]
+        E1["Telegram push"] ~~~ E2["capture incident +<br/>file tracker issue<br/><i>optional — rag</i>"]
     end
 ```
 
