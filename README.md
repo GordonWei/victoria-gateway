@@ -30,23 +30,22 @@ at a glance what's Victoria Gateway's own logic versus an external system
 it's calling out to.
 
 ```mermaid
-flowchart TB
+flowchart LR
     AM(["Alertmanager<br/>fires alert"]) -->|webhook| B1
 
     subgraph VG["Victoria Gateway"]
-        direction TB
-        B1["Basic Auth check<br/><i>optional</i>"] --> B2["dedup by fingerprint<br/><i>always on</i>"] --> B3["query Loki for logs"] --> B4["search past incidents<br/><i>optional — rag</i>"]
+        direction LR
+        B1["Basic Auth check<br/><i>optional</i>"] --> B2["dedup by fingerprint<br/><i>always on</i>"] --> B3["query Loki<br/>for logs"] --> B4["search past<br/>incidents<br/><i>optional — rag</i>"]
+    end
+
+    subgraph LLM["Local LLM"]
+        C1["summarize"]
     end
 
     B4 --> C1
-
-    subgraph LLM["Local LLM"]
-        C1["summarize<br/><i>past incidents (if any) are<br/>added to the prompt as context</i>"]
-    end
-
     C1 --> CLOUD
 
-    subgraph CLOUD["Escalate to cloud <i>(optional)</i> — one of these"]
+    subgraph CLOUD["Escalate to<br/>cloud <i>(optional)</i>"]
         direction TB
         D1["Gemini"] ~~~ D2["Anthropic"] ~~~ D3["Bedrock"] ~~~ D4["Azure OpenAI"] ~~~ D5["AWS DevOps Agent<br/><i>MCP, investigates the<br/>AWS account directly</i>"]
     end
@@ -58,6 +57,9 @@ flowchart TB
         E1["Telegram push"] ~~~ E2["capture incident +<br/>file tracker issue<br/><i>optional — rag</i>"]
     end
 ```
+
+`summarize` uses whatever the local LLM produces on its own, plus — when RAG
+is enabled — similar past incidents added to the prompt as context.
 
 `POST /webhook/alertmanager` accepts Alertmanager's standard webhook payload
 (one or more alerts). Each alert must carry either a `host`/`instance` label
