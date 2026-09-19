@@ -9,7 +9,6 @@
 package aiops
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -98,20 +97,43 @@ func (a Alert) Host() (host string, ok bool) {
 // host/instance is the last-resort fallback for traditional infrastructure
 // alerts that carry neither shape.
 func (a Alert) AffectedIdentity() (display, lokiSelector string, ok bool) {
+	display, id, ok := a.identity()
+	if !ok {
+		return "", "", false
+	}
+	return display, id.LokiSelector(), true
+}
+
+// LogIdentity is the structured form of the same precedence AffectedIdentity
+// applies, for LogSource implementations whose native query language isn't
+// LogQL (CloudWatch Logs Insights, GCP Cloud Logging filters) — they build
+// their own query from whichever fields are non-empty instead of parsing a
+// pre-built LogQL selector string back apart. Exactly the same fields
+// AffectedIdentity's doc comment explains the precedence of; see it for why
+// pod beats deployment/statefulset beats host.
+func (a Alert) LogIdentity() (display string, id LogIdentity, ok bool) {
+	return a.identity()
+}
+
+// identity is the shared precedence logic behind AffectedIdentity and
+// LogIdentity — see AffectedIdentity's doc comment for why this order
+// (pod > deployment > statefulset > host) exists. Kept as one
+// implementation so the two public methods can't silently drift apart.
+func (a Alert) identity() (display string, id LogIdentity, ok bool) {
 	ns := a.Labels["namespace"]
 	if pod := a.Labels["pod"]; ns != "" && pod != "" {
-		return ns + "/" + pod, fmt.Sprintf(`{namespace=%q,pod=%q}`, ns, pod), true
+		return ns + "/" + pod, LogIdentity{Namespace: ns, Pod: pod}, true
 	}
 	if workload := a.Labels["deployment"]; ns != "" && workload != "" {
-		return ns + "/" + workload, fmt.Sprintf(`{namespace=%q}`, ns), true
+		return ns + "/" + workload, LogIdentity{Namespace: ns, Deployment: workload}, true
 	}
 	if workload := a.Labels["statefulset"]; ns != "" && workload != "" {
-		return ns + "/" + workload, fmt.Sprintf(`{namespace=%q}`, ns), true
+		return ns + "/" + workload, LogIdentity{Namespace: ns, StatefulSet: workload}, true
 	}
 	if h, hostOK := a.Host(); hostOK {
-		return h, fmt.Sprintf(`{host=%q}`, h), true
+		return h, LogIdentity{Host: h}, true
 	}
-	return "", "", false
+	return "", LogIdentity{}, false
 }
 
 // StartTime parses StartsAt as RFC3339. Returns the zero Time and an error

@@ -13,8 +13,17 @@ import (
 )
 
 type Config struct {
-	ListenAddr    string               `yaml:"listen_addr"` // e.g. ":8090"
-	Loki          LokiConfig           `yaml:"loki"`
+	ListenAddr string     `yaml:"listen_addr"` // e.g. ":8090"
+	Loki       LokiConfig `yaml:"loki"`
+	// LogSource, if set, switches which backend summarizeOne fetches an
+	// alert's logs from — CloudWatch Logs Insights or GCP Cloud Logging
+	// instead of the Loki block above. Nil (the default) or
+	// LogSource.Type == "loki" keeps the original behavior unchanged:
+	// loki.endpoint is required and used directly. loki.lookback_sec/
+	// loki.limit remain the general "how far back"/"how many lines" knobs
+	// regardless of which backend is actually active — they aren't
+	// Loki-specific, just historically homed on that block.
+	LogSource     *LogSourceConfig     `yaml:"log_source"`
 	Summarizer    LLMConfig            `yaml:"summarizer"`
 	Cloud         *CloudConfig         `yaml:"cloud"`      // optional: cloud model for escalated alerts
 	Escalation    EscalationConfig     `yaml:"escalation"` // rules for when to escalate to Cloud
@@ -136,9 +145,59 @@ type WebhookAuthConfig struct {
 // LokiConfig points at the Loki instance to query for context around a
 // fired alert.
 type LokiConfig struct {
-	Endpoint    string `yaml:"endpoint"`     // e.g. "http://loki:3100"
+	Endpoint    string `yaml:"endpoint"`     // e.g. "http://loki:3100"; required unless log_source.type is set to something other than "loki"
 	LookbackSec int    `yaml:"lookback_sec"` // how far before the alert's startsAt to begin the query window
 	Limit       int    `yaml:"limit"`        // max log lines fetched per query
+}
+
+// LogSourceConfig selects which backend fetches an alert's logs. See
+// Config.LogSource's doc comment for the default-to-Loki behavior when
+// this whole block is omitted.
+type LogSourceConfig struct {
+	// Type is "loki" (default if empty), "cloudwatch", or "gcp_logging".
+	Type       string            `yaml:"type"`
+	CloudWatch *CloudWatchConfig `yaml:"cloudwatch"`
+	GCPLogging *GCPLoggingConfig `yaml:"gcp_logging"`
+}
+
+// CloudWatchConfig configures pkg/cloudwatch as the log source. AWS
+// credentials come from the SDK's default chain (env vars, ~/.aws/
+// credentials, an EC2/ECS/EKS instance role, SSO, ...) — see
+// pkg/cloudwatch's package doc for why there's deliberately no access-
+// key/secret field here, same reasoning as cloud.provider: "bedrock".
+type CloudWatchConfig struct {
+	// Region is the AWS region the target log group(s) live in, e.g.
+	// "us-east-1".
+	Region string `yaml:"region"`
+	// LogGroupNames is which log group(s) to search — Logs Insights can
+	// query several in one request.
+	LogGroupNames []string `yaml:"log_group_names"`
+	// QueryTemplate overrides the default @message substring search.
+	// Must contain the literal token "{{TERM}}" exactly once. See
+	// pkg/cloudwatch's defaultQueryTemplate doc comment for why the right
+	// query depends on your own log shape.
+	QueryTemplate string `yaml:"query_template,omitempty"`
+	// TimeoutSec bounds one query end-to-end, including the
+	// StartQuery/GetQueryResults poll loop. 0 defaults to 30.
+	TimeoutSec int `yaml:"timeout_sec,omitempty"`
+}
+
+// GCPLoggingConfig configures pkg/gcplogging as the log source.
+// Credentials come from Application Default Credentials (gcloud auth
+// application-default login locally, or the GCE/GKE/Cloud Run metadata
+// server in production) — same no-static-credentials-field reasoning as
+// CloudWatchConfig.
+type GCPLoggingConfig struct {
+	// ProjectID is the GCP project whose logs are searched.
+	ProjectID string `yaml:"project_id"`
+	// FilterTemplate overrides the default SEARCH("{{TERM}}") full-text
+	// filter. Must contain the literal token "{{TERM}}" exactly once. See
+	// pkg/gcplogging's defaultFilterTemplate doc comment for why a
+	// structured field filter usually beats the generic default for
+	// JSON-shaped logs.
+	FilterTemplate string `yaml:"filter_template,omitempty"`
+	// TimeoutSec bounds one query. 0 defaults to 30.
+	TimeoutSec int `yaml:"timeout_sec,omitempty"`
 }
 
 // LLMConfig is the OpenAI-compatible endpoint the summarizer calls (LM
@@ -351,8 +410,8 @@ type TelegramConfig struct {
 // the server has to be running for note/sync's captured/synced records to
 // exist in the first place.
 func (c *Config) Validate() error {
-	if c.Loki.Endpoint == "" {
-		return fmt.Errorf("loki.endpoint is not set in config.yaml")
+	if err := c.validateLogSource(); err != nil {
+		return err
 	}
 	if c.Summarizer.Endpoint == "" {
 		return fmt.Errorf("summarizer.endpoint is not set in config.yaml")
@@ -395,6 +454,38 @@ func (c *Config) Validate() error {
 	}
 	if err := ValidateMaintenanceWindows(c.MaintenanceWindows); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateLogSource checks Config.Loki/Config.LogSource together: exactly
+// the block matching whichever backend is (implicitly or explicitly)
+// selected must be filled in, so a typo'd or half-filled config fails at
+// startup instead of surfacing as "logs are always empty" on the first
+// alert.
+func (c *Config) validateLogSource() error {
+	logSourceType := "loki"
+	if c.LogSource != nil && c.LogSource.Type != "" {
+		logSourceType = c.LogSource.Type
+	}
+
+	switch logSourceType {
+	case "loki":
+		if c.Loki.Endpoint == "" {
+			return fmt.Errorf("loki.endpoint is not set in config.yaml")
+		}
+	case "cloudwatch":
+		cw := c.LogSource.CloudWatch
+		if cw == nil || cw.Region == "" || len(cw.LogGroupNames) == 0 {
+			return fmt.Errorf("log_source.type is \"cloudwatch\" but log_source.cloudwatch.region/log_group_names is missing in config.yaml")
+		}
+	case "gcp_logging":
+		gl := c.LogSource.GCPLogging
+		if gl == nil || gl.ProjectID == "" {
+			return fmt.Errorf("log_source.type is \"gcp_logging\" but log_source.gcp_logging.project_id is missing in config.yaml")
+		}
+	default:
+		return fmt.Errorf("log_source.type is %q, want \"loki\", \"cloudwatch\", or \"gcp_logging\"", logSourceType)
 	}
 	return nil
 }

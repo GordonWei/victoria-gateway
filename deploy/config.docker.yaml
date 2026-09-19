@@ -27,6 +27,24 @@ loki:
   lookback_sec: 300
   limit: 200
 
+# Optional. Switches which backend fetches an alert's logs — omit this
+# whole block to keep using loki: above (the default). loki.lookback_sec/
+# loki.limit remain the general knobs regardless of which one is active.
+# See README's "Log source: Loki, CloudWatch, or GCP Cloud Logging" for
+# why query_template/filter_template matter more here than they might look.
+# log_source:
+#   type: "cloudwatch"   # "loki" (default), "cloudwatch", or "gcp_logging"
+#   cloudwatch:
+#     region: "us-east-1"
+#     log_group_names:
+#       - "/aws/lambda/REPLACE-your-function"
+#     # query_template: 'fields @timestamp, @message | filter host = "{{TERM}}"'
+#     # timeout_sec: 30
+#   # gcp_logging:
+#   #   project_id: "REPLACE-your-gcp-project"
+#   #   # filter_template: 'jsonPayload.host="{{TERM}}"'
+#   #   # timeout_sec: 30
+
 summarizer:
   # OpenAI-compatible endpoint (LM Studio, Ollama, vLLM, etc.). If it's on a
   # different host than this container, use its real LAN IP — it won't be

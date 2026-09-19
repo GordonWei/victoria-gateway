@@ -164,9 +164,70 @@ telegram:
 ```
 
 `loki.endpoint` and `summarizer.endpoint` are required — the process exits
-on startup if either is missing. Everything else has a default or is
-optional. See `deploy/config.docker.yaml` for the same shape with
-container-specific comments (including the optional sections below).
+on startup if either is missing (unless `log_source.type` switches away
+from Loki, see below). Everything else has a default or is optional. See
+`deploy/config.docker.yaml` for the same shape with container-specific
+comments (including the optional sections below).
+
+### Log source: Loki, CloudWatch, or GCP Cloud Logging
+
+Loki is the default and requires no extra config beyond `loki.endpoint`
+above. If your alerts' logs live in CloudWatch or GCP Cloud Logging
+instead, `log_source` switches the backend `summarizeOne` fetches from —
+`loki.lookback_sec`/`loki.limit` remain the general "how far back"/"how
+many lines" knobs regardless of which one is active, since they aren't
+Loki-specific, just historically homed on that block.
+
+```yaml
+log_source:
+  type: "cloudwatch"   # "loki" (default), "cloudwatch", or "gcp_logging"
+  cloudwatch:
+    region: "us-east-1"
+    log_group_names:
+      - "/aws/lambda/your-function"
+    # query_template: 'fields @timestamp, @message | filter host = "{{TERM}}"'
+    # timeout_sec: 30   # optional; bounds the StartQuery/GetQueryResults poll loop
+```
+
+or, on GCP:
+
+```yaml
+log_source:
+  type: "gcp_logging"
+  gcp_logging:
+    project_id: "your-gcp-project"
+    # filter_template: 'jsonPayload.host="{{TERM}}"'
+    # timeout_sec: 30
+```
+
+Both credentials paths use the standard SDK default chain — AWS's (env
+vars, `~/.aws/credentials`, an EC2/ECS/EKS instance role, SSO) for
+CloudWatch, Application Default Credentials (`gcloud auth
+application-default login` locally, or the GCE/GKE/Cloud Run metadata
+server in production) for GCP — deliberately, the same reasoning as
+`cloud.provider: bedrock`'s: there's no static-key config field here on
+purpose, so this doesn't become another place long-lived credentials end
+up in `config.yaml`.
+
+**`query_template`/`filter_template` matter more here than they might
+look.** Neither CloudWatch Logs Insights nor GCP Cloud Logging has
+anything like Loki's stream labels — there's no structured `{host="..."}`
+selector to build. The default templates do a generic full-text search
+(CloudWatch: `@message like /{{TERM}}/`; GCP: `SEARCH("{{TERM}}")`) against
+whichever single term is most specific for the alert (pod, then
+deployment/statefulset, then host — same precedence Loki's selector uses).
+That's a reasonable starting point, not a claim it's the right query for
+your log shape — structured JSON logs with a known field almost always do
+better with a template that filters on that field directly, e.g.
+`filter host = "{{TERM}}"` (CloudWatch) or `jsonPayload.host="{{TERM}}"`
+(GCP). The token `{{TERM}}` must appear exactly once; it's a literal
+string replace, not a format verb, so it's safe even if your own query
+text contains `%` characters.
+
+CloudWatch Logs Insights queries are asynchronous (StartQuery, then poll
+GetQueryResults) — `timeout_sec` bounds that whole poll loop, not just one
+HTTP call. GCP Cloud Logging's `entries.list` is a single synchronous
+call, so its `timeout_sec` is a plain HTTP timeout.
 
 `summarizer` is normally an unauthenticated local server, but
 `summarizer.api_key` lets it be a real cloud OpenAI-compatible endpoint

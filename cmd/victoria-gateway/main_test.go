@@ -56,7 +56,7 @@ func newTestHandler(t *testing.T, lokiURL, llmURL string) *handler {
 		Backend:  "test",
 	})
 	return &handler{
-		loki:       aiops.NewClient(lokiURL),
+		logs:       aiops.NewLokiLogSource(aiops.NewClient(lokiURL)),
 		summarizer: aiops.NewSummarizer(llm),
 		lookback:   5 * time.Minute,
 		limit:      50,
