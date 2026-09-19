@@ -25,36 +25,51 @@ silently discarded.
 
 ## How it works
 
-```
-Alertmanager --webhook--> victoria-gateway
-                               |
-                       [Basic Auth check]        optional (webhook_auth)
-                               |
-                       [dedup by fingerprint]     always on, 10 min window
-                               |
-                               v
-                        query Loki for logs
-                               |
-                       [search past incidents]    optional (rag)
-                               |            \
-                               |             > added to the prompt as context
-                               v            /
-                      local LLM summarizes
-                               |
-                       [escalate]                 optional (cloud + escalation)
-                               |
-        +------------+------------+------------+------------+------------+
-              v            v            v            v            v
-            Gemini     Anthropic     Bedrock       Azure      AWS DevOps
-                                                   OpenAI        Agent
-          (re-analyze the same log excerpt)               (MCP → investigate
-                                                             AWS account directly)
-                               |
-                 +-------------+-------------+
-                 v                           v
-          Telegram push              [capture incident +
-                                       file tracker issue]
-                                       optional (rag)
+Swimlanes below group each step by who actually does it — useful for seeing
+at a glance what's Victoria Gateway's own logic versus an external system
+it's calling out to.
+
+```mermaid
+flowchart LR
+    AM(["Alertmanager<br/>fires alert"]) -->|webhook| B1
+
+    subgraph VG["Victoria Gateway"]
+        direction TB
+        B1["Basic Auth check<br/><i>optional — webhook_auth</i>"]
+        B2["dedup by fingerprint<br/><i>always on, 10 min window</i>"]
+        B3["query Loki for logs"]
+        B4["search past incidents<br/><i>optional — rag</i><br/>↳ added to the prompt as context"]
+        B1 --> B2 --> B3 --> B4
+    end
+
+    subgraph LLM["Local LLM"]
+        C1["summarize"]
+    end
+
+    B4 --> C1
+    C1 --> ESC{"escalate?<br/><i>optional — cloud + escalation</i>"}
+
+    subgraph CLOUD["Cloud escalation — one of these"]
+        direction TB
+        D1["Gemini"]
+        D2["Anthropic"]
+        D3["Bedrock"]
+        D4["Azure OpenAI"]
+        D5["AWS DevOps Agent<br/><i>MCP → investigates the AWS<br/>account directly</i>"]
+    end
+
+    ESC -->|yes, re-analyze<br/>the same log excerpt| D1
+    ESC -.->|no| MERGE((" "))
+    D1 & D2 & D3 & D4 & D5 --> MERGE
+
+    subgraph OUT["Output"]
+        direction TB
+        E1["Telegram push"]
+        E2["capture incident +<br/>file tracker issue<br/><i>optional — rag</i>"]
+    end
+
+    MERGE --> E1
+    MERGE --> E2
 ```
 
 `POST /webhook/alertmanager` accepts Alertmanager's standard webhook payload
