@@ -427,6 +427,14 @@ func (f *fakeRAGStore) GetPending(ctx context.Context, id int64) (rag.Record, er
 	}
 	return rag.Record{}, rag.ErrNotFound
 }
+func (f *fakeRAGStore) GetPendingByGiteaIssue(ctx context.Context, issueNumber int64) (rag.Record, error) {
+	for _, r := range f.pending {
+		if r.GiteaIssueNumber == issueNumber {
+			return r, nil
+		}
+	}
+	return rag.Record{}, rag.ErrNotFound
+}
 func (f *fakeRAGStore) ListPending(ctx context.Context, filter rag.ListFilter, limit int) ([]rag.Record, error) {
 	matched := f.pending
 	if filter.AlertName != "" || filter.Host != "" {
@@ -468,6 +476,66 @@ func (f *fakeRAGStore) ConfirmPending(ctx context.Context, id int64, resolution 
 	return rag.ErrAlreadyConfirmed
 }
 func (f *fakeRAGStore) Close() error { return nil }
+
+// fakeTracker is a minimal in-memory tracker.Tracker for tests that need
+// to observe or drive CloseWithComment/LastComment without a real
+// Gitea/GitHub server — used by pending.go's close-on-web-confirm path
+// and trackerwebhook.go's resync path. CreateIssue/IssueState exist only
+// to satisfy the interface; nothing here currently exercises them.
+type fakeTracker struct {
+	createErr error
+	nextIssue int64
+
+	states   map[int64]string
+	comments map[int64]string
+
+	closeErr error
+	// closeCalls records every (number, comment) passed to
+	// CloseWithComment, so a test can assert a handler called it (or
+	// didn't) with the expected arguments.
+	closeCalls []struct {
+		Number  int64
+		Comment string
+	}
+}
+
+func (f *fakeTracker) CreateIssue(ctx context.Context, title, body string) (int64, error) {
+	if f.createErr != nil {
+		return 0, f.createErr
+	}
+	f.nextIssue++
+	return f.nextIssue, nil
+}
+
+func (f *fakeTracker) IssueState(ctx context.Context, number int64) (string, error) {
+	if s, ok := f.states[number]; ok {
+		return s, nil
+	}
+	return "open", nil
+}
+
+func (f *fakeTracker) LastComment(ctx context.Context, number int64) (string, error) {
+	return f.comments[number], nil
+}
+
+func (f *fakeTracker) CloseWithComment(ctx context.Context, number int64, comment string) error {
+	if f.closeErr != nil {
+		return f.closeErr
+	}
+	f.closeCalls = append(f.closeCalls, struct {
+		Number  int64
+		Comment string
+	}{number, comment})
+	if f.states == nil {
+		f.states = map[int64]string{}
+	}
+	f.states[number] = "closed"
+	if f.comments == nil {
+		f.comments = map[int64]string{}
+	}
+	f.comments[number] = comment
+	return nil
+}
 
 func TestSummarizeOne_RAGContext_InjectedIntoPrompt(t *testing.T) {
 	lokiSrv := newFakeLoki(t)
@@ -569,7 +637,7 @@ func TestSummarizeOne_CapturesPendingRecord(t *testing.T) {
 		Labels:   map[string]string{"alertname": "cpu_high", "host": "test-host"},
 		StartsAt: time.Now().Add(-2 * time.Minute).Format(time.RFC3339),
 	}
-	h.summarizeOne(alert)
+	res := h.summarizeOne(alert)
 
 	if !store.insertPendingCalled {
 		t.Fatal("expected InsertPending to be called after a successful analysis")
@@ -579,6 +647,9 @@ func TestSummarizeOne_CapturesPendingRecord(t *testing.T) {
 	}
 	if store.lastPending.GiteaIssueNumber != 0 {
 		t.Errorf("expected no Gitea issue number when Gitea isn't configured, got %d", store.lastPending.GiteaIssueNumber)
+	}
+	if res.pendingID != 1 { // fakeRAGStore.InsertPending always returns id 1
+		t.Errorf("res.pendingID = %d, want 1 (the id InsertPending returned)", res.pendingID)
 	}
 }
 

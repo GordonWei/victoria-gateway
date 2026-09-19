@@ -37,6 +37,14 @@ type Message struct {
 	// Channels render it as a "相似歷史事件" section; empty means render
 	// nothing extra.
 	Similar []SimilarIncident
+
+	// PendingURL, if non-empty, links directly to this alert's own
+	// /pending/{id} confirm page — the one place a human reading this
+	// notification can actually act on it, as opposed to Similar's links
+	// to unrelated past incidents. Empty when RAG/capture is off, capture
+	// failed, or no public base URL is configured to build an absolute
+	// link from.
+	PendingURL string
 }
 
 // SimilarIncident is one past confirmed incident reference attached to a

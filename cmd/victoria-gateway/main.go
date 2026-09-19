@@ -235,6 +235,13 @@ func runServe(args []string) {
 			os.Exit(1)
 		}
 		h.tracker = t
+		h.closeIssueOnWebConfirm = cfg.RAG.CloseIssueOnWebConfirm
+		if cfg.RAG.Gitea != nil {
+			h.giteaWebhookSecret = cfg.RAG.Gitea.WebhookSecret
+		}
+		if cfg.RAG.GitHub != nil {
+			h.githubWebhookSecret = cfg.RAG.GitHub.WebhookSecret
+		}
 	}
 
 	// webUI wraps a web-page handler with cfg.WebUIAuth's check — nil
@@ -254,6 +261,14 @@ func runServe(args []string) {
 		mux.Handle("/incidents/", webUI(http.HandlerFunc(h.handleIncidentDetail)))
 		mux.Handle("/pending", webUI(http.HandlerFunc(h.handlePendingList)))
 		mux.Handle("/pending/", webUI(http.HandlerFunc(h.handlePendingDetail)))
+		// Tracker webhooks are their own auth (HMAC signature against
+		// WebhookSecret), never webUI's basic auth — Gitea/GitHub can't
+		// supply that. handleGiteaIssueWebhook/handleGitHubIssueWebhook
+		// each refuse every request when their secret is unset, so
+		// registering both unconditionally is safe even if only one
+		// tracker (or neither) is actually configured.
+		mux.HandleFunc("/webhook/gitea-issues", h.handleGiteaIssueWebhook)
+		mux.HandleFunc("/webhook/github-issues", h.handleGitHubIssueWebhook)
 	}
 	mux.Handle("/maintenance-windows", webUI(http.HandlerFunc(h.handleMaintenanceWindows)))
 
@@ -420,6 +435,10 @@ type handler struct {
 	issueURL        func(int64) string // issue number → browse URL; nil if not derivable
 	tracker         tracker.Tracker    // nil if no issue tracker (Gitea/GitHub) is configured
 
+	closeIssueOnWebConfirm bool   // config.RAGConfig.CloseIssueOnWebConfirm
+	giteaWebhookSecret     string // "" disables POST /webhook/gitea-issues entirely
+	githubWebhookSecret    string // "" disables POST /webhook/github-issues entirely
+
 	metrics *metrics.Counters // nil-safe; see pkg/metrics
 
 	// maintenanceMu guards maintenanceWindows and maintenanceWindowDefs.
@@ -569,8 +588,9 @@ type alertResult struct {
 	AnalyzedBy string `json:"analyzed_by,omitempty"` // "local" or "cloud" or "suppressed"
 	Error      string `json:"error,omitempty"`
 
-	muted   bool                     // not exported to JSON; controls whether notification is skipped
-	similar []notify.SimilarIncident // past confirmed incidents above the similarity threshold, for notifications
+	muted     bool                     // not exported to JSON; controls whether notification is skipped
+	similar   []notify.SimilarIncident // past confirmed incidents above the similarity threshold, for notifications
+	pendingID int64                    // this alert's own captured record id, 0 if RAG/capture is off or failed
 }
 
 func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Request) {
@@ -793,21 +813,23 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	}
 
 	res.Summary = result.Summary
-	h.captureIncident(alert, logs, result, res.AnalyzedBy)
+	res.pendingID = h.captureIncident(alert, logs, result, res.AnalyzedBy)
 	return
 }
 
 // captureIncident records what was just analyzed as a Pending RAG record
 // — not retrievable by Search until someone confirms it (via `note
-// --id` directly, or `sync` reading a linked Gitea issue's closing
-// comment). This runs on every successfully analyzed alert when RAG is
-// enabled, whether or not Gitea is configured: capture always happens,
-// filing an issue is just one (optional) way to eventually get a
-// resolution back. Best-effort like retrieveRAGContext — failures are
-// logged, never fail the alert itself.
-func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, result aiops.SummarizeResult, analyzedBy string) {
+// --id` directly, or `sync`/a tracker webhook reading a linked issue's
+// closing comment). This runs on every successfully analyzed alert when
+// RAG is enabled, whether or not Gitea is configured: capture always
+// happens, filing an issue is just one (optional) way to eventually get
+// a resolution back. Best-effort like retrieveRAGContext — failures are
+// logged, never fail the alert itself. Returns the new record's id (0 on
+// any failure/no-op path) so the caller can put a direct confirm link in
+// the alert's own notification — see notifyResult/notify.Message.PendingURL.
+func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, result aiops.SummarizeResult, analyzedBy string) (id int64) {
 	if h.rag == nil || h.ragEmbedder == nil {
-		return
+		return 0
 	}
 
 	host, _, _ := alert.AffectedIdentity()
@@ -823,7 +845,7 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 	if err != nil {
 		log.Printf("aiops: rag capture embed failed, incident not recorded: %v", err)
 		h.metrics.IncRAGCaptureFailuresTotal()
-		return
+		return 0
 	}
 
 	var issueNumber int64
@@ -862,11 +884,11 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 		GiteaIssueNumber: issueNumber,
 		EmbeddingModel:   h.ragEmbedder.Model(),
 	}
-	id, err := h.rag.InsertPending(context.Background(), rec, embedding)
+	id, err = h.rag.InsertPending(context.Background(), rec, embedding)
 	if err != nil {
 		log.Printf("aiops: rag insert pending failed: %v", err)
 		h.metrics.IncRAGCaptureFailuresTotal()
-		return
+		return 0
 	}
 	h.metrics.IncRAGCaptureTotal()
 	if issueNumber != 0 {
@@ -874,6 +896,7 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 	} else {
 		log.Printf("aiops: captured pending incident id=%d (no gitea issue)", id)
 	}
+	return id
 }
 
 // retrieveRAGContext looks up past incidents similar to this alert, if
@@ -962,6 +985,10 @@ func (h *handler) notifyResult(res alertResult, labels map[string]string) {
 	if res.muted {
 		return
 	}
+	var pendingURL string
+	if res.pendingID != 0 {
+		pendingURL = fmt.Sprintf("%s/pending/%d", h.publicBaseURL, res.pendingID)
+	}
 	h.notifier.Dispatch(notify.Message{
 		AlertName:  res.AlertName,
 		Host:       res.Host,
@@ -969,5 +996,6 @@ func (h *handler) notifyResult(res alertResult, labels map[string]string) {
 		AnalyzedBy: res.AnalyzedBy,
 		Error:      res.Error,
 		Similar:    res.similar,
+		PendingURL: pendingURL,
 	}, labels)
 }

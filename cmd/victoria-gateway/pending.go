@@ -153,6 +153,14 @@ func (h *handler) handlePendingDetail(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "resolution is required", http.StatusBadRequest)
 			return
 		}
+		// Fetched before confirming, purely to read GiteaIssueNumber for
+		// the close-the-issue-too step below — ConfirmPending itself
+		// doesn't need this. Best-effort: if this lookup fails (record
+		// vanished between the GET that rendered this form and this
+		// POST), fall through and let ConfirmPending's own error handling
+		// below report ErrAlreadyConfirmed the normal way; that failure
+		// mode doesn't need this record.
+		preConfirm, _ := h.rag.GetPending(r.Context(), id)
 		// ConfirmPending's WHERE ... AND status = 'pending' is the actual
 		// concurrency guard: two submissions racing on the same id (a
 		// double click, or a mail/IM client's link-prefetch opening this
@@ -163,6 +171,19 @@ func (h *handler) handlePendingDetail(w http.ResponseWriter, r *http.Request) {
 		switch err := h.rag.ConfirmPending(r.Context(), id, resolution); {
 		case err == nil:
 			justConfirmed = true
+			// Best-effort, and deliberately after ConfirmPending already
+			// succeeded: the database confirmation is the source of
+			// truth and must not be rolled back just because the tracker
+			// call that mirrors it onto the issue had a bad network day.
+			// A failure here means the issue is out of sync with the DB
+			// until the next `sync` tick (or someone closes it by hand)
+			// — logged, not surfaced to the person confirming, who has
+			// no tracker credentials to act on it anyway.
+			if h.closeIssueOnWebConfirm && h.tracker != nil && preConfirm.GiteaIssueNumber != 0 {
+				if cerr := h.tracker.CloseWithComment(r.Context(), preConfirm.GiteaIssueNumber, resolution); cerr != nil {
+					log.Printf("pending: confirmed id=%d in DB but failed to close issue #%d: %v", id, preConfirm.GiteaIssueNumber, cerr)
+				}
+			}
 		case errors.Is(err, rag.ErrAlreadyConfirmed):
 			alreadyConfirmed = true
 		default:

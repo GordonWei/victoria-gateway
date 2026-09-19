@@ -150,3 +150,21 @@ func (c *Client) LastComment(ctx context.Context, number int64) (string, error) 
 	}
 	return comments[len(comments)-1].Body, nil
 }
+
+// CloseWithComment posts comment on the issue, then sets its state to
+// closed. Two requests, not one — Gitea's issue-edit endpoint has no way
+// to attach a comment atomically with a state change. Posting the
+// comment first means that if the close call fails, the comment (the
+// resolution itself) is still saved rather than silently lost; a retry
+// then only needs to close, not re-post.
+func (c *Client) CloseWithComment(ctx context.Context, number int64, body string) error {
+	commentPath := fmt.Sprintf("/api/v1/repos/%s/%s/issues/%d/comments", c.owner, c.repo, number)
+	if err := c.do(ctx, http.MethodPost, commentPath, map[string]string{"body": body}, nil); err != nil {
+		return fmt.Errorf("post closing comment: %w", err)
+	}
+	closePath := fmt.Sprintf("/api/v1/repos/%s/%s/issues/%d", c.owner, c.repo, number)
+	if err := c.do(ctx, http.MethodPatch, closePath, map[string]string{"state": "closed"}, nil); err != nil {
+		return fmt.Errorf("close issue (comment already posted): %w", err)
+	}
+	return nil
+}
