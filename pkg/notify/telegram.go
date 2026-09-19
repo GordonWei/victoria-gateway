@@ -124,6 +124,10 @@ func FormatTelegramText(msg Message) string {
 			html.EscapeString(msg.AlertName), html.EscapeString(msg.Host), html.EscapeString(msg.Summary))
 	}
 
+	if msg.PendingURL != "" {
+		text += "\n\n✅ 確認這筆：\n" + html.EscapeString(msg.PendingURL)
+	}
+
 	if len(msg.Similar) > 0 {
 		var b strings.Builder
 		b.WriteString("\n\n📎 相似歷史事件：")

@@ -152,6 +152,52 @@ func TestFormatTelegramText_SimilarSection(t *testing.T) {
 	}
 }
 
+func TestFormatTelegramText_PendingURL(t *testing.T) {
+	text := FormatTelegramText(Message{
+		AlertName:  "DiskSpace",
+		Host:       "172.16.100.6",
+		Summary:    "disk is filling up",
+		PendingURL: "https://vg.example/pending/42",
+	})
+	if !strings.Contains(text, "https://vg.example/pending/42") {
+		t.Errorf("formatted text missing the pending link:\n%s", text)
+	}
+	if !strings.Contains(text, "確認這筆") {
+		t.Errorf("formatted text missing the pending-link label:\n%s", text)
+	}
+}
+
+func TestFormatTelegramText_NoPendingURL_NoExtraSection(t *testing.T) {
+	text := FormatTelegramText(Message{
+		AlertName: "DiskSpace",
+		Host:      "172.16.100.6",
+		Summary:   "disk is filling up",
+	})
+	if strings.Contains(text, "確認這筆") {
+		t.Errorf("expected no pending-link section when PendingURL is empty:\n%s", text)
+	}
+}
+
+func TestFormatTelegramText_PendingURLAndSimilar_BothPresent(t *testing.T) {
+	text := FormatTelegramText(Message{
+		AlertName:  "DiskSpace",
+		Host:       "172.16.100.6",
+		Summary:    "disk is filling up",
+		PendingURL: "https://vg.example/pending/42",
+		Similar: []SimilarIncident{
+			{Ref: "#12 DiskSpace (172.16.100.6)", Date: "2026-07-15", URL: "https://gitea.example/issues/12"},
+		},
+	})
+	pendingIdx := strings.Index(text, "https://vg.example/pending/42")
+	similarIdx := strings.Index(text, "相似歷史事件")
+	if pendingIdx == -1 || similarIdx == -1 {
+		t.Fatalf("expected both sections present:\n%s", text)
+	}
+	if pendingIdx > similarIdx {
+		t.Errorf("expected the pending link (actionable on this alert) before the similar-incidents section (informational only):\n%s", text)
+	}
+}
+
 func TestFormatTelegramText_TruncatesLongSummary(t *testing.T) {
 	text := FormatTelegramText(Message{
 		AlertName: "X",

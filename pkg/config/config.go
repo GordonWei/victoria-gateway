@@ -282,6 +282,17 @@ type RAGConfig struct {
 	// every record has to be added by hand.
 	Gitea  *GiteaConfig  `yaml:"gitea"`
 	GitHub *GitHubConfig `yaml:"github"`
+
+	// CloseIssueOnWebConfirm, when true, makes confirming a record via
+	// the /pending web form also close its linked tracker issue (posting
+	// the typed-in resolution as the closing comment) — so the two
+	// confirmation paths (web form, closing the issue yourself) stay in
+	// sync regardless of which one you actually use. Off by default:
+	// some setups want the issue tracker to stay the sole source of
+	// truth for "is this really resolved" and treat the web form as a
+	// faster way to just look, not to close things on the tracker's
+	// behalf. No effect if neither gitea nor github is configured.
+	CloseIssueOnWebConfirm bool `yaml:"close_issue_on_web_confirm"`
 }
 
 // GiteaConfig points at the repo Victoria Gateway files one issue per
@@ -292,6 +303,17 @@ type GiteaConfig struct {
 	Token    string `yaml:"token"`
 	Owner    string `yaml:"owner"` // repo owner, e.g. "admin"
 	Repo     string `yaml:"repo"`  // e.g. "victoria-gateway-incidents"
+
+	// WebhookSecret, if set, enables POST /webhook/gitea-issues: Gitea's
+	// "Issues" webhook event, verified against this shared secret
+	// (X-Gitea-Signature, HMAC-SHA256 over the raw body), triggers an
+	// immediate resync of that one issue instead of waiting for the next
+	// `victoria-gateway sync` cron tick. Configure a matching webhook on
+	// this repo (Settings → Webhooks → Gitea, trigger "Issues") pointed
+	// at this address. Leave unset to rely on cron `sync` alone — the
+	// endpoint refuses all requests without a configured secret, it
+	// never runs unauthenticated.
+	WebhookSecret string `yaml:"webhook_secret"`
 }
 
 // GitHubConfig is the same idea as GiteaConfig, for anyone using GitHub
@@ -301,6 +323,13 @@ type GitHubConfig struct {
 	Token    string `yaml:"token"`    // a personal access token with Issues read/write on the target repo
 	Owner    string `yaml:"owner"`
 	Repo     string `yaml:"repo"` // a dedicated repo, not the code repo
+
+	// WebhookSecret is the GitHub equivalent of GiteaConfig.WebhookSecret
+	// — enables POST /webhook/github-issues, verified against
+	// X-Hub-Signature-256. Configure a webhook on the repo (Settings →
+	// Webhooks, content type application/json, event "Issues") with a
+	// matching secret.
+	WebhookSecret string `yaml:"webhook_secret"`
 }
 
 // TelegramConfig, if BotToken is set, makes the webhook handler push each

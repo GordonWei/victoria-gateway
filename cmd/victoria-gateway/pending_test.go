@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -112,6 +113,100 @@ func TestHandlePendingDetail_DoublePost_SecondAttemptDoesNotOverwrite(t *testing
 	}
 	if len(store.confirmPendingCalls) != 1 {
 		t.Fatalf("ConfirmPending should only have taken effect once, got %d calls: %+v", len(store.confirmPendingCalls), store.confirmPendingCalls)
+	}
+}
+
+func TestHandlePendingDetail_Post_CloseIssueOnWebConfirm_Enabled(t *testing.T) {
+	store := &fakeRAGStore{pending: []rag.Record{
+		{ID: 11, AlertName: "DiskSpace", Host: "h1", GiteaIssueNumber: 42, CreatedAt: time.Now()},
+	}}
+	tr := &fakeTracker{}
+	h := &handler{rag: store, tracker: tr, closeIssueOnWebConfirm: true}
+
+	form := url.Values{"resolution": {"log rotation was misconfigured; fixed and cleared"}}
+	req := httptest.NewRequest(http.MethodPost, "/pending/11", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.handlePendingDetail(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if len(tr.closeCalls) != 1 {
+		t.Fatalf("CloseWithComment called %d times, want 1", len(tr.closeCalls))
+	}
+	if got := tr.closeCalls[0]; got.Number != 42 || got.Comment != "log rotation was misconfigured; fixed and cleared" {
+		t.Errorf("CloseWithComment called with %+v", got)
+	}
+}
+
+func TestHandlePendingDetail_Post_CloseIssueOnWebConfirm_DisabledByDefault(t *testing.T) {
+	store := &fakeRAGStore{pending: []rag.Record{
+		{ID: 12, AlertName: "DiskSpace", Host: "h1", GiteaIssueNumber: 43, CreatedAt: time.Now()},
+	}}
+	tr := &fakeTracker{}
+	// closeIssueOnWebConfirm deliberately left at its zero value (false) —
+	// this is the OSS default, tracker configured or not.
+	h := &handler{rag: store, tracker: tr}
+
+	form := url.Values{"resolution": {"fixed"}}
+	req := httptest.NewRequest(http.MethodPost, "/pending/12", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.handlePendingDetail(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if len(tr.closeCalls) != 0 {
+		t.Errorf("CloseWithComment must not be called when the toggle is off, got calls: %+v", tr.closeCalls)
+	}
+}
+
+func TestHandlePendingDetail_Post_CloseIssueOnWebConfirm_NoLinkedIssue(t *testing.T) {
+	store := &fakeRAGStore{pending: []rag.Record{
+		// GiteaIssueNumber left at zero — this alert was never filed as an
+		// issue (tracker not configured at capture time, or filing failed).
+		{ID: 13, AlertName: "DiskSpace", Host: "h1", CreatedAt: time.Now()},
+	}}
+	tr := &fakeTracker{}
+	h := &handler{rag: store, tracker: tr, closeIssueOnWebConfirm: true}
+
+	form := url.Values{"resolution": {"fixed"}}
+	req := httptest.NewRequest(http.MethodPost, "/pending/13", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.handlePendingDetail(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if len(tr.closeCalls) != 0 {
+		t.Errorf("CloseWithComment must not be called with no linked issue number, got calls: %+v", tr.closeCalls)
+	}
+}
+
+func TestHandlePendingDetail_Post_CloseIssueOnWebConfirm_TrackerErrorStillConfirmsInDB(t *testing.T) {
+	store := &fakeRAGStore{pending: []rag.Record{
+		{ID: 14, AlertName: "DiskSpace", Host: "h1", GiteaIssueNumber: 44, CreatedAt: time.Now()},
+	}}
+	tr := &fakeTracker{closeErr: fmt.Errorf("gitea is down")}
+	h := &handler{rag: store, tracker: tr, closeIssueOnWebConfirm: true}
+
+	form := url.Values{"resolution": {"fixed"}}
+	req := httptest.NewRequest(http.MethodPost, "/pending/14", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.handlePendingDetail(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a tracker failure must not roll back the DB confirmation or surface as an error, status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+	if len(store.confirmPendingCalls) != 1 {
+		t.Fatalf("ConfirmPending called %d times, want 1 (DB confirm must proceed regardless of tracker outcome)", len(store.confirmPendingCalls))
+	}
+	if !strings.Contains(rec.Body.String(), "已確認") {
+		t.Errorf("expected the confirmed page to render normally, got body: %s", rec.Body.String())
 	}
 }
 

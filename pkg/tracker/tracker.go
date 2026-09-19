@@ -17,4 +17,10 @@ type Tracker interface {
 	// LastComment returns the body of the most recently posted comment
 	// on an issue, or "" if it has none.
 	LastComment(ctx context.Context, number int64) (string, error)
+	// CloseWithComment posts comment on the given issue and closes it in
+	// the same round trip — the write-side counterpart to sync's
+	// read-only IssueState/LastComment pair. Used when a resolution is
+	// confirmed somewhere other than the issue itself (the /pending web
+	// form) and that needs to be reflected back onto the issue.
+	CloseWithComment(ctx context.Context, number int64, comment string) error
 }

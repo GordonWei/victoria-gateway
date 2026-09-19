@@ -128,3 +128,90 @@ func TestNewClient_DefaultEndpoint(t *testing.T) {
 		t.Errorf("default endpoint = %q, want the public GitHub API", c.endpoint)
 	}
 }
+
+func TestCloseWithComment(t *testing.T) {
+	var calls []struct {
+		Method string
+		Path   string
+		Body   map[string]string
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		calls = append(calls, struct {
+			Method string
+			Path   string
+			Body   map[string]string
+		}{r.Method, r.URL.Path, body})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer server.Close()
+
+	c := NewClient(ClientConfig{Endpoint: server.URL, Token: "tok", Owner: "gordonwei", Repo: "victoria-gateway"})
+	if err := c.CloseWithComment(context.Background(), 9, "root cause: disk full, cleared logs"); err != nil {
+		t.Fatalf("CloseWithComment: %v", err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 requests (post comment, then close), got %d: %+v", len(calls), calls)
+	}
+	if calls[0].Method != http.MethodPost || calls[0].Path != "/repos/gordonwei/victoria-gateway/issues/9/comments" {
+		t.Errorf("first call = %+v, want POST to the comments endpoint", calls[0])
+	}
+	if calls[0].Body["body"] != "root cause: disk full, cleared logs" {
+		t.Errorf("comment body = %q", calls[0].Body["body"])
+	}
+	if calls[1].Method != http.MethodPatch || calls[1].Path != "/repos/gordonwei/victoria-gateway/issues/9" {
+		t.Errorf("second call = %+v, want PATCH to the issue endpoint", calls[1])
+	}
+	if calls[1].Body["state"] != "closed" {
+		t.Errorf("expected the patch to set state=closed, got %+v", calls[1].Body)
+	}
+}
+
+func TestCloseWithComment_CommentPostFails_NeverCallsClose(t *testing.T) {
+	var closeCalled bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			closeCalled = true
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+	}))
+	defer server.Close()
+
+	c := NewClient(ClientConfig{Endpoint: server.URL, Token: "bad", Owner: "gordonwei", Repo: "r"})
+	if err := c.CloseWithComment(context.Background(), 9, "fixed"); err == nil {
+		t.Error("expected an error when posting the comment fails")
+	}
+	if closeCalled {
+		t.Error("close must not be attempted when the comment post itself failed")
+	}
+}
+
+func TestCloseWithComment_ClosePatchFails_CommentAlreadyPosted(t *testing.T) {
+	var postedComment bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postedComment = true
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	c := NewClient(ClientConfig{Endpoint: server.URL, Token: "tok", Owner: "gordonwei", Repo: "r"})
+	err := c.CloseWithComment(context.Background(), 9, "fixed")
+	if err == nil {
+		t.Fatal("expected an error when the close patch fails")
+	}
+	if !postedComment {
+		t.Error("the comment should have been posted before the close attempt")
+	}
+	if !strings.Contains(err.Error(), "comment already posted") {
+		t.Errorf("error should note the comment already landed so a retry doesn't need to re-post it, got: %v", err)
+	}
+}

@@ -113,6 +113,13 @@ type Store interface {
 	// ErrNotFound (including when the id exists but is already Confirmed
 	// — to the /pending page that's "nothing left to confirm here").
 	GetPending(ctx context.Context, id int64) (Record, error)
+	// GetPendingByGiteaIssue returns the Pending record linked to the
+	// given tracker issue number, or ErrNotFound if none is Pending under
+	// that number (never filed, already Confirmed, or belongs to a
+	// different repo than the one configured). Used by the tracker
+	// webhook handler to resolve "issue #N closed" into a specific row
+	// without scanning every Pending record the way `sync` does.
+	GetPendingByGiteaIssue(ctx context.Context, issueNumber int64) (Record, error)
 	// ListPending returns up to limit Pending records matching filter,
 	// newest first. These are unverified LLM summaries, not confirmed
 	// resolutions — callers must not present them next to ListConfirmed
@@ -355,6 +362,24 @@ func (s *PGStore) GetPending(ctx context.Context, id int64) (Record, error) {
 			return Record{}, ErrNotFound
 		}
 		return Record{}, fmt.Errorf("rag get pending: %w", err)
+	}
+	return r, nil
+}
+
+// GetPendingByGiteaIssue returns the Pending record linked to the given
+// tracker issue number, or ErrNotFound.
+func (s *PGStore) GetPendingByGiteaIssue(ctx context.Context, issueNumber int64) (Record, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT `+recordColumns+`
+		FROM incidents
+		WHERE status = 'pending' AND gitea_issue_number = $1
+	`, issueNumber)
+	r, err := scanRecord(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return Record{}, ErrNotFound
+		}
+		return Record{}, fmt.Errorf("rag get pending by gitea issue: %w", err)
 	}
 	return r, nil
 }
