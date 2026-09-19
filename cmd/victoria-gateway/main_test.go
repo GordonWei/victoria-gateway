@@ -345,6 +345,18 @@ type fakeRAGStore struct {
 	// distinctModels is what DistinctEmbeddingModels returns — tests that
 	// don't care about drift checking leave this nil (no rows yet).
 	distinctModels []string
+	// pending backs GetPending/ListPending/ConfirmPending, kept separate
+	// from records (which this fake treats as the Confirmed set) so a
+	// test can exercise pending-list and confirm-form behavior without
+	// those rows leaking into ListConfirmed/GetConfirmed.
+	pending []rag.Record
+	// confirmPendingCalls records every (id, resolution) passed to
+	// ConfirmPending, so a test can assert the handler called it with the
+	// expected arguments instead of just trusting the response body.
+	confirmPendingCalls []struct {
+		ID         int64
+		Resolution string
+	}
 }
 
 func (f *fakeRAGStore) Search(ctx context.Context, embedding []float32, topK int) ([]rag.Record, error) {
@@ -398,8 +410,62 @@ func (f *fakeRAGStore) ListConfirmed(ctx context.Context, filter rag.ListFilter,
 	}
 	return matched, nil
 }
+func (f *fakeRAGStore) AllConfirmed(ctx context.Context) ([]rag.Record, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.records, nil
+}
 func (f *fakeRAGStore) DistinctEmbeddingModels(ctx context.Context) ([]string, error) {
 	return f.distinctModels, nil
+}
+func (f *fakeRAGStore) GetPending(ctx context.Context, id int64) (rag.Record, error) {
+	for _, r := range f.pending {
+		if r.ID == id {
+			return r, nil
+		}
+	}
+	return rag.Record{}, rag.ErrNotFound
+}
+func (f *fakeRAGStore) ListPending(ctx context.Context, filter rag.ListFilter, limit int) ([]rag.Record, error) {
+	matched := f.pending
+	if filter.AlertName != "" || filter.Host != "" {
+		matched = nil
+		for _, r := range f.pending {
+			if filter.AlertName != "" && !strings.Contains(strings.ToLower(r.AlertName), strings.ToLower(filter.AlertName)) {
+				continue
+			}
+			if filter.Host != "" && !strings.Contains(strings.ToLower(r.Host), strings.ToLower(filter.Host)) {
+				continue
+			}
+			matched = append(matched, r)
+		}
+	}
+	if limit > 0 && len(matched) > limit {
+		return matched[:limit], nil
+	}
+	return matched, nil
+}
+func (f *fakeRAGStore) ConfirmPending(ctx context.Context, id int64, resolution string) error {
+	for i, r := range f.pending {
+		if r.ID == id {
+			f.confirmPendingCalls = append(f.confirmPendingCalls, struct {
+				ID         int64
+				Resolution string
+			}{id, resolution})
+			// Mirror the real store's UPDATE: the row moves from pending
+			// to confirmed with the given resolution, so a subsequent
+			// GetConfirmed/ListConfirmed (or a second confirm attempt on
+			// the same id) sees exactly what production Postgres would.
+			r.Resolution = resolution
+			r.Status = rag.StatusConfirmed
+			r.ConfirmedAt = time.Now()
+			f.records = append(f.records, r)
+			f.pending = append(f.pending[:i], f.pending[i+1:]...)
+			return nil
+		}
+	}
+	return rag.ErrAlreadyConfirmed
 }
 func (f *fakeRAGStore) Close() error { return nil }
 

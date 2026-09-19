@@ -62,6 +62,15 @@ type Record struct {
 // handler can answer 404 instead of 500.
 var ErrNotFound = fmt.Errorf("rag: record not found")
 
+// ErrAlreadyConfirmed is returned by ConfirmPending when the record isn't
+// Pending anymore — either it was already confirmed, or the id doesn't
+// exist. Distinct from a transport error so a caller (specifically the
+// web confirm form, which can be submitted twice — a double click, or a
+// mail/IM client's link-prefetching security scanner opening it before a
+// human does) can show "already confirmed" instead of silently
+// overwriting whatever resolution got there first.
+var ErrAlreadyConfirmed = fmt.Errorf("rag: record is not pending (already confirmed, or does not exist)")
+
 // Store is the persistence boundary rag talks to. It's an interface so
 // the retrieval/formatting logic in this package (and the handler wiring
 // in cmd/victoria-gateway) can be unit tested against a fake without a real
@@ -94,6 +103,32 @@ type Store interface {
 	// ListConfirmed returns up to limit Confirmed records matching
 	// filter, newest confirmation first.
 	ListConfirmed(ctx context.Context, filter ListFilter, limit int) ([]Record, error)
+	// AllConfirmed returns every Confirmed record, unpaginated. Used by
+	// pkg/suppress to group the full confirmed history by (alertname,
+	// host) when looking for suppression-rule candidates — a partial view
+	// (like ListConfirmed's default limit) would undercount how often a
+	// given alert has actually been confirmed as known-noise.
+	AllConfirmed(ctx context.Context) ([]Record, error)
+	// GetPending returns the Pending record with the given id, or
+	// ErrNotFound (including when the id exists but is already Confirmed
+	// — to the /pending page that's "nothing left to confirm here").
+	GetPending(ctx context.Context, id int64) (Record, error)
+	// ListPending returns up to limit Pending records matching filter,
+	// newest first. These are unverified LLM summaries, not confirmed
+	// resolutions — callers must not present them next to ListConfirmed
+	// output without clearly labeling the difference.
+	ListPending(ctx context.Context, filter ListFilter, limit int) ([]Record, error)
+	// ConfirmPending attaches resolution to record id and marks it
+	// Confirmed, but only if it's currently Pending — the same operation
+	// as Confirm, except the WHERE clause's extra status check makes a
+	// second confirm attempt on the same id fail with ErrAlreadyConfirmed
+	// instead of silently overwriting the first resolution. Used by the
+	// web confirm form (cmd/victoria-gateway's POST /pending/{id}), where
+	// a link can realistically be opened/submitted more than once; the
+	// `note` CLI keeps using Confirm, whose looser behavior (allowing a
+	// human to correct an existing resolution from the command line) is
+	// intentional there.
+	ConfirmPending(ctx context.Context, id int64, resolution string) error
 	// DistinctEmbeddingModels returns every distinct embedding_model value
 	// recorded across all rows (pending and confirmed — a drift check
 	// cares about every vector that could ever be compared, not just
@@ -278,6 +313,118 @@ func (s *PGStore) ListConfirmed(ctx context.Context, filter ListFilter, limit in
 		records = append(records, r)
 	}
 	return records, rows.Err()
+}
+
+// AllConfirmed returns every Confirmed record, oldest first (so a caller
+// grouping by alertname/host naturally sees FirstSeen before LastSeen
+// without a separate sort).
+func (s *PGStore) AllConfirmed(ctx context.Context) ([]Record, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+recordColumns+`
+		FROM incidents
+		WHERE status = 'confirmed'
+		ORDER BY confirmed_at ASC NULLS LAST, id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("rag all confirmed: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var records []Record
+	for rows.Next() {
+		r, err := scanRecord(rows)
+		if err != nil {
+			return nil, fmt.Errorf("rag all confirmed scan row: %w", err)
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
+// GetPending returns the Pending record with the given id, or
+// ErrNotFound if it doesn't exist or is already Confirmed.
+func (s *PGStore) GetPending(ctx context.Context, id int64) (Record, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT `+recordColumns+`
+		FROM incidents
+		WHERE status = 'pending' AND id = $1
+	`, id)
+	r, err := scanRecord(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return Record{}, ErrNotFound
+		}
+		return Record{}, fmt.Errorf("rag get pending: %w", err)
+	}
+	return r, nil
+}
+
+// ListPending returns up to limit Pending records matching filter, newest
+// captured first (there's no confirmed_at to sort by yet).
+func (s *PGStore) ListPending(ctx context.Context, filter ListFilter, limit int) ([]Record, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	where := "status = 'pending'"
+	args := make([]any, 0, 3)
+	argN := 1
+	if filter.AlertName != "" {
+		argN++
+		where += fmt.Sprintf(" AND alert_name ILIKE $%d", argN)
+		args = append(args, "%"+filter.AlertName+"%")
+	}
+	if filter.Host != "" {
+		argN++
+		where += fmt.Sprintf(" AND host ILIKE $%d", argN)
+		args = append(args, "%"+filter.Host+"%")
+	}
+	args = append([]any{limit}, args...) // $1 is always the limit; filter args follow in the order added above
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+recordColumns+`
+		FROM incidents
+		WHERE `+where+`
+		ORDER BY created_at DESC, id DESC
+		LIMIT $1
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("rag list pending: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var records []Record
+	for rows.Next() {
+		r, err := scanRecord(rows)
+		if err != nil {
+			return nil, fmt.Errorf("rag list pending scan row: %w", err)
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
+// ConfirmPending is Confirm, except the UPDATE only takes effect while
+// status is still 'pending' — see the Store interface doc comment for why.
+func (s *PGStore) ConfirmPending(ctx context.Context, id int64, resolution string) error {
+	if strings.TrimSpace(resolution) == "" {
+		return fmt.Errorf("rag confirm pending: resolution is required")
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE incidents SET resolution = $2, status = 'confirmed', confirmed_at = now()
+		WHERE id = $1 AND status = 'pending'
+	`, id, resolution)
+	if err != nil {
+		return fmt.Errorf("rag confirm pending: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rag confirm pending: %w", err)
+	}
+	if n == 0 {
+		return ErrAlreadyConfirmed
+	}
+	return nil
 }
 
 // DistinctEmbeddingModels returns every distinct embedding_model value
