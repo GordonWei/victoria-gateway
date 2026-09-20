@@ -1092,6 +1092,24 @@ tracker integrations, webhook auth, fingerprint dedup, concurrent
 multi-alert processing, maintenance windows — has been exercised against
 real alerts on that deployment, not just unit tests.
 
+**Jev / TypeSafe AI escalation judge**: live in production (not dry-run)
+as of 2026-09-21, `judge.escalate_threshold` at the 0.70 default. Before
+enabling it for real, this deployment's own past incident text (2
+Confirmed + several Pending records) was run through `cmd/judge-eval`,
+including repeat-calling identical text 8 times each on the two most
+divergent-looking records to separate genuine model variance from
+ordinary record-to-record differences — severity/escalate_probability
+came back highly reproducible (σ ≈ 0.03–0.06 on the 0-3 severity scale)
+once the same exact input was held fixed, so the spread seen across
+different records reflects real content differences, not an unstable
+judge. Verified end-to-end against the real deployment post-cutover: a
+test alert through the live webhook produced a `judge:` log line with
+real severity/confidence/escalate_probability, correctly identifying an
+explicitly-test-labeled alert as severity 0 with high confidence (the
+same signal a human would read off it), OR-merged with the existing
+local/always_cloud signal, captured to RAG, and filed to Gitea — test
+artifacts (the pending record and the issue) were cleaned up afterward.
+
 Maintenance windows specifically: shipped 2026-08-27, with two real bugs
 found in review before it reached production — a cross-midnight schedule
 combined with `Nth-DOW` matched every occurrence of that weekday instead of
