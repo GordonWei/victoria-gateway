@@ -333,6 +333,49 @@ func TestValidate_SummarizerTimeout_ZeroAndPositiveOK(t *testing.T) {
 	}
 }
 
+func TestValidate_JudgeNil_NoError(t *testing.T) {
+	c := validConfig()
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil when judge is not configured", err)
+	}
+}
+
+func TestValidate_JudgeThresholdOutOfRange(t *testing.T) {
+	for _, threshold := range []float64{-0.1, 1.1} {
+		c := validConfig()
+		c.Judge = &JudgeConfig{APIKey: "k", EscalateThreshold: threshold}
+		if err := c.Validate(); err == nil {
+			t.Errorf("expected an error for judge.escalate_threshold = %v", threshold)
+		}
+	}
+}
+
+func TestValidate_JudgeThresholdInRange(t *testing.T) {
+	for _, threshold := range []float64{0, 0.5, 0.70, 1.0} {
+		c := validConfig()
+		c.Judge = &JudgeConfig{APIKey: "k", EscalateThreshold: threshold}
+		if err := c.Validate(); err != nil {
+			t.Errorf("judge.escalate_threshold = %v should be valid, got %v", threshold, err)
+		}
+	}
+}
+
+func TestLoad_ParsesJudgeConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+	yaml := "loki:\n  endpoint: \"http://loki:3100\"\nsummarizer:\n  endpoint: \"http://llm:1234\"\n  model: \"m\"\njudge:\n  api_key: \"sk-test\"\n  escalate_threshold: 0.8\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Judge == nil || cfg.Judge.APIKey != "sk-test" || cfg.Judge.EscalateThreshold != 0.8 {
+		t.Errorf("Judge = %+v, want APIKey=sk-test EscalateThreshold=0.8", cfg.Judge)
+	}
+}
+
 func TestLoad_ParsesSummarizerTimeoutSec(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/config.yaml"
