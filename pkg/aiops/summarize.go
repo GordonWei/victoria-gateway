@@ -3,7 +3,9 @@ package aiops
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/model"
 )
@@ -88,23 +90,72 @@ func SummarizeWithLLM(llm model.LLM, alert Alert, logs []LogEntry, ragContext st
 		{Role: "user", Content: prompt},
 	}
 
-	// MaxTokens raised from an initial 512: google/gemma-4-26b-a4b-qat is a
-	// reasoning model that spends tokens on hidden reasoning_content before
-	// writing visible content, and 512 was getting fully consumed by
-	// reasoning on real (longer, Chinese-language) prompts, leaving an
-	// empty visible reply. Confirmed via a real end-to-end test against the
-	// live LM Studio instance on 2026-08-22. Kept at 2048 for the cloud
-	// path too since the structured JSON reply is longer than the old
-	// plain-text one.
-	reply, err := llm.Chat(messages, &model.ChatOptions{MaxTokens: 2048, Temperature: 0.2})
+	// MaxTokens raised from an initial 512, then 2048, now 4096:
+	// google/gemma-4-26b-a4b-qat is a reasoning model whose OpenAI-
+	// compatible reply carries a separate reasoning_content field (hidden
+	// "thinking") that draws from the same MaxTokens budget as the
+	// visible content — and how much it spends on reasoning is not
+	// deterministic even at this low a temperature. Confirmed by direct
+	// reproduction on 2026-09-20: the identical prompt sent 5 times
+	// measured reasoning_tokens ranging 806–1202, a ~50% swing run to
+	// run. 512→2048 (2026-08-22) fixed the failure mode for typical
+	// prompts; a GCP Cloud Logging-sourced prompt (verbose, repetitive
+	// stack-trace-style lines) reproduced the exact same failure against
+	// 2048 in real end-to-end testing the same night — an unlucky
+	// sampling draw spent the entire budget on reasoning, leaving zero
+	// tokens for content. This isn't a GCP-specific problem: any
+	// sufficiently long/complex prompt (Loki or CloudWatch content, too)
+	// has the same failure mode available to it, just a lower chance of
+	// hitting it. Raising the ceiling again lowers that chance further
+	// without changing the underlying non-determinism — see
+	// chatWithEmptyReplyRetry below for the other half of the mitigation.
+	reply, err := chatWithEmptyReplyRetry(llm, messages)
 	if err != nil {
-		return SummarizeResult{}, fmt.Errorf("summarize: %s chat failed: %w", llm.Backend(), err)
-	}
-	if strings.TrimSpace(reply) == "" {
-		return SummarizeResult{}, fmt.Errorf("summarize: %s returned an empty reply", llm.Backend())
+		return SummarizeResult{}, err
 	}
 
 	return parseSummarizeReply(reply), nil
+}
+
+// summarizeMaxTokens bounds one Chat call's reply, shared by both the
+// initial attempt and the empty-reply retry — see SummarizeWithLLM's doc
+// comment on the reasoning-model token budget this exists to give enough
+// headroom against.
+const summarizeMaxTokens = 4096
+
+// emptyReplyRetrySleep is swapped out by tests so the retry path doesn't
+// wait a real delay — same pattern as loki.go's retrySleep.
+var emptyReplyRetrySleep = time.Sleep
+
+// chatWithEmptyReplyRetry calls llm.Chat and retries once, after a short
+// pause, if the reply comes back empty. An empty reply isn't a network or
+// server error (Chat returned err == nil) — see SummarizeWithLLM's doc
+// comment — so retrying is a bet on a better sampling draw next time, the
+// same "one retry, cheap enough" tradeoff loki.go's getWithOneRetry makes
+// for actual transient failures. A second empty reply in a row is treated
+// as this alert's analysis failing, not retried further: unlike a Loki
+// blip, nothing suggests a third attempt is more likely to land than the
+// second.
+func chatWithEmptyReplyRetry(llm model.LLM, messages []model.Message) (string, error) {
+	reply, err := llm.Chat(messages, &model.ChatOptions{MaxTokens: summarizeMaxTokens, Temperature: 0.2})
+	if err != nil {
+		return "", fmt.Errorf("summarize: %s chat failed: %w", llm.Backend(), err)
+	}
+	if strings.TrimSpace(reply) != "" {
+		return reply, nil
+	}
+
+	log.Printf("aiops: %s returned an empty reply (likely hidden reasoning content exhausted the token budget), retrying once", llm.Backend())
+	emptyReplyRetrySleep(500 * time.Millisecond)
+
+	reply, err = llm.Chat(messages, &model.ChatOptions{MaxTokens: summarizeMaxTokens, Temperature: 0.2})
+	if err != nil {
+		return "", fmt.Errorf("summarize: %s chat failed on retry: %w", llm.Backend(), err)
+	}
+	if strings.TrimSpace(reply) == "" {
+		return "", fmt.Errorf("summarize: %s returned an empty reply twice in a row", llm.Backend())
+	}
+	return reply, nil
 }
 
 // parseSummarizeReply decodes the model's JSON reply into a
