@@ -31,6 +31,7 @@ import (
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
 	"github.com/gordonwei/victoria-gateway/pkg/config"
+	"github.com/gordonwei/victoria-gateway/pkg/judge"
 	"github.com/gordonwei/victoria-gateway/pkg/maintenance"
 	"github.com/gordonwei/victoria-gateway/pkg/mask"
 	"github.com/gordonwei/victoria-gateway/pkg/metrics"
@@ -185,6 +186,15 @@ func runServe(args []string) {
 		webhookAuth: cfg.WebhookAuth,
 		metrics:     &metrics.Counters{},
 		async:       cfg.WebhookAsync,
+	}
+
+	if cfg.Judge != nil && cfg.Judge.APIKey != "" {
+		h.judgeClient = judge.NewClient(cfg.Judge.APIKey)
+		h.judgeEscalateThreshold = cfg.Judge.EscalateThreshold
+		if h.judgeEscalateThreshold == 0 {
+			h.judgeEscalateThreshold = 0.70
+		}
+		log.Printf("judge: enabled, escalate_threshold=%.2f (additive only — see pkg/judge's package doc)", h.judgeEscalateThreshold)
 	}
 
 	notifier, err := buildNotifier(cfg, h.metrics)
@@ -453,6 +463,15 @@ type handler struct {
 	githubWebhookSecret    string // "" disables POST /webhook/github-issues entirely
 
 	metrics *metrics.Counters // nil-safe; see pkg/metrics
+
+	// judgeClient is nil unless config.yaml's judge.api_key is set. When
+	// set, every alert that the existing self-report/always_cloud signal
+	// (aiops.ShouldEscalate) did NOT already decide to escalate also gets
+	// an independent Jev (TypeSafe AI) read — see applyJudge and
+	// pkg/judge's package doc. Jev is additive only: it can turn a
+	// non-escalating alert into an escalating one, never the reverse.
+	judgeClient            *judge.Client
+	judgeEscalateThreshold float64 // config.JudgeConfig.EscalateThreshold, defaulted to 0.70 if unset
 
 	// maintenanceMu guards maintenanceWindows and maintenanceWindowDefs.
 	// Both were write-once-at-startup, read-only-after fields until PUT
@@ -801,6 +820,8 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	res.AnalyzedBy = "local"
 
 	escalate, reason := aiops.ShouldEscalate(res.AlertName, local, h.escalation.AlwaysCloud)
+	escalate, reason = h.applyJudge(res.AlertName, local, escalate, reason)
+
 	if escalate && h.cloud != nil && !h.allowEscalation() {
 		log.Printf("aiops: alert %q would escalate (%s) but escalation.max_per_hour is already reached this hour; staying on the local result", res.AlertName, reason)
 		h.metrics.IncEscalationRateLimitedTotal()
@@ -828,6 +849,57 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	res.Summary = result.Summary
 	res.pendingID = h.captureIncident(alert, logs, result, res.AnalyzedBy)
 	return
+}
+
+// applyJudge asks Jev (pkg/judge) for an independent escalation read and
+// OR-merges it with the existing signal (existing/existingReason, from
+// aiops.ShouldEscalate): existing already true always wins unchanged —
+// Jev only ever has the power to turn a non-escalating alert into an
+// escalating one, never the reverse, so this call can only widen
+// escalation coverage, not narrow it. No-op (returns existing/
+// existingReason unchanged) if judgeClient is nil (config.yaml's
+// judge.api_key unset — the default). Runs synchronously with its own
+// short timeout so a slow/unreachable Jev API can't materially delay
+// alert processing; a failed call is logged and treated as "no
+// additional signal," identical to Jev being disabled — it can never
+// itself cause an alert that should escalate to get stuck on local.
+func (h *handler) applyJudge(alertName string, local aiops.SummarizeResult, existing bool, existingReason string) (bool, string) {
+	if h.judgeClient == nil {
+		return existing, existingReason
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	judgment, err := h.judgeClient.JudgeEscalation(ctx, alertName, local.Summary)
+	if err != nil {
+		log.Printf("judge: evaluation failed for alert %q, falling back to the existing escalation signal: %v", alertName, err)
+	} else {
+		log.Printf("judge: alert=%q severity=%.2f/3(conf=%.2f) escalate_probability=%.2f threshold=%.2f local_model_escalate=%v",
+			alertName, judgment.Severity, judgment.SeverityConfidence, judgment.EscalateProbability, h.judgeEscalateThreshold, local.Escalate)
+	}
+	return combineEscalation(existing, existingReason, judgment, err, h.judgeEscalateThreshold)
+}
+
+// combineEscalation is applyJudge's pure decision logic, split out so the
+// three required scenarios (Jev says escalate but existing doesn't; Jev
+// says no but existing does; Jev call fails outright) are unit-testable
+// without an HTTP mock. existing/existingReason always wins when true —
+// Jev is additive, never able to downgrade an escalation the existing
+// self-report/always_cloud logic already decided on. judgeErr non-nil
+// (any failure: timeout, non-2xx, malformed response) is treated
+// identically to Jev being disabled — falls back to existing unchanged,
+// never blocks it.
+func combineEscalation(existing bool, existingReason string, judgment judge.EscalationJudgment, judgeErr error, threshold float64) (bool, string) {
+	if existing {
+		return existing, existingReason
+	}
+	if judgeErr != nil {
+		return false, ""
+	}
+	if judgment.EscalateProbability >= threshold {
+		return true, fmt.Sprintf("Jev escalate_probability %.2f >= threshold %.2f", judgment.EscalateProbability, threshold)
+	}
+	return false, ""
 }
 
 // captureIncident records what was just analyzed as a Pending RAG record

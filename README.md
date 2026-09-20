@@ -716,6 +716,41 @@ misfires broadly or `always_cloud` matches more alerts than intended — an
 alert that hits the cap stays on the local result (logged, not failed)
 instead of also calling `cloud`.
 
+### Jev / TypeSafe AI escalation judge (optional)
+
+**With no `judge.api_key` set, this feature is entirely disabled and
+everything above behaves exactly as if it didn't exist** — this is an
+opt-in extra, not a dependency. It calls out to
+[TypeSafe AI](https://typesafe.ai)'s Jev model, a separate paid service
+you'd need your own account for; nothing here bundles or requires it.
+
+When enabled, every alert the escalation rules above did *not* already
+decide to send to `cloud` gets one more, independent read: Jev is asked a
+structured severity/escalation question about the local model's own
+summary (see `pkg/judge`), and if its answer crosses a threshold, the
+alert escalates too. This is additive only — it can turn a
+non-escalating alert into an escalating one, but it can never suppress an
+escalation the existing rules already decided on, and a failed or
+unreachable Jev call (timeout, bad key, rate limit, ...) is logged and
+falls back to whatever the existing rules already decided, never blocking
+or delaying an alert that should escalate.
+
+```yaml
+judge:
+  api_key: "..."               # TypeSafe AI System One API key; unset disables this entirely
+  escalate_threshold: 0.70     # optional, defaults to 0.70 if unset — the order of magnitude
+                                # TypeSafe's own llm_guardrails cookbook uses for an "action" threshold
+```
+
+`cmd/judge-eval` is a separate, standalone tool (not part of the running
+service) for checking Jev's calibration against this deployment's own
+past incident text before relying on it — see its `-h` output. Chinese-
+language calibration isn't documented by TypeSafe; this repo's own
+before-cutover check (repeat-calling the same input several times to
+separate genuine model variance from ordinary record-to-record text
+differences) is the standard this threshold should be re-checked against
+if you significantly change your alert mix or summarizer prompt.
+
 ## RAG: grounding the summary in past incidents
 
 Optional, and off by default. When enabled, victoria-gateway embeds each new

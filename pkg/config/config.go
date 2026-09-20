@@ -27,6 +27,7 @@ type Config struct {
 	Summarizer    LLMConfig            `yaml:"summarizer"`
 	Cloud         *CloudConfig         `yaml:"cloud"`      // optional: cloud model for escalated alerts
 	Escalation    EscalationConfig     `yaml:"escalation"` // rules for when to escalate to Cloud
+	Judge         *JudgeConfig         `yaml:"judge"`      // optional: additional escalation signal from TypeSafe AI's Jev, see JudgeConfig
 	RAG           *RAGConfig           `yaml:"rag"`        // optional: past-incident retrieval
 	Telegram      TelegramConfig       `yaml:"telegram"`
 	Notifications *NotificationsConfig `yaml:"notifications"` // optional: multi-channel routing; nil keeps the single-Telegram behavior
@@ -291,6 +292,28 @@ type EscalationConfig struct {
 	MaxPerHour int `yaml:"max_per_hour"`
 }
 
+// JudgeConfig enables an independent second opinion from TypeSafe AI's
+// Jev model (see pkg/judge) on top of the local summarizer's own
+// self-reported escalate signal. Nil (or APIKey unset) disables this
+// entirely — the existing aiops.ShouldEscalate logic (self-report OR
+// escalation.always_cloud) is unaffected either way. When enabled, Jev is
+// purely additive: it can only turn a non-escalating alert into an
+// escalating one (EscalateProbability crossing EscalateThreshold), never
+// suppress an escalation the existing logic already decided on, and a
+// failed/unreachable Jev call falls back to the existing result rather
+// than blocking anything — see cmd/victoria-gateway's combineEscalation.
+type JudgeConfig struct {
+	APIKey string `yaml:"api_key"` // TypeSafe AI System One API key; unset disables Jev entirely
+	// EscalateThreshold is the minimum Noul probability (0..1) from
+	// JudgeEscalation that triggers escalation on its own. 0 (the
+	// default sentinel) means "use 0.70" — the action-threshold order of
+	// magnitude TypeSafe's own llm_guardrails cookbook recommends;
+	// nothing about that number is specific to this deployment's alert
+	// mix, so revisit it once enough real Confirmed incidents exist to
+	// check Jev's calibration against actual outcomes.
+	EscalateThreshold float64 `yaml:"escalate_threshold"`
+}
+
 // RAGConfig controls optional retrieval of past incidents to ground the
 // summarizer prompt. Nil (or Enabled: false) means victoria-gateway behaves
 // exactly as it did before this existed — RAG is opt-in, not a
@@ -448,6 +471,9 @@ func (c *Config) Validate() error {
 	}
 	if c.ShutdownGraceSec < 0 {
 		return fmt.Errorf("shutdown_grace_sec must be >= 0 (0 means the 300s default)")
+	}
+	if c.Judge != nil && (c.Judge.EscalateThreshold < 0 || c.Judge.EscalateThreshold > 1) {
+		return fmt.Errorf("judge.escalate_threshold must be between 0 and 1 (0 means the 0.70 default)")
 	}
 	if err := c.validateNotifications(); err != nil {
 		return err
