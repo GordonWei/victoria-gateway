@@ -1,8 +1,10 @@
 package aiops
 
 import (
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/model"
 )
@@ -147,3 +149,85 @@ func (f *fakeLLM) Chat(messages []model.Message, opts *model.ChatOptions) (strin
 func (f *fakeLLM) Available() bool   { return true }
 func (f *fakeLLM) ModelName() string { return "fake" }
 func (f *fakeLLM) Backend() string   { return "fake" }
+
+// sequencedLLM returns a different reply on each successive Chat call,
+// for testing chatWithEmptyReplyRetry's retry-once behavior — fakeLLM
+// above always returns the same reply, which can't exercise "empty then
+// non-empty" or "empty twice."
+type sequencedLLM struct {
+	replies []string // consumed in order; Chat panics if called more times than len(replies)
+	calls   int
+}
+
+func (f *sequencedLLM) Chat(messages []model.Message, opts *model.ChatOptions) (string, error) {
+	reply := f.replies[f.calls]
+	f.calls++
+	return reply, nil
+}
+func (f *sequencedLLM) Available() bool   { return true }
+func (f *sequencedLLM) ModelName() string { return "fake" }
+func (f *sequencedLLM) Backend() string   { return "fake" }
+
+func TestSummarizeWithLLM_EmptyReplyThenSuccess_Retries(t *testing.T) {
+	orig := emptyReplyRetrySleep
+	emptyReplyRetrySleep = func(time.Duration) {} // no real wait in tests
+	defer func() { emptyReplyRetrySleep = orig }()
+
+	fake := &sequencedLLM{replies: []string{"", `{"summary": "CPU 過載", "confidence": "high", "escalate": false, "reason": "x"}`}}
+	alert := Alert{Labels: map[string]string{"alertname": "cpu_high", "host": "h"}, Status: "firing"}
+
+	result, err := SummarizeWithLLM(fake, alert, nil, "")
+	if err != nil {
+		t.Fatalf("SummarizeWithLLM: %v", err)
+	}
+	if fake.calls != 2 {
+		t.Errorf("Chat called %d times, want exactly 2 (one empty, one retry)", fake.calls)
+	}
+	if result.Summary != "CPU 過載" {
+		t.Errorf("unexpected result: %+v", result)
+	}
+}
+
+func TestSummarizeWithLLM_EmptyReplyTwice_Fails(t *testing.T) {
+	orig := emptyReplyRetrySleep
+	emptyReplyRetrySleep = func(time.Duration) {}
+	defer func() { emptyReplyRetrySleep = orig }()
+
+	fake := &sequencedLLM{replies: []string{"", ""}}
+	alert := Alert{Labels: map[string]string{"alertname": "cpu_high", "host": "h"}, Status: "firing"}
+
+	_, err := SummarizeWithLLM(fake, alert, nil, "")
+	if err == nil {
+		t.Fatal("expected an error when the LLM returns an empty reply twice in a row")
+	}
+	if fake.calls != 2 {
+		t.Errorf("Chat called %d times, want exactly 2 (no third attempt)", fake.calls)
+	}
+}
+
+func TestSummarizeWithLLM_ChatError_NoRetry(t *testing.T) {
+	// A real transport/API error is a different failure mode from an
+	// empty reply (Chat itself failed, vs. Chat succeeded with nothing to
+	// show) — chatWithEmptyReplyRetry's retry is specifically for the
+	// latter and must not also retry a hard error.
+	fake := &fakeLLM{err: errors.New("connection refused")}
+	alert := Alert{Labels: map[string]string{"alertname": "cpu_high", "host": "h"}, Status: "firing"}
+
+	_, err := SummarizeWithLLM(fake, alert, nil, "")
+	if err == nil {
+		t.Fatal("expected an error when Chat itself fails")
+	}
+}
+
+func TestSummarizeWithLLM_NonEmptyFirstTry_NoRetry(t *testing.T) {
+	fake := &sequencedLLM{replies: []string{`{"summary": "ok", "confidence": "high", "escalate": false, "reason": "x"}`}}
+	alert := Alert{Labels: map[string]string{"alertname": "cpu_high", "host": "h"}, Status: "firing"}
+
+	_, err := SummarizeWithLLM(fake, alert, nil, "")
+	if err != nil {
+		t.Fatalf("SummarizeWithLLM: %v", err)
+	}
+	if fake.calls != 1 {
+		t.Errorf("Chat called %d times, want exactly 1 (no retry needed)", fake.calls)
+	}
+}
