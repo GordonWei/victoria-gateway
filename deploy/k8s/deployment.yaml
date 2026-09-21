@@ -1,0 +1,94 @@
+# victoria-gateway Deployment — see this directory's README.md for the
+# full install sequence (build/push the image, create the config Secret,
+# apply this).
+#
+# replicas is fixed at 1 and MUST stay 1: dedup fingerprint tracking and
+# the in-memory maintenance-window state (see cmd/victoria-gateway's
+# handler struct — recentFP, maintenanceWindows) live in process memory,
+# not a shared store. A second replica wouldn't share either — the same
+# alert could be double-processed (double LLM call, double notification,
+# double filed issue) by two replicas that each think they're the first
+# to see it, and a PUT /maintenance-windows call would only update
+# whichever replica's Service routing happened to hit. See the
+# enterprise-features draft's "disaster recovery" section for what
+# multi-replica HA would actually require (both of those moved into
+# Postgres) — not done, not attempted here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victoria-gateway
+  namespace: victoria-gateway
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # never run two pods of this at once, even mid-rollout — see the replicas note above
+  selector:
+    matchLabels:
+      app: victoria-gateway
+  template:
+    metadata:
+      labels:
+        app: victoria-gateway
+    spec:
+      # Mirrors docker-compose's stop_grace_period: 5m30s — give a
+      # SIGTERM'd process room to drain in-flight analyses
+      # (config.yaml's shutdown_grace_sec, default 300s) before the
+      # kubelet SIGKILLs it. Keep this a bit above shutdown_grace_sec,
+      # same relationship the compose path documents.
+      terminationGracePeriodSeconds: 330
+      containers:
+        - name: victoria-gateway
+          # REPLACE: an image your cluster can actually pull — build with
+          # `docker build -t <your-registry>/victoria-gateway:<tag> .`
+          # from the repo root, push it, and put that reference here. See
+          # this directory's README.md, "Build and push the image."
+          image: REPLACE-your-registry/victoria-gateway:latest
+          ports:
+            - containerPort: 8090
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/victoria-gateway
+              readOnly: true
+          # /healthz answers 200 as soon as the process is up — see
+          # README's "Running" section. No startupProbe: this process has
+          # no slow initialization (no model to load, no cache to warm),
+          # so readiness/liveness alone are enough.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          # Starting point, not a measured ceiling — this process is
+          # mostly waiting on Loki/LLM/cloud HTTP calls, not CPU-bound,
+          # and holds nothing memory-heavy of its own (no model weights,
+          # no large in-memory cache beyond the dedup fingerprint map).
+          # Raise these if you see throttling/OOMKills under your actual
+          # alert volume.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: config
+          secret:
+            # A Secret, not a ConfigMap: config.yaml routinely holds
+            # several credentials inline (summarizer/cloud/judge api_key,
+            # telegram.bot_token, rag.postgres_dsn, tracker tokens,
+            # webhook_auth/webui_auth passwords — see README's Config
+            # section) the same way the docker-compose deployment's
+            # bind-mounted config.yaml does. This is the direct K8s
+            # translation of that, not a redesign — see this directory's
+            # README.md for why it isn't split into a ConfigMap +
+            # per-field Secret instead.
+            secretName: victoria-gateway-config

@@ -1,0 +1,7 @@
+# Own namespace, same reasoning as deploy/external-healthcheck/namespace.yaml:
+# self-contained, doesn't assume anything about what else is already
+# running in the cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: victoria-gateway

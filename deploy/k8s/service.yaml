@@ -1,0 +1,21 @@
+# ClusterIP: reachable in-cluster at
+# victoria-gateway.victoria-gateway.svc.cluster.local:8090 — enough for
+# an in-cluster Alertmanager to POST its webhook here, and for
+# port-forwarding during setup/verification. If Alertmanager runs
+# outside this cluster, you need your own way in (Ingress, a
+# LoadBalancer Service, a NodePort) — that's environment-specific and
+# deliberately not picked for you here, same as the docker-compose path
+# only publishes the port for local curl testing and leaves real
+# exposure to you.
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoria-gateway
+  namespace: victoria-gateway
+spec:
+  selector:
+    app: victoria-gateway
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http
