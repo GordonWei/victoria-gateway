@@ -66,16 +66,23 @@ func webUIAuthMiddleware(cfg *config.WebhookAuthConfig) AuthMiddleware {
 }
 
 // actorFromRequest identifies who's making a web-UI request, for
-// pkg/audit's Entry.Actor. When webui_auth is configured, that's simply
-// the Basic Auth username the middleware already verified — the request
-// wouldn't have reached the handler otherwise. Without webui_auth (the
-// default) there's no identity to name, so this falls back to the
-// caller's remote IP — not a real identity, but better than an empty
-// field, and consistent with the enterprise-features draft's fallback of
-// "at least record the source IP" when no identity system exists.
-func actorFromRequest(r *http.Request) string {
-	if user, _, ok := r.BasicAuth(); ok && user != "" {
-		return user
+// pkg/audit's Entry.Actor. authenticated must be true only when
+// webUIAuthMiddleware actually verified this request's Basic Auth
+// credentials before it reached the handler — only then is the header's
+// username trustworthy enough to record. When webui_auth isn't
+// configured, nothing has checked that header at all: a caller can set
+// any `Authorization: Basic ...` value they like, so trusting it here
+// (an earlier version of this function did, unconditionally) would let
+// anyone forge the audit trail's actor field. In that case this falls
+// back to the caller's remote IP instead — not a real identity, but not
+// forgeable by the request itself either, and consistent with the
+// enterprise-features draft's fallback of "at least record the source
+// IP" when no identity system exists.
+func actorFromRequest(r *http.Request, authenticated bool) string {
+	if authenticated {
+		if user, _, ok := r.BasicAuth(); ok && user != "" {
+			return user
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

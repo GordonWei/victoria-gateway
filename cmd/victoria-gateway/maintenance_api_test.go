@@ -115,6 +115,60 @@ func TestHandleMaintenanceWindows_Put_RecordsAudit(t *testing.T) {
 	}
 }
 
+// TestHandleMaintenanceWindows_Put_ForgedAuthHeaderNotTrustedAsActor is
+// the regression test for the actor-spoofing bug on this route: with
+// neither webui_auth nor webhook_auth configured, nothing verifies a
+// Basic Auth header here, so it must not be trusted as the audit actor.
+func TestHandleMaintenanceWindows_Put_ForgedAuthHeaderNotTrustedAsActor(t *testing.T) {
+	h := newTestHandlerWithWindows(nil)
+	auditLog := &fakeAuditLogger{}
+	h.audit = auditLog
+
+	body, _ := json.Marshal([]config.MaintenanceWindow{})
+	req := httptest.NewRequest(http.MethodPut, "/maintenance-windows", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.8:1111"
+	req.SetBasicAuth("admin", "irrelevant-nothing-checks-this")
+	rec := httptest.NewRecorder()
+	h.handleMaintenanceWindows(rec, req)
+
+	if len(auditLog.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(auditLog.entries))
+	}
+	if actor := auditLog.entries[0].Actor; actor == "admin" {
+		t.Fatalf("Actor = %q — a forged Authorization header must not be trusted when neither auth is configured", actor)
+	} else if actor != "ip:198.51.100.8" {
+		t.Errorf("Actor = %q, want ip:198.51.100.8", actor)
+	}
+}
+
+// TestHandleMaintenanceWindows_Put_WebhookAuthAlone_TrustsVerifiedUsername
+// covers the asymmetry documented at the call site: this route can be
+// authenticated via webhook_auth alone (checkWebhookAuth inside the
+// handler), with no webui_auth configured at all — that still counts as
+// verified, so the username should be recorded, not the remote IP.
+func TestHandleMaintenanceWindows_Put_WebhookAuthAlone_TrustsVerifiedUsername(t *testing.T) {
+	h := newTestHandlerWithWindows(nil)
+	h.webhookAuth = &config.WebhookAuthConfig{Username: "ops", Password: "secret"}
+	auditLog := &fakeAuditLogger{}
+	h.audit = auditLog
+
+	body, _ := json.Marshal([]config.MaintenanceWindow{})
+	req := httptest.NewRequest(http.MethodPut, "/maintenance-windows", bytes.NewReader(body))
+	req.SetBasicAuth("ops", "secret")
+	rec := httptest.NewRecorder()
+	h.handleMaintenanceWindows(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auditLog.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(auditLog.entries))
+	}
+	if actor := auditLog.entries[0].Actor; actor != "ops" {
+		t.Errorf("Actor = %q, want ops (webhook_auth alone verified this header)", actor)
+	}
+}
+
 func TestHandleMaintenanceWindows_Put_InvalidBody_DoesNotRecordAudit(t *testing.T) {
 	h := newTestHandlerWithWindows(nil)
 	auditLog := &fakeAuditLogger{}

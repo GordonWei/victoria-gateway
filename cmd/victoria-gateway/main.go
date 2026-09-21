@@ -185,6 +185,7 @@ func runServe(args []string) {
 		lookback:    lookback,
 		limit:       limit,
 		webhookAuth: cfg.WebhookAuth,
+		webUIAuth:   cfg.WebUIAuth,
 		metrics:     &metrics.Counters{},
 		async:       cfg.WebhookAsync,
 		audit:       audit.NoopLogger{}, // overridden below if rag.audit_log is set
@@ -461,7 +462,13 @@ type handler struct {
 	lookback    time.Duration
 	limit       int
 	webhookAuth *config.WebhookAuthConfig // nil if the webhook endpoint requires no auth
-	async       bool                      // respond 202 and analyze in the background (config.webhook_async)
+	// webUIAuth is non-nil exactly when webUIAuthMiddleware actually
+	// verifies Basic Auth on the web routes — see actorFromRequest's doc
+	// comment for why this has to be checked before trusting an
+	// Authorization header as an audit actor, not just whether one was
+	// sent.
+	webUIAuth *config.WebhookAuthConfig
+	async     bool // respond 202 and analyze in the background (config.webhook_async)
 
 	rag             rag.Store     // nil if RAG is disabled
 	ragEmbedder     *rag.Embedder // nil if RAG is disabled
