@@ -51,3 +51,19 @@ CREATE INDEX IF NOT EXISTS incidents_embedding_hnsw_idx
 -- a linked Gitea issue without a full table scan.
 CREATE INDEX IF NOT EXISTS incidents_pending_gitea_idx
     ON incidents (gitea_issue_number) WHERE status = 'pending' AND gitea_issue_number IS NOT NULL;
+
+-- pkg/audit's table, for rag.audit_log: true. Lives in this file (not a
+-- separate migration) because CREATE TABLE/INDEX IF NOT EXISTS makes
+-- re-running this whole file against an already-provisioned database safe
+-- — an existing deployment just gains this table the next time it runs
+-- schema.sql, same as a fresh install.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id     BIGSERIAL PRIMARY KEY,
+    at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    actor  TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS audit_log_at_idx ON audit_log (at DESC);

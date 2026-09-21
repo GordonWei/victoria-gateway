@@ -178,6 +178,39 @@ from Loki, see below). Everything else has a default or is optional. See
 `deploy/config.docker.yaml` for the same shape with container-specific
 comments (including the optional sections below).
 
+### Environment variable overrides
+
+Multiple `config.yaml` files (one per environment) already cover most of
+what "12-factor config" would otherwise be for here — this repo doesn't
+try to make every field environment-variable-driven. The one real gap
+multiple YAML files don't close is keeping credentials *out of a file*
+at all — for a `config.yaml` templated by CI, or mounted read-only from
+a ConfigMap while the secret itself comes from a container
+orchestrator's own secret store. A handful of credential fields can be
+supplied this way instead, always winning over whatever `config.yaml`
+has when set (an unset var never blanks out a value the file already
+set):
+
+| Field | Env var |
+|---|---|
+| `summarizer.api_key` | `VICTORIA_GATEWAY_SUMMARIZER_API_KEY` |
+| `cloud.api_key` | `VICTORIA_GATEWAY_CLOUD_API_KEY` |
+| `judge.api_key` | `VICTORIA_GATEWAY_JUDGE_API_KEY` |
+| `telegram.bot_token` | `VICTORIA_GATEWAY_TELEGRAM_BOT_TOKEN` |
+| `rag.postgres_dsn` | `VICTORIA_GATEWAY_RAG_POSTGRES_DSN` |
+| `rag.gitea.token` | `VICTORIA_GATEWAY_GITEA_TOKEN` |
+| `rag.github.token` | `VICTORIA_GATEWAY_GITHUB_TOKEN` |
+| `webhook_auth.password` | `VICTORIA_GATEWAY_WEBHOOK_AUTH_PASSWORD` |
+| `webui_auth.password` | `VICTORIA_GATEWAY_WEBUI_AUTH_PASSWORD` |
+| `alertmanager.password` | `VICTORIA_GATEWAY_ALERTMANAGER_PASSWORD` |
+
+Each one only overrides a field inside a block `config.yaml` already
+configures — `VICTORIA_GATEWAY_JUDGE_API_KEY` does nothing if there's no
+`judge:` block at all, on purpose: an env var meant to hold a credential
+for later use shouldn't be able to silently turn a whole feature on by
+itself. (`VICTORIA_GATEWAY_CONFIG`, which picks *which* config.yaml to
+load, is unrelated to this table and already existed.)
+
 ### Log source: Loki, CloudWatch, or GCP Cloud Logging
 
 Loki is the default and requires no extra config beyond `loki.endpoint`
@@ -498,11 +531,29 @@ the same way at least `--min-count` times (default 3) — a signal that
 alert keeps firing and getting manually waved off as known-noise. For
 each candidate it prints a permanent Alertmanager `route` you could add
 to stop being notified about it entirely, and a time-bounded `amtool
-silence` command as the more conservative alternative. It only ever
-prints — it never edits Alertmanager's config or calls its API, and
+silence` command as the more conservative alternative. By default it only
+ever prints — it never edits Alertmanager's config or calls its API, and
 applying either option is entirely up to you. See `pkg/suppress`'s
 package doc for exactly what the confirmation count does and doesn't
 tell you (it's not the same thing as how often the alert actually fires).
+
+`-apply-silences` can create the time-bounded silence option *for* you,
+via Alertmanager's v2 silence API (see `pkg/alertmanager`) — never the
+permanent route, and never a config file edit or reload. A silence is a
+safe thing to automate because it self-expires; a wrong permanent route
+doesn't, which is exactly why that option stays print-only. It's dry-run
+by default (prints what it would create); add `-yes` to actually call the
+API. It also skips any candidate that already has a matching active
+silence, so re-running it doesn't pile up duplicates:
+
+```bash
+# Requires an `alertmanager:` block in config.yaml (see deploy/config.docker.yaml)
+victoria-gateway suppression-candidates --min-count 5 -apply-silences          # dry run
+victoria-gateway suppression-candidates --min-count 5 -apply-silences -yes     # actually create them
+```
+
+If `rag.audit_log` is enabled, every silence actually created this way is
+recorded there (see "Audit log" below) — actor is `cli:$USER`.
 
 ### Securing the web UI
 
@@ -526,6 +577,34 @@ endpoint. If you need real SSO/OIDC, the auth check is a swappable
 `AuthMiddleware` (see `cmd/victoria-gateway/auth.go`); basic auth is the
 only implementation shipped today, but plugging in something else there
 doesn't require touching any handler.
+
+### Audit log
+
+The one question none of the above answers: *who* changed the
+maintenance windows, confirmed that pending incident, or applied that
+suppression candidate as a silence — and when. `rag.audit_log: true`
+(off by default; requires `rag.enabled: true`, since it reuses that same
+Postgres connection rather than adding a second storage dependency)
+records exactly those three operations to an `audit_log` table (see
+`pkg/audit` and `pkg/rag/schema.sql`), viewable at `GET /audit` —
+authenticated by `webui_auth` the same as `/incidents` and `/pending`.
+
+```yaml
+rag:
+  enabled: true
+  audit_log: true
+  # ... postgres_dsn / embedding_endpoint / embedding_model as usual
+```
+
+The actor recorded is the `webui_auth` username when that's configured,
+the caller's remote IP otherwise (`ip:1.2.3.4`) — there's no real identity
+system here, so an unauthenticated deployment gets the closest honest
+substitute rather than an empty field. CLI-triggered entries (from
+`suppression-candidates -apply-silences -yes`) record `cli:$USER`.
+Nothing about the core webhook→Loki→LLM→notify path is audited — this is
+specifically the handful of operations that change *live system behavior*
+rather than just observing it, matching what most audit-trail requests
+actually ask for ("why is this suppressed, who set that window").
 
 ## Async webhook mode and graceful shutdown
 
@@ -1067,7 +1146,13 @@ from the config file if you need to override it without editing the file.
 ```
 
 `GET /healthz` returns `200 ok` once the process is up — use it for a
-container healthcheck or a quick "is this running" check.
+container healthcheck or a quick "is this running" check. A container
+healthcheck only tells the container runtime *on the same host* though —
+if the whole host goes down, nothing local is left to notice. See
+`deploy/external-healthcheck/` for a Kubernetes CronJob that checks
+`/healthz` from a genuinely separate machine and pushes a Telegram alert
+if it can't reach it: victoria-gateway watches other services for silent
+failure, which makes it worth having something watch it back.
 
 `GET /metrics` exposes counters in Prometheus text exposition format —
 alerts processed/errored, dedup/resolved skips, webhook auth rejections,

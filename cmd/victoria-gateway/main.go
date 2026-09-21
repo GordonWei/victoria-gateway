@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
+	"github.com/gordonwei/victoria-gateway/pkg/audit"
 	"github.com/gordonwei/victoria-gateway/pkg/config"
 	"github.com/gordonwei/victoria-gateway/pkg/judge"
 	"github.com/gordonwei/victoria-gateway/pkg/maintenance"
@@ -186,6 +187,7 @@ func runServe(args []string) {
 		webhookAuth: cfg.WebhookAuth,
 		metrics:     &metrics.Counters{},
 		async:       cfg.WebhookAsync,
+		audit:       audit.NoopLogger{}, // overridden below if rag.audit_log is set
 	}
 
 	if cfg.Judge != nil && cfg.Judge.APIKey != "" {
@@ -260,6 +262,16 @@ func runServe(args []string) {
 		if cfg.RAG.GitHub != nil {
 			h.githubWebhookSecret = cfg.RAG.GitHub.WebhookSecret
 		}
+		if cfg.RAG.AuditLog {
+			auditLogger, err := audit.OpenPostgres(cfg.RAG.PostgresDSN)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "❌ audit: %v\n", err)
+				os.Exit(1)
+			}
+			defer func() { _ = auditLogger.Close() }()
+			h.audit = auditLogger
+			log.Printf("audit: enabled, recording to the RAG Postgres database (see GET /audit)")
+		}
 	}
 
 	// webUI wraps a web-page handler with cfg.WebUIAuth's check — nil
@@ -287,6 +299,9 @@ func runServe(args []string) {
 		// tracker (or neither) is actually configured.
 		mux.HandleFunc("/webhook/gitea-issues", h.handleGiteaIssueWebhook)
 		mux.HandleFunc("/webhook/github-issues", h.handleGitHubIssueWebhook)
+		if cfg.RAG.AuditLog {
+			mux.Handle("/audit", webUI(http.HandlerFunc(h.handleAuditLog)))
+		}
 	}
 	mux.Handle("/maintenance-windows", webUI(http.HandlerFunc(h.handleMaintenanceWindows)))
 
@@ -464,6 +479,10 @@ type handler struct {
 
 	metrics *metrics.Counters // nil-safe; see pkg/metrics
 
+	// audit is always non-nil (audit.NoopLogger{} when rag.audit_log isn't
+	// set) so every call site can record unconditionally — see pkg/audit.
+	audit audit.Logger
+
 	// judgeClient is nil unless config.yaml's judge.api_key is set. When
 	// set, every alert that the existing self-report/always_cloud signal
 	// (aiops.ShouldEscalate) did NOT already decide to escalate also gets
@@ -498,6 +517,22 @@ type handler struct {
 	escalationMu          sync.Mutex
 	escalationWindowStart time.Time
 	escalationCount       int
+}
+
+// recordAudit is a nil-safe wrapper around h.audit.Record — the same
+// nil-tolerant idiom pkg/metrics uses for h.metrics (see Counters' doc
+// comment), so the many test-constructed `&handler{}` literals across this
+// package that don't set audit don't all need to remember
+// audit.NoopLogger{} just to avoid a nil-interface panic. Errors are
+// logged, never returned — see pkg/audit.Logger.Record's doc comment on
+// why an audit write must never block or fail the operation it records.
+func (h *handler) recordAudit(ctx context.Context, e audit.Entry) {
+	if h.audit == nil {
+		return
+	}
+	if err := h.audit.Record(ctx, e); err != nil {
+		log.Printf("audit: record %s: %v", e.Action, err)
+	}
 }
 
 // currentMaintenanceWindows returns the currently-active maintenance

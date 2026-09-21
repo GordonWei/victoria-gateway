@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
+	"github.com/gordonwei/victoria-gateway/pkg/audit"
 	"github.com/gordonwei/victoria-gateway/pkg/config"
 	"github.com/gordonwei/victoria-gateway/pkg/gitea"
 	"github.com/gordonwei/victoria-gateway/pkg/model"
@@ -476,6 +477,23 @@ func (f *fakeRAGStore) ConfirmPending(ctx context.Context, id int64, resolution 
 	return rag.ErrAlreadyConfirmed
 }
 func (f *fakeRAGStore) Close() error { return nil }
+
+// fakeAuditLogger is an in-memory audit.Logger for tests that need to
+// confirm a handler actually recorded an audit entry — appending to
+// entries rather than replaying them back through List (nothing here
+// exercises List's own filtering/limit behavior, that's pkg/audit's own
+// test).
+type fakeAuditLogger struct {
+	entries []audit.Entry
+}
+
+func (f *fakeAuditLogger) Record(ctx context.Context, e audit.Entry) error {
+	f.entries = append(f.entries, e)
+	return nil
+}
+func (f *fakeAuditLogger) List(ctx context.Context, limit int) ([]audit.Entry, error) {
+	return f.entries, nil
+}
 
 // fakeTracker is a minimal in-memory tracker.Tracker for tests that need
 // to observe or drive CloseWithComment/LastComment without a real

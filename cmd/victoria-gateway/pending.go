@@ -14,12 +14,14 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/gordonwei/victoria-gateway/pkg/audit"
 	"github.com/gordonwei/victoria-gateway/pkg/rag"
 )
 
@@ -171,6 +173,12 @@ func (h *handler) handlePendingDetail(w http.ResponseWriter, r *http.Request) {
 		switch err := h.rag.ConfirmPending(r.Context(), id, resolution); {
 		case err == nil:
 			justConfirmed = true
+			h.recordAudit(r.Context(), audit.Entry{
+				Actor:  actorFromRequest(r),
+				Action: "pending.confirm",
+				Target: fmt.Sprintf("id=%d", id),
+				Detail: resolution,
+			})
 			// Best-effort, and deliberately after ConfirmPending already
 			// succeeded: the database confirmation is the source of
 			// truth and must not be rolled back just because the tracker

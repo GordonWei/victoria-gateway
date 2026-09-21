@@ -86,6 +86,52 @@ func TestHandleMaintenanceWindows_Put_ReplacesWindows(t *testing.T) {
 	}
 }
 
+func TestHandleMaintenanceWindows_Put_RecordsAudit(t *testing.T) {
+	h := newTestHandlerWithWindows(nil)
+	auditLog := &fakeAuditLogger{}
+	h.audit = auditLog
+
+	newDefs := []config.MaintenanceWindow{
+		{Name: "new-1", Schedule: "DAILY 03:00-03:30", Matchers: map[string]string{"host": "*"}, Action: "mute"},
+	}
+	body, _ := json.Marshal(newDefs)
+	req := httptest.NewRequest(http.MethodPut, "/maintenance-windows", bytes.NewReader(body))
+	req.RemoteAddr = "192.0.2.9:1234"
+	rec := httptest.NewRecorder()
+	h.handleMaintenanceWindows(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auditLog.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(auditLog.entries))
+	}
+	e := auditLog.entries[0]
+	if e.Action != "maintenance_windows.replace" {
+		t.Errorf("Action = %q, want maintenance_windows.replace", e.Action)
+	}
+	if e.Actor != "ip:192.0.2.9" {
+		t.Errorf("Actor = %q, want ip:192.0.2.9", e.Actor)
+	}
+}
+
+func TestHandleMaintenanceWindows_Put_InvalidBody_DoesNotRecordAudit(t *testing.T) {
+	h := newTestHandlerWithWindows(nil)
+	auditLog := &fakeAuditLogger{}
+	h.audit = auditLog
+
+	req := httptest.NewRequest(http.MethodPut, "/maintenance-windows", bytes.NewReader([]byte("not json")))
+	rec := httptest.NewRecorder()
+	h.handleMaintenanceWindows(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if len(auditLog.entries) != 0 {
+		t.Errorf("audit entries = %d, want 0 (a rejected PUT changed nothing, so nothing should be recorded)", len(auditLog.entries))
+	}
+}
+
 func TestHandleMaintenanceWindows_Put_InvalidBody_LeavesExistingWindowsUnchanged(t *testing.T) {
 	original := []config.MaintenanceWindow{
 		{Name: "keep-me", Schedule: "SAT 02:00-04:00", Matchers: map[string]string{"host": "*"}, Action: "suppress"},
