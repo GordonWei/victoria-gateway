@@ -85,10 +85,11 @@ spec:
             # A Secret, not a ConfigMap: config.yaml routinely holds
             # several credentials inline (summarizer/cloud/judge api_key,
             # telegram.bot_token, rag.postgres_dsn, tracker tokens,
-            # webhook_auth/webui_auth passwords — see README's Config
-            # section) the same way the docker-compose deployment's
-            # bind-mounted config.yaml does. This is the direct K8s
-            # translation of that, not a redesign — see this directory's
-            # README.md for why it isn't split into a ConfigMap +
-            # per-field Secret instead.
+            # webhook_auth/webui_auth passwords — see the main README's
+            # "Config" section) the same way the docker-compose
+            # deployment's bind-mounted config.yaml does. Mounting the
+            # whole file as one Secret is the direct K8s translation of
+            # that — not split into a ConfigMap (non-secret fields) plus
+            # a per-field Secret (credentials), which would be a
+            # different design, not a straight translation.
             secretName: victoria-gateway-config

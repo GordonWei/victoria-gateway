@@ -115,7 +115,7 @@ summarizer:
 #   # escalate_threshold: 0.70
 
 # Optional. Alertmanager's own HTTP API — used only by `victoria-gateway
-# suppression-candidates -apply-silences` to create a real, time-bounded
+# suppression-candidates --apply-silences` to create a real, time-bounded
 # silence directly instead of only printing an amtool command for a human
 # to run (see README's "Turning repeat confirmations into suppression
 # rule candidates"). Omit entirely if you'll only ever use that command's
@@ -150,7 +150,7 @@ summarizer:
 #   # Optional. Off by default. Records who replaced the maintenance
 #   # window set, confirmed a pending incident, or applied a suppression
 #   # candidate as a real Alertmanager silence — reuses this same Postgres
-#   # connection, no new dependency. See README's "Audit log" section and
+#   # database, no new dependency. See README's "Audit log" section and
 #   # GET /audit (covered by webui_auth like the other web pages).
 #   # audit_log: false
 #   # Similar-incident references in notifications (on by default when RAG

@@ -29,8 +29,8 @@ type Config struct {
 	Escalation EscalationConfig `yaml:"escalation"` // rules for when to escalate to Cloud
 	Judge      *JudgeConfig     `yaml:"judge"`      // optional: additional escalation signal from TypeSafe AI's Jev, see JudgeConfig
 	// Alertmanager points at the Alertmanager instance `victoria-gateway
-	// suppression-candidates -apply-silences` creates real, time-bounded
-	// silences against. Optional — unset means -apply-silences refuses to
+	// suppression-candidates --apply-silences` creates real, time-bounded
+	// silences against. Optional — unset means --apply-silences refuses to
 	// run; the tool's default print-only behavior needs no config at all.
 	// See suppression.go's package doc for why this only ever creates
 	// silences (self-expiring), never edits Alertmanager's permanent
@@ -326,7 +326,7 @@ type JudgeConfig struct {
 // AlertmanagerConfig points at an Alertmanager instance's HTTP API.
 // Nothing about the core webhook→Loki→LLM→notify path reads this — it
 // exists only for `victoria-gateway suppression-candidates
-// -apply-silences`, which is the one command in this repo that writes
+// --apply-silences`, which is the one command in this repo that writes
 // back to Alertmanager at all (as a time-bounded silence via the v2
 // silence API, never a config file edit — see pkg/alertmanager's package
 // doc).

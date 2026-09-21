@@ -14,7 +14,7 @@ import (
 // fakeAlertmanager is a minimal httptest-backed Alertmanager v2 silence
 // API for applySuppressionSilences' tests — no active silences exist
 // unless preloaded, and every create is recorded so tests can assert
-// whether -apply-silences actually called the API or not.
+// whether --apply-silences actually called the API or not.
 func fakeAlertmanager(t *testing.T, preloadActive bool) (*httptest.Server, *int32) {
 	t.Helper()
 	var createCalls int32
@@ -61,7 +61,7 @@ func TestApplySuppressionSilences_DryRun_DoesNotCreate(t *testing.T) {
 	applySuppressionSilences(cfg, []suppress.Candidate{testCandidate()}, "720h", false /* yes */)
 
 	if got := atomic.LoadInt32(createCalls); got != 0 {
-		t.Errorf("POST /api/v2/silences called %d times, want 0 (dry run without -yes)", got)
+		t.Errorf("POST /api/v2/silences called %d times, want 0 (dry run without --yes)", got)
 	}
 }
 

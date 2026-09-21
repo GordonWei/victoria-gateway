@@ -133,7 +133,7 @@ func applySuppressionSilences(cfg *config.Config, candidates []suppress.Candidat
 	})
 
 	var auditLogger audit.Logger = audit.NoopLogger{}
-	if cfg.RAG.AuditLog { // config.Load/Validate already required rag.enabled by this point (see the rag.enabled check above)
+	if cfg.RAG.AuditLog { // runSuppressionCandidates never calls cfg.Validate() — the rag.enabled check earlier in that function (not Validate) is what already guarantees cfg.RAG is non-nil by this point
 		l, err := audit.OpenPostgres(cfg.RAG.PostgresDSN)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "❌ audit: %v\n", err)
