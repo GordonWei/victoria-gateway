@@ -537,19 +537,19 @@ applying either option is entirely up to you. See `pkg/suppress`'s
 package doc for exactly what the confirmation count does and doesn't
 tell you (it's not the same thing as how often the alert actually fires).
 
-`-apply-silences` can create the time-bounded silence option *for* you,
+`--apply-silences` can create the time-bounded silence option *for* you,
 via Alertmanager's v2 silence API (see `pkg/alertmanager`) — never the
 permanent route, and never a config file edit or reload. A silence is a
 safe thing to automate because it self-expires; a wrong permanent route
 doesn't, which is exactly why that option stays print-only. It's dry-run
-by default (prints what it would create); add `-yes` to actually call the
+by default (prints what it would create); add `--yes` to actually call the
 API. It also skips any candidate that already has a matching active
 silence, so re-running it doesn't pile up duplicates:
 
 ```bash
 # Requires an `alertmanager:` block in config.yaml (see deploy/config.docker.yaml)
-victoria-gateway suppression-candidates --min-count 5 -apply-silences          # dry run
-victoria-gateway suppression-candidates --min-count 5 -apply-silences -yes     # actually create them
+victoria-gateway suppression-candidates --min-count 5 --apply-silences          # dry run
+victoria-gateway suppression-candidates --min-count 5 --apply-silences --yes     # actually create them
 ```
 
 If `rag.audit_log` is enabled, every silence actually created this way is
@@ -600,7 +600,7 @@ The actor recorded is the `webui_auth` username when that's configured,
 the caller's remote IP otherwise (`ip:1.2.3.4`) — there's no real identity
 system here, so an unauthenticated deployment gets the closest honest
 substitute rather than an empty field. CLI-triggered entries (from
-`suppression-candidates -apply-silences -yes`) record `cli:$USER`.
+`suppression-candidates --apply-silences --yes`) record `cli:$USER`.
 Nothing about the core webhook→Loki→LLM→notify path is audited — this is
 specifically the handful of operations that change *live system behavior*
 rather than just observing it, matching what most audit-trail requests

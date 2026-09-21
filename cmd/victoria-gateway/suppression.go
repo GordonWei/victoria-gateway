@@ -15,12 +15,12 @@
 // does not do. See suppressionWritebackNote for what that path would
 // still need before it could be trusted with that.
 //
-// -apply-silences is narrower and safer than that: it creates a real,
+// --apply-silences is narrower and safer than that: it creates a real,
 // time-bounded Alertmanager *silence* via the v2 silence API (see
 // pkg/alertmanager) — never a config file edit, never a reload, and it
 // self-expires on its own, so a wrong call here doesn't need a human to
 // remember to undo it. Even that is dry-run by default (prints what it
-// would create) and only actually calls the API with -yes, so a human
+// would create) and only actually calls the API with --yes, so a human
 // still reviews the candidate list before anything real happens.
 package main
 
@@ -48,8 +48,8 @@ func runSuppressionCandidates(args []string) {
 	minCount := fs.Int("min-count", 3, "only show (alertname, host) pairs confirmed at least this many times")
 	receiver := fs.String("null-receiver", "null", "receiver name to use in the printed route YAML — must already exist in your Alertmanager config with no integrations configured")
 	silenceDuration := fs.String("silence-duration", "720h", "duration to pass to the printed amtool silence command (amtool duration syntax, e.g. \"720h\" for 30 days)")
-	applySilences := fs.Bool("apply-silences", false, "for each candidate, show whether a time-bounded Alertmanager silence would be created via the API (dry run unless -yes is also passed); never touches Alertmanager's config file — see this file's package doc")
-	yes := fs.Bool("yes", false, "with -apply-silences, actually create the silences shown, instead of a dry run")
+	applySilences := fs.Bool("apply-silences", false, "for each candidate, show whether a time-bounded Alertmanager silence would be created via the API (dry run unless --yes is also passed); never touches Alertmanager's config file — see this file's package doc")
+	yes := fs.Bool("yes", false, "with --apply-silences, actually create the silences shown, instead of a dry run")
 	_ = fs.Parse(args) // flag.ExitOnError already exits the process on a parse error
 
 	cfg, err := config.Load(configPath)
@@ -103,16 +103,16 @@ func runSuppressionCandidates(args []string) {
 	}
 }
 
-// applySuppressionSilences implements -apply-silences: for each candidate,
-// create (or, without -yes, describe) the same time-bounded silence Option
+// applySuppressionSilences implements --apply-silences: for each candidate,
+// create (or, without --yes, describe) the same time-bounded silence Option
 // B's printed amtool command would — via the Alertmanager API directly
 // instead of a human running amtool by hand. See this file's package doc
 // for why a silence is the one kind of "apply" this command does
 // automatically, and pkg/alertmanager for the client itself.
 func applySuppressionSilences(cfg *config.Config, candidates []suppress.Candidate, silenceDurationFlag string, yes bool) {
-	fmt.Println("\n=== -apply-silences ===")
+	fmt.Println("\n=== --apply-silences ===")
 	if cfg.Alertmanager == nil || cfg.Alertmanager.Endpoint == "" {
-		fmt.Fprintln(os.Stderr, "❌ -apply-silences requires an `alertmanager:` block (at least `endpoint`) in config.yaml")
+		fmt.Fprintln(os.Stderr, "❌ --apply-silences requires an `alertmanager:` block (at least `endpoint`) in config.yaml")
 		os.Exit(1)
 	}
 	// amtool accepts duration forms Go's time.ParseDuration doesn't (e.g.
@@ -122,7 +122,7 @@ func applySuppressionSilences(cfg *config.Config, candidates []suppress.Candidat
 	// syntax it accepts.
 	duration, err := time.ParseDuration(silenceDurationFlag)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ -apply-silences needs -silence-duration in Go duration syntax (e.g. \"720h\"), not amtool's — got %q: %v\n", silenceDurationFlag, err)
+		fmt.Fprintf(os.Stderr, "❌ --apply-silences needs --silence-duration in Go duration syntax (e.g. \"720h\"), not amtool's — got %q: %v\n", silenceDurationFlag, err)
 		os.Exit(1)
 	}
 
@@ -168,7 +168,7 @@ func applySuppressionSilences(cfg *config.Config, candidates []suppress.Candidat
 		}
 
 		if !yes {
-			fmt.Printf("candidate %d/%d (alertname=%q host=%q): [dry run] would create a %s silence — re-run with -yes to actually create it\n",
+			fmt.Printf("candidate %d/%d (alertname=%q host=%q): [dry run] would create a %s silence — re-run with --yes to actually create it\n",
 				i+1, len(candidates), c.AlertName, c.Host, duration)
 			continue
 		}
@@ -194,7 +194,7 @@ func applySuppressionSilences(cfg *config.Config, candidates []suppress.Candidat
 // suppressionWritebackNote documents, for whoever next picks this up, the
 // current state of writeback and what's still deliberately not built.
 // Option B (a time-bounded silence) CAN now be auto-applied — see
-// -apply-silences and applySuppressionSilences — because a silence
+// --apply-silences and applySuppressionSilences — because a silence
 // self-expires, so a wrong one doesn't need a human to remember to revert
 // it. Option A (a permanent route.routes entry) still cannot: before that
 // could be trusted with write access to Alertmanager's config, it would
@@ -204,4 +204,4 @@ func applySuppressionSilences(cfg *config.Config, candidates []suppress.Candidat
 // write, (3) confirmation that the target `receiver` in --null-receiver
 // actually exists and has no integrations (nothing here does any of that
 // today) — and, unlike a silence, a bad permanent edit doesn't fix itself.
-const suppressionWritebackNote = "(-apply-silences can create Option B for you now (dry run by default, see -yes). Option A stays print-only — see suppression.go's package doc for what a permanent-route writeback would still need before being trustworthy.)"
+const suppressionWritebackNote = "(--apply-silences can create Option B for you now (dry run by default, see --yes). Option A stays print-only — see suppression.go's package doc for what a permanent-route writeback would still need before being trustworthy.)"
