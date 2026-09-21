@@ -1,0 +1,9 @@
+# Own namespace, deliberately not reusing an existing one (e.g.
+# `monitoring`) that another tool (Flux, in this repo author's own
+# cluster) manages declaratively — a manually-applied CronJob dropped into
+# a Flux-owned namespace is easy to lose track of. This one is fully
+# out-of-band: nothing else in the cluster should touch it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: victoria-gateway-healthcheck
