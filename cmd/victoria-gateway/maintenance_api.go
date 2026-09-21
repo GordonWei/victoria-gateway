@@ -8,10 +8,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 
+	"github.com/gordonwei/victoria-gateway/pkg/audit"
 	"github.com/gordonwei/victoria-gateway/pkg/config"
 	"github.com/gordonwei/victoria-gateway/pkg/maintenance"
 )
@@ -90,6 +92,11 @@ func (h *handler) handlePutMaintenanceWindows(w http.ResponseWriter, r *http.Req
 	h.maintenanceMu.Unlock()
 
 	log.Printf("maintenance-windows: replaced via PUT, now %d window(s)", len(windows))
+	h.recordAudit(r.Context(), audit.Entry{
+		Actor:  actorFromRequest(r),
+		Action: "maintenance_windows.replace",
+		Detail: fmt.Sprintf("now %d window(s)", len(windows)),
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(struct {

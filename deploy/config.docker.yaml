@@ -1,5 +1,16 @@
 # victoria-gateway config. Mounted read-only at /etc/victoria-gateway/config.yaml —
 # see docker-compose.snippet.yml. Fill in every REPLACE marker before use.
+#
+# A handful of credential fields below (summarizer.api_key,
+# cloud.api_key, judge.api_key, telegram.bot_token, rag.postgres_dsn,
+# rag.gitea.token, rag.github.token, webhook_auth.password,
+# webui_auth.password, alertmanager.password) can instead be supplied via
+# VICTORIA_GATEWAY_* environment variables, which always win over
+# whatever's written here — see README's "Environment variable overrides"
+# section. Useful if this file is templated by CI or mounted read-only
+# and a secret needs to come from your container orchestrator's own
+# secret store instead of this file. Nothing here requires using that —
+# every REPLACE marker below works exactly as it always did if you don't.
 
 listen_addr: ":8090"
 
@@ -88,6 +99,33 @@ summarizer:
 #   # hits the cap stays on the local result instead of failing.
 #   max_per_hour: 20
 
+# Optional. An independent second opinion from TypeSafe AI's Jev model on
+# top of the local summarizer's own self-reported escalate signal —
+# purely additive (see README's "Jev / TypeSafe AI escalation judge" for
+# the OR-merge semantics and why a failed/unreachable Jev call can never
+# itself block an escalation). Omit entirely to run exactly as before —
+# nothing below changes behavior unless api_key is set.
+# judge:
+#   api_key: "REPLACE-typesafe-ai-api-key"
+#   # Optional. Minimum escalate_probability (0..1) from Jev that triggers
+#   # escalation on its own; 0/omitted defaults to 0.70 — the order-of-
+#   # magnitude TypeSafe's own llm_guardrails cookbook recommends. Revisit
+#   # once enough real Confirmed incidents exist to check Jev's
+#   # calibration against actual outcomes (see cmd/judge-eval).
+#   # escalate_threshold: 0.70
+
+# Optional. Alertmanager's own HTTP API — used only by `victoria-gateway
+# suppression-candidates -apply-silences` to create a real, time-bounded
+# silence directly instead of only printing an amtool command for a human
+# to run (see README's "Turning repeat confirmations into suppression
+# rule candidates"). Omit entirely if you'll only ever use that command's
+# print-only output.
+# alertmanager:
+#   endpoint: "http://REPLACE-alertmanager-host:9093"
+#   # Optional HTTP Basic Auth, only if Alertmanager sits behind one.
+#   # username: "REPLACE"
+#   # password: "REPLACE-a-real-secret"
+
 # Optional. Retrieves past incidents similar to a new alert and adds them
 # to the prompt as reference context. Requires a Postgres database with the
 # pgvector extension installed (see pkg/rag/schema.sql) and an
@@ -109,6 +147,12 @@ summarizer:
 #   # most alerts the log content itself is the root-cause signal, not
 #   # noise to hide.
 #   # mask_log_excerpt: false
+#   # Optional. Off by default. Records who replaced the maintenance
+#   # window set, confirmed a pending incident, or applied a suppression
+#   # candidate as a real Alertmanager silence — reuses this same Postgres
+#   # connection, no new dependency. See README's "Audit log" section and
+#   # GET /audit (covered by webui_auth like the other web pages).
+#   # audit_log: false
 #   # Similar-incident references in notifications (on by default when RAG
 #   # is on): past confirmed incidents with cosine similarity >= the
 #   # threshold get linked at the bottom of each push — issue URL when the

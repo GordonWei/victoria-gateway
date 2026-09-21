@@ -13,6 +13,55 @@ import (
 	"github.com/gordonwei/victoria-gateway/pkg/rag"
 )
 
+func TestHandlePendingDetail_Post_RecordsAudit(t *testing.T) {
+	store := &fakeRAGStore{pending: []rag.Record{
+		{ID: 9, AlertName: "DiskSpace", Host: "h1", Summary: "disk is filling up", CreatedAt: time.Now()},
+	}}
+	auditLog := &fakeAuditLogger{}
+	h := &handler{rag: store, audit: auditLog}
+
+	form := url.Values{"resolution": {"log rotation was misconfigured; fixed and cleared"}}
+	req := httptest.NewRequest(http.MethodPost, "/pending/9", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "192.0.2.1:54321"
+	rec := httptest.NewRecorder()
+	h.handlePendingDetail(rec, req)
+
+	if len(auditLog.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(auditLog.entries))
+	}
+	e := auditLog.entries[0]
+	if e.Action != "pending.confirm" || e.Target != "id=9" {
+		t.Errorf("entry = %+v, want action=pending.confirm target=id=9", e)
+	}
+	if e.Actor != "ip:192.0.2.1" {
+		t.Errorf("Actor = %q, want ip:192.0.2.1 (no webui_auth configured)", e.Actor)
+	}
+	if !strings.Contains(e.Detail, "log rotation") {
+		t.Errorf("Detail = %q, want it to contain the submitted resolution", e.Detail)
+	}
+}
+
+func TestHandlePendingDetail_DoublePost_OnlyFirstRecordsAudit(t *testing.T) {
+	store := &fakeRAGStore{pending: []rag.Record{
+		{ID: 11, AlertName: "DiskSpace", Host: "h1", Summary: "disk is filling up", CreatedAt: time.Now()},
+	}}
+	auditLog := &fakeAuditLogger{}
+	h := &handler{rag: store, audit: auditLog}
+
+	form := url.Values{"resolution": {"fixed"}}
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/pending/11", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		h.handlePendingDetail(rec, req)
+	}
+
+	if len(auditLog.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1 (second POST should hit ErrAlreadyConfirmed, not record again)", len(auditLog.entries))
+	}
+}
+
 func TestHandlePendingList_ShowsPendingNotConfirmed(t *testing.T) {
 	store := &fakeRAGStore{
 		records: []rag.Record{{ID: 1, AlertName: "ConfirmedOne", Host: "h1"}},

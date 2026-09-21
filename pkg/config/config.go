@@ -23,12 +23,21 @@ type Config struct {
 	// loki.limit remain the general "how far back"/"how many lines" knobs
 	// regardless of which backend is actually active — they aren't
 	// Loki-specific, just historically homed on that block.
-	LogSource     *LogSourceConfig     `yaml:"log_source"`
-	Summarizer    LLMConfig            `yaml:"summarizer"`
-	Cloud         *CloudConfig         `yaml:"cloud"`      // optional: cloud model for escalated alerts
-	Escalation    EscalationConfig     `yaml:"escalation"` // rules for when to escalate to Cloud
-	Judge         *JudgeConfig         `yaml:"judge"`      // optional: additional escalation signal from TypeSafe AI's Jev, see JudgeConfig
-	RAG           *RAGConfig           `yaml:"rag"`        // optional: past-incident retrieval
+	LogSource  *LogSourceConfig `yaml:"log_source"`
+	Summarizer LLMConfig        `yaml:"summarizer"`
+	Cloud      *CloudConfig     `yaml:"cloud"`      // optional: cloud model for escalated alerts
+	Escalation EscalationConfig `yaml:"escalation"` // rules for when to escalate to Cloud
+	Judge      *JudgeConfig     `yaml:"judge"`      // optional: additional escalation signal from TypeSafe AI's Jev, see JudgeConfig
+	// Alertmanager points at the Alertmanager instance `victoria-gateway
+	// suppression-candidates -apply-silences` creates real, time-bounded
+	// silences against. Optional — unset means -apply-silences refuses to
+	// run; the tool's default print-only behavior needs no config at all.
+	// See suppression.go's package doc for why this only ever creates
+	// silences (self-expiring), never edits Alertmanager's permanent
+	// route.routes — that stays a human's call, same as before this field
+	// existed.
+	Alertmanager  *AlertmanagerConfig  `yaml:"alertmanager"`
+	RAG           *RAGConfig           `yaml:"rag"` // optional: past-incident retrieval
 	Telegram      TelegramConfig       `yaml:"telegram"`
 	Notifications *NotificationsConfig `yaml:"notifications"` // optional: multi-channel routing; nil keeps the single-Telegram behavior
 	WebhookAuth   *WebhookAuthConfig   `yaml:"webhook_auth"`  // optional: require HTTP Basic Auth on the webhook endpoint
@@ -314,6 +323,22 @@ type JudgeConfig struct {
 	EscalateThreshold float64 `yaml:"escalate_threshold"`
 }
 
+// AlertmanagerConfig points at an Alertmanager instance's HTTP API.
+// Nothing about the core webhook→Loki→LLM→notify path reads this — it
+// exists only for `victoria-gateway suppression-candidates
+// -apply-silences`, which is the one command in this repo that writes
+// back to Alertmanager at all (as a time-bounded silence via the v2
+// silence API, never a config file edit — see pkg/alertmanager's package
+// doc).
+type AlertmanagerConfig struct {
+	Endpoint string `yaml:"endpoint"` // e.g. "http://172.16.100.6:9093"
+	// Username/Password are optional HTTP Basic Auth, for an Alertmanager
+	// sitting behind one (e.g. a reverse proxy) — most homelab/single-node
+	// setups leave these unset.
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
 // RAGConfig controls optional retrieval of past incidents to ground the
 // summarizer prompt. Nil (or Enabled: false) means victoria-gateway behaves
 // exactly as it did before this existed — RAG is opt-in, not a
@@ -364,6 +389,16 @@ type RAGConfig struct {
 	// every record has to be added by hand.
 	Gitea  *GiteaConfig  `yaml:"gitea"`
 	GitHub *GitHubConfig `yaml:"github"`
+
+	// AuditLog, when true, records who replaced the maintenance window
+	// set, confirmed a pending incident, or applied a suppression
+	// candidate as a real Alertmanager silence — see pkg/audit. Off by
+	// default: it reuses this same Postgres connection (no new
+	// dependency), but still adds a write on every such operation, and a
+	// single-operator homelab deployment may not need "who did this"
+	// answered by anything more than "well, me." Requires Enabled: true
+	// (there is no separate audit-only database).
+	AuditLog bool `yaml:"audit_log"`
 
 	// CloseIssueOnWebConfirm, when true, makes confirming a record via
 	// the /pending web form also close its linked tracker issue (posting
@@ -468,12 +503,17 @@ func (c *Config) Validate() error {
 		if c.RAG.SimilarityThreshold < 0 || c.RAG.SimilarityThreshold > 1 {
 			return fmt.Errorf("rag.similarity_threshold must be between 0 and 1 (0 means the 0.75 default)")
 		}
+	} else if c.RAG != nil && c.RAG.AuditLog {
+		return fmt.Errorf("rag.audit_log is true but rag.enabled is not — audit logging reuses the RAG Postgres connection, so RAG must be enabled too")
 	}
 	if c.ShutdownGraceSec < 0 {
 		return fmt.Errorf("shutdown_grace_sec must be >= 0 (0 means the 300s default)")
 	}
 	if c.Judge != nil && (c.Judge.EscalateThreshold < 0 || c.Judge.EscalateThreshold > 1) {
 		return fmt.Errorf("judge.escalate_threshold must be between 0 and 1 (0 means the 0.70 default)")
+	}
+	if c.Alertmanager != nil && c.Alertmanager.Endpoint == "" {
+		return fmt.Errorf("alertmanager is set but alertmanager.endpoint is empty")
 	}
 	if err := c.validateNotifications(); err != nil {
 		return err
@@ -636,5 +676,74 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	applyEnvOverrides(cfg)
 	return cfg, nil
+}
+
+// applyEnvOverrides lets a handful of credential fields be supplied via
+// environment variables, overriding whatever config.yaml set (or filling
+// them in when config.yaml left the surrounding block configured but the
+// secret itself blank). This is deliberately narrow — not a general
+// env-var-for-every-field mechanism — because it only targets the one gap
+// running multiple config.yaml files per environment doesn't already
+// close: keeping credentials out of a file at all, for setups where
+// config.yaml is templated by CI or mounted read-only and a secret has to
+// come from a container orchestrator's own secret store (a K8s Secret
+// projected as an env var, Docker Compose's env_file, etc.) instead.
+//
+// Every var is namespaced VICTORIA_GATEWAY_*, applies only when set to a
+// non-empty value (an unset var never blanks out something config.yaml
+// already set), and only overrides a field inside a block config.yaml
+// already configured (e.g. VICTORIA_GATEWAY_JUDGE_API_KEY does nothing if
+// there's no `judge:` block at all) — auto-creating a whole feature's
+// config block from one env var would mean an operator setting a
+// credential for later use could accidentally turn that feature on, which
+// is a bigger behavior change than "override a value" should cause.
+func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("VICTORIA_GATEWAY_SUMMARIZER_API_KEY"); v != "" {
+		cfg.Summarizer.APIKey = v
+	}
+	if v := os.Getenv("VICTORIA_GATEWAY_TELEGRAM_BOT_TOKEN"); v != "" {
+		cfg.Telegram.BotToken = v
+	}
+	if cfg.Cloud != nil {
+		if v := os.Getenv("VICTORIA_GATEWAY_CLOUD_API_KEY"); v != "" {
+			cfg.Cloud.APIKey = v
+		}
+	}
+	if cfg.Judge != nil {
+		if v := os.Getenv("VICTORIA_GATEWAY_JUDGE_API_KEY"); v != "" {
+			cfg.Judge.APIKey = v
+		}
+	}
+	if cfg.Alertmanager != nil {
+		if v := os.Getenv("VICTORIA_GATEWAY_ALERTMANAGER_PASSWORD"); v != "" {
+			cfg.Alertmanager.Password = v
+		}
+	}
+	if cfg.WebhookAuth != nil {
+		if v := os.Getenv("VICTORIA_GATEWAY_WEBHOOK_AUTH_PASSWORD"); v != "" {
+			cfg.WebhookAuth.Password = v
+		}
+	}
+	if cfg.WebUIAuth != nil {
+		if v := os.Getenv("VICTORIA_GATEWAY_WEBUI_AUTH_PASSWORD"); v != "" {
+			cfg.WebUIAuth.Password = v
+		}
+	}
+	if cfg.RAG != nil {
+		if v := os.Getenv("VICTORIA_GATEWAY_RAG_POSTGRES_DSN"); v != "" {
+			cfg.RAG.PostgresDSN = v
+		}
+		if cfg.RAG.Gitea != nil {
+			if v := os.Getenv("VICTORIA_GATEWAY_GITEA_TOKEN"); v != "" {
+				cfg.RAG.Gitea.Token = v
+			}
+		}
+		if cfg.RAG.GitHub != nil {
+			if v := os.Getenv("VICTORIA_GATEWAY_GITHUB_TOKEN"); v != "" {
+				cfg.RAG.GitHub.Token = v
+			}
+		}
+	}
 }

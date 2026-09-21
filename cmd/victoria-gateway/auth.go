@@ -11,6 +11,7 @@ package main
 
 import (
 	"crypto/subtle"
+	"net"
 	"net/http"
 
 	"github.com/gordonwei/victoria-gateway/pkg/config"
@@ -62,4 +63,26 @@ func webUIAuthMiddleware(cfg *config.WebhookAuthConfig) AuthMiddleware {
 		return noAuthMiddleware
 	}
 	return newBasicAuthMiddleware(cfg)
+}
+
+// actorFromRequest identifies who's making a web-UI request, for
+// pkg/audit's Entry.Actor. When webui_auth is configured, that's simply
+// the Basic Auth username the middleware already verified — the request
+// wouldn't have reached the handler otherwise. Without webui_auth (the
+// default) there's no identity to name, so this falls back to the
+// caller's remote IP — not a real identity, but better than an empty
+// field, and consistent with the enterprise-features draft's fallback of
+// "at least record the source IP" when no identity system exists.
+func actorFromRequest(r *http.Request) string {
+	if user, _, ok := r.BasicAuth(); ok && user != "" {
+		return user
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if host == "" {
+		return "unknown"
+	}
+	return "ip:" + host
 }

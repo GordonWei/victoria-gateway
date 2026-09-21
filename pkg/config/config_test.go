@@ -303,6 +303,22 @@ func TestValidate_RAGSimilarityThresholdOutOfRange(t *testing.T) {
 	}
 }
 
+func TestValidate_AuditLogWithoutRAGEnabled(t *testing.T) {
+	c := validConfig()
+	c.RAG = &RAGConfig{Enabled: false, AuditLog: true}
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for audit_log: true without rag.enabled: true")
+	}
+}
+
+func TestValidate_AuditLogWithRAGEnabled_OK(t *testing.T) {
+	c := validConfig()
+	c.RAG = &RAGConfig{Enabled: true, PostgresDSN: "d", EmbeddingEndpoint: "e", EmbeddingModel: "m", AuditLog: true}
+	if err := c.Validate(); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestValidate_NegativeShutdownGrace(t *testing.T) {
 	c := validConfig()
 	c.ShutdownGraceSec = -1
@@ -389,5 +405,85 @@ func TestLoad_ParsesSummarizerTimeoutSec(t *testing.T) {
 	}
 	if cfg.Summarizer.TimeoutSec != 180 {
 		t.Errorf("timeout_sec = %d, want 180", cfg.Summarizer.TimeoutSec)
+	}
+}
+
+// --- env var overrides ---
+
+func writeTempConfig(t *testing.T, yamlBody string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+	if err := os.WriteFile(path, []byte(yamlBody), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	return path
+}
+
+func TestLoad_EnvOverride_SummarizerAPIKey(t *testing.T) {
+	path := writeTempConfig(t, "loki:\n  endpoint: \"http://loki:3100\"\nsummarizer:\n  endpoint: \"http://llm:1234\"\n  model: \"m\"\n  api_key: \"from-yaml\"\n")
+	t.Setenv("VICTORIA_GATEWAY_SUMMARIZER_API_KEY", "from-env")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Summarizer.APIKey != "from-env" {
+		t.Errorf("Summarizer.APIKey = %q, want the env override to win", cfg.Summarizer.APIKey)
+	}
+}
+
+func TestLoad_EnvOverride_UnsetVarLeavesYAMLValue(t *testing.T) {
+	path := writeTempConfig(t, "loki:\n  endpoint: \"http://loki:3100\"\nsummarizer:\n  endpoint: \"http://llm:1234\"\n  model: \"m\"\n  api_key: \"from-yaml\"\n")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Summarizer.APIKey != "from-yaml" {
+		t.Errorf("Summarizer.APIKey = %q, want the yaml value untouched when the env var isn't set", cfg.Summarizer.APIKey)
+	}
+}
+
+func TestLoad_EnvOverride_JudgeAPIKey_OnlyAppliesIfBlockExists(t *testing.T) {
+	path := writeTempConfig(t, "loki:\n  endpoint: \"http://loki:3100\"\nsummarizer:\n  endpoint: \"http://llm:1234\"\n  model: \"m\"\n")
+	t.Setenv("VICTORIA_GATEWAY_JUDGE_API_KEY", "should-be-ignored")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Judge != nil {
+		t.Errorf("Judge = %+v, want nil — the env var must not auto-create a judge: block that config.yaml never had", cfg.Judge)
+	}
+}
+
+func TestLoad_EnvOverride_JudgeAPIKey_OverridesWhenBlockExists(t *testing.T) {
+	path := writeTempConfig(t, "loki:\n  endpoint: \"http://loki:3100\"\nsummarizer:\n  endpoint: \"http://llm:1234\"\n  model: \"m\"\njudge:\n  api_key: \"from-yaml\"\n")
+	t.Setenv("VICTORIA_GATEWAY_JUDGE_API_KEY", "from-env")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Judge.APIKey != "from-env" {
+		t.Errorf("Judge.APIKey = %q, want from-env", cfg.Judge.APIKey)
+	}
+}
+
+func TestLoad_EnvOverride_RAGPostgresDSNAndGiteaToken(t *testing.T) {
+	path := writeTempConfig(t, "loki:\n  endpoint: \"http://loki:3100\"\nsummarizer:\n  endpoint: \"http://llm:1234\"\n  model: \"m\"\nrag:\n  enabled: true\n  postgres_dsn: \"from-yaml-dsn\"\n  embedding_endpoint: \"http://e\"\n  embedding_model: \"m\"\n  gitea:\n    endpoint: \"https://gitea.example\"\n    token: \"from-yaml-token\"\n    owner: \"o\"\n    repo: \"r\"\n")
+	t.Setenv("VICTORIA_GATEWAY_RAG_POSTGRES_DSN", "from-env-dsn")
+	t.Setenv("VICTORIA_GATEWAY_GITEA_TOKEN", "from-env-token")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RAG.PostgresDSN != "from-env-dsn" {
+		t.Errorf("RAG.PostgresDSN = %q, want from-env-dsn", cfg.RAG.PostgresDSN)
+	}
+	if cfg.RAG.Gitea.Token != "from-env-token" {
+		t.Errorf("RAG.Gitea.Token = %q, want from-env-token", cfg.RAG.Gitea.Token)
 	}
 }
