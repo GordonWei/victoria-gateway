@@ -42,6 +42,37 @@ func TestHandlePendingDetail_Post_RecordsAudit(t *testing.T) {
 	}
 }
 
+// TestHandlePendingDetail_Post_ForgedAuthHeaderNotTrustedAsActor is the
+// handler-level regression test for the actor-spoofing bug: with no
+// webui_auth configured (h.webUIAuth is nil, matching the zero-value
+// handler literal used throughout this file's other tests), nothing
+// verifies an Authorization header on this route, so it must never be
+// trusted as the audit actor even though it's present and well-formed.
+func TestHandlePendingDetail_Post_ForgedAuthHeaderNotTrustedAsActor(t *testing.T) {
+	store := &fakeRAGStore{pending: []rag.Record{
+		{ID: 13, AlertName: "DiskSpace", Host: "h1", Summary: "disk is filling up", CreatedAt: time.Now()},
+	}}
+	auditLog := &fakeAuditLogger{}
+	h := &handler{rag: store, audit: auditLog} // webUIAuth left nil: not configured
+
+	form := url.Values{"resolution": {"fixed"}}
+	req := httptest.NewRequest(http.MethodPost, "/pending/13", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "198.51.100.7:9999"
+	req.SetBasicAuth("admin", "irrelevant-nothing-checks-this")
+	rec := httptest.NewRecorder()
+	h.handlePendingDetail(rec, req)
+
+	if len(auditLog.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(auditLog.entries))
+	}
+	if actor := auditLog.entries[0].Actor; actor == "admin" {
+		t.Fatalf("Actor = %q — a forged Authorization header must not be trusted when webui_auth isn't configured", actor)
+	} else if actor != "ip:198.51.100.7" {
+		t.Errorf("Actor = %q, want ip:198.51.100.7", actor)
+	}
+}
+
 func TestHandlePendingDetail_DoublePost_OnlyFirstRecordsAudit(t *testing.T) {
 	store := &fakeRAGStore{pending: []rag.Record{
 		{ID: 11, AlertName: "DiskSpace", Host: "h1", Summary: "disk is filling up", CreatedAt: time.Now()},

@@ -92,8 +92,15 @@ func (h *handler) handlePutMaintenanceWindows(w http.ResponseWriter, r *http.Req
 	h.maintenanceMu.Unlock()
 
 	log.Printf("maintenance-windows: replaced via PUT, now %d window(s)", len(windows))
+	// Unlike /pending/{id}, this endpoint's Basic Auth header can have
+	// been verified by either of two independent checks — the webUI
+	// middleware wrapping this route (webui_auth) at the mux level, or
+	// checkWebhookAuth above (webhook_auth) inside the handler itself.
+	// Either one having a configured credential means whatever's in the
+	// header was actually checked against something before reaching this
+	// line, so both count as "authenticated" for trusting it as an actor.
 	h.recordAudit(r.Context(), audit.Entry{
-		Actor:  actorFromRequest(r),
+		Actor:  actorFromRequest(r, h.webUIAuth != nil || h.webhookAuth != nil),
 		Action: "maintenance_windows.replace",
 		Detail: fmt.Sprintf("now %d window(s)", len(windows)),
 	})

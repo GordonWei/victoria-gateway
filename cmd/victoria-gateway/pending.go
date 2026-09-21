@@ -174,7 +174,7 @@ func (h *handler) handlePendingDetail(w http.ResponseWriter, r *http.Request) {
 		case err == nil:
 			justConfirmed = true
 			h.recordAudit(r.Context(), audit.Entry{
-				Actor:  actorFromRequest(r),
+				Actor:  actorFromRequest(r, h.webUIAuth != nil),
 				Action: "pending.confirm",
 				Target: fmt.Sprintf("id=%d", id),
 				Detail: resolution,
