@@ -1,0 +1,82 @@
+# External health monitor for victoria-gateway itself — see this
+# directory's README.md for why this exists and how to install it.
+#
+# Runs from a DIFFERENT machine/cluster than victoria-gateway (see
+# BASE_URL below) so a host-level or container-runtime failure that takes
+# victoria-gateway down doesn't also take down the thing checking on it —
+# the same failure mode victoria-gateway itself exists to catch for other
+# services (see the enterprise-features draft's "disaster recovery" section:
+# a tool that watches other things for silent failure is itself a single
+# point of failure unless something watches it too).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: victoria-gateway-healthz
+  namespace: victoria-gateway-healthcheck
+spec:
+  # Every 5 minutes. A genuine outage re-alerts every run rather than
+  # being deduplicated across runs — no external state store, on purpose,
+  # to keep this a zero-application-code, one-file check. Repeated
+  # 5-minute reminders during a real outage are an accepted, documented
+  # tradeoff, not an oversight; raise this interval (or add a dedup step)
+  # if it turns out to be too noisy in practice.
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # A single check run must never hang past roughly one schedule
+      # interval and pile up.
+      activeDeadlineSeconds: 120
+      backoffLimit: 0 # the script's own 3-attempt retry is the retry; a Job-level restart would just re-run the same probe redundantly
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: healthz-check
+              image: curlimages/curl:8.11.0
+              env:
+                - name: BASE_URL
+                  value: "http://172.16.100.6:8090"
+                - name: BOT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: victoria-gateway-healthcheck-telegram
+                      key: bot-token
+                - name: CHAT_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: victoria-gateway-healthcheck-telegram
+                      key: chat-id
+              command:
+                - sh
+                - -c
+                - |
+                  set -u
+                  attempt=0
+                  # 3 attempts, 5s apart, before declaring a real failure —
+                  # filters a single transient blip between clusters
+                  # without needing any state carried across runs.
+                  until [ "$attempt" -ge 3 ]; do
+                    if curl -sf --max-time 5 "$BASE_URL/healthz" > /dev/null; then
+                      echo "victoria-gateway healthz OK (attempt $((attempt+1)))"
+                      exit 0
+                    fi
+                    attempt=$((attempt+1))
+                    echo "victoria-gateway healthz check failed (attempt $attempt/3)"
+                    [ "$attempt" -lt 3 ] && sleep 5
+                  done
+                  echo "victoria-gateway healthz FAILED after 3 attempts — alerting"
+                  curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+                    -d chat_id="${CHAT_ID}" \
+                    -d text="🔴 victoria-gateway /healthz unreachable from the external monitor (rke2-home) after 3 attempts — the host or container at ${BASE_URL} may be down. This alert comes from outside victoria-gateway itself, so it still fires even if victoria-gateway's own Alertmanager can't." \
+                    > /dev/null
+                  exit 1
+              resources:
+                requests:
+                  cpu: 5m
+                  memory: 16Mi
+                limits:
+                  cpu: 50m
+                  memory: 32Mi
