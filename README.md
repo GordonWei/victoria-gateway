@@ -1166,7 +1166,12 @@ today"). No external dependency for this (`pkg/metrics` is hand-rolled,
 not `prometheus/client_golang`) — point a Prometheus scrape config at this
 port's `/metrics` path if you want them collected.
 
-Or via Docker — see `Dockerfile` and `deploy/`:
+Or in a container — same image either way, two deployment shapes on top
+of it depending on where the rest of your monitoring stack already runs:
+
+**Docker Compose** — for a single host already running
+Loki/Prometheus/Alertmanager in one `docker-compose.yml`, which is how
+the reference deployment runs it:
 
 ```bash
 docker build -t victoria-gateway:latest .
@@ -1177,7 +1182,28 @@ existing docker-compose stack (same network as Loki/Prometheus/Alertmanager).
 `deploy/alertmanager_receiver_example.md` covers wiring it into an existing
 Alertmanager route as an additive second webhook target.
 
+**Kubernetes** — for a cluster instead of a single host: `deploy/k8s/`
+has a Deployment/Service/Secret (fixed at 1 replica — see that
+directory's README for why), a direct translation of the same
+`config.yaml` shape, not a different way of configuring the service.
+
+Either path uses the same binary, the same `config.yaml`, and every
+feature above works identically regardless of which one runs it — pick
+whichever matches where you already run things.
+
 ## Status
+
+**Kubernetes deployment** (`deploy/k8s/`): verified end to end on a real
+6-node cluster as of 2026-09-22 — image built and pushed to a private
+registry, pulled and run successfully on every node (including working
+through a `x509: certificate signed by unknown authority` failure on
+the 5 nodes that didn't yet trust that registry's CA, fixed via each
+node's container-runtime registry config), Secret-mounted config,
+`/healthz` reachable through the Service, and a real synthetic alert
+processed correctly end to end (Loki query, local LLM summary) through
+a port-forward. Torn down after verification — this deployment shape is
+new and unproven in long-running production, unlike the docker-compose
+path below.
 
 Running in production against a home Alertmanager/Loki/LM Studio stack,
 with CI (gofmt/build/vet/`go test -race`/golangci-lint) on every push and

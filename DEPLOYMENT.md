@@ -1,13 +1,20 @@
 # Deployment checklist
 
-Step-by-step install for a fresh host. This is the "do these in order and
-it runs" companion to `README.md`, which is where the reasoning behind each
-piece lives; where a step has a non-obvious *why*, this file points at the
-README section instead of restating it. The container path is assumed
-throughout, because that's how the reference deployment (the author's home
+Step-by-step install for a fresh host or cluster. This is the "do these in
+order and it runs" companion to `README.md`, which is where the reasoning
+behind each piece lives; where a step has a non-obvious *why*, this file
+points at the README section instead of restating it. The container path
+is assumed throughout — building from source instead is a one-liner
+covered in README's "Running" section.
+
+Two deployment shapes, same binary and same `config.yaml`: **Docker
+Compose** (section 2A), the reference deployment (the author's home
 monitoring host, running Loki/Prometheus/Alertmanager in one
-`docker-compose.yml`) actually runs it. Building from source instead is a
-one-liner covered in README's "Running" section.
+`docker-compose.yml`) and the more battle-tested path — or **Kubernetes**
+(section 2B), verified end to end but newer and less proven in
+long-running production (see README's "Status"). Pick one; everything
+from section 3 onward applies to either, with a short note wherever the
+exact command differs.
 
 Sections 1 and 2 are the whole minimal install. Everything from section 3
 on is optional and can be added later, one at a time, without redoing the
@@ -15,13 +22,14 @@ earlier steps.
 
 ## 1. Prerequisites
 
-- [ ] **Docker** with the compose plugin on the host that runs the
-      monitoring stack. (Building from source instead needs Go 1.25+, per
-      `go.mod`; the Dockerfile builds with `golang:1.25` so the container
-      path has no host Go requirement.)
-- [ ] **Alertmanager already running** and reachable from that host. This
-      service is an additive webhook receiver; it doesn't replace anything
-      in your existing routing.
+- [ ] **Docker Compose** (a host already running the monitoring stack) **or
+      a Kubernetes cluster** — whichever you're deploying to. Building from
+      source instead of using a container needs Go 1.25+, per `go.mod`;
+      the Dockerfile builds with `golang:1.25` so the container path has no
+      host Go requirement either way.
+- [ ] **Alertmanager already running** and reachable from that host or
+      cluster. This service is an additive webhook receiver; it doesn't
+      replace anything in your existing routing.
 - [ ] **Loki** reachable from the container, or CloudWatch / GCP Cloud
       Logging credentials on the host if your logs live there instead (see
       README's "Log source: Loki, CloudWatch, or GCP Cloud Logging"; the
@@ -42,7 +50,9 @@ earlier steps.
 
 No RAG, no auth, no escalation. Just webhook in, summary out to Telegram.
 
-### 2.1 Build the image
+## 2A. Docker Compose
+
+### 2A.1 Build the image
 
 On the monitoring host, from the repo root:
 
@@ -50,7 +60,7 @@ On the monitoring host, from the repo root:
 docker build -t victoria-gateway:latest .
 ```
 
-### 2.2 Create the config
+### 2A.2 Create the config
 
 Copy the annotated template next to your stack's `docker-compose.yml`. The
 compose snippet in the next step mounts it from `./victoria-gateway/config.yaml`
@@ -81,7 +91,7 @@ note under "Config" for why.
 `loki.endpoint` and `summarizer.endpoint` are the two fields the process
 refuses to start without.
 
-### 2.3 Add the compose service
+### 2A.3 Add the compose service
 
 Paste the service block from `deploy/docker-compose.snippet.yml` into the
 existing `docker-compose.yml` (don't start a separate compose file; the
@@ -98,7 +108,7 @@ service from the host for the tests below; Alertmanager reaches it by
 service name over the docker network and doesn't need it. Drop it later if
 you don't want the port on the host.
 
-### 2.4 Start it
+### 2A.4 Start it
 
 ```bash
 docker compose up -d victoria-gateway
@@ -108,7 +118,7 @@ docker compose logs -f victoria-gateway
 A config error (missing endpoint, malformed block) exits immediately with a
 `❌` line in the logs; fix the file and `up -d` again.
 
-### 2.5 Verify: health
+### 2A.5 Verify: health
 
 ```bash
 curl -i http://localhost:8090/healthz
@@ -116,7 +126,7 @@ curl -i http://localhost:8090/healthz
 
 Expect `HTTP/1.1 200 OK` with body `ok`.
 
-### 2.6 Verify: a synthetic alert
+### 2A.6 Verify: a synthetic alert
 
 POST a minimal Alertmanager-shaped payload. The alert must carry a `host`
 or `instance` label (or `namespace`+`pod` for a Kubernetes alert), because
@@ -156,7 +166,7 @@ Re-sending the same payload is deduplicated by `fingerprint` (always on);
 change the fingerprint to trigger a fresh analysis, or send the same alert
 with `"status": "resolved"` to clear the dedup entry.
 
-### 2.7 Wire it into Alertmanager
+### 2A.7 Wire it into Alertmanager
 
 Add it as a **second** `webhook_configs` entry on a receiver your routes
 already use, then reload. Full example and notes in
@@ -182,8 +192,102 @@ duplicate. Also check the route's `repeat_interval`; a short one re-runs
 the LLM and re-pushes to Telegram on every repeat, not just the first
 firing.
 
-That's the minimal install done. The next real alert through that
-receiver will produce a Telegram summary.
+That's the minimal install done (Docker Compose path). The next real
+alert through that receiver will produce a Telegram summary. Skip ahead
+to section 3.
+
+## 2B. Kubernetes
+
+Full steps, including the registry-trust gotcha that's easy to miss, are
+in `deploy/k8s/README.md` — this section is the condensed version for
+following along here.
+
+### 2B.1 Build and push the image
+
+Unlike Compose, every node your workload might land on needs to be able
+to pull the image — a `docker build` on your own machine alone isn't
+enough unless every node can load it directly (single-node clusters
+only):
+
+```bash
+docker build --platform linux/amd64 -t <your-registry>/victoria-gateway:latest .   # match your nodes' actual architecture
+docker push <your-registry>/victoria-gateway:latest
+```
+
+If `<your-registry>` is self-hosted or uses a certificate your cluster's
+container runtime doesn't already trust, **test a real pull from the
+cluster before going further** — a `docker push` succeeding only proves
+your own machine trusts it:
+
+```bash
+kubectl run pull-test --image=<your-registry>/victoria-gateway:latest --restart=Never -- /usr/local/bin/victoria-gateway --help
+kubectl get pod pull-test   # watch for ImagePullBackOff
+kubectl delete pod pull-test --now
+```
+
+A failure here (commonly `x509: certificate signed by unknown
+authority`) means your container runtime's registry config needs the
+registry's CA added — node-local, runtime-specific, see
+`deploy/k8s/README.md`'s "Self-signed or private registries" section.
+This is not optional to check: a manifest can apply cleanly and still
+sit in `ImagePullBackOff` forever if this step is skipped.
+
+### 2B.2 Create the config and apply the manifests
+
+Same `config.yaml` as the Compose path (`deploy/config.docker.yaml`
+template, same required fields) — delivered as a Secret instead of a
+bind-mounted file:
+
+```bash
+cd deploy/k8s
+kubectl apply -f namespace.yaml
+kubectl create secret generic victoria-gateway-config -n victoria-gateway --from-file=config.yaml=./config.yaml
+```
+
+Edit `deployment.yaml`'s `image:` field to what you pushed in 2B.1, then:
+
+```bash
+kubectl apply -f deployment.yaml -f service.yaml
+kubectl -n victoria-gateway rollout status deployment/victoria-gateway
+```
+
+### 2B.3 Verify: health and a synthetic alert
+
+```bash
+kubectl -n victoria-gateway port-forward svc/victoria-gateway 8090:8090 &
+curl -i http://localhost:8090/healthz   # expect 200 ok
+```
+
+Send the same synthetic alert payload as 2A.6 to
+`http://localhost:8090/webhook/alertmanager` through the port-forward,
+and watch `kubectl -n victoria-gateway logs deploy/victoria-gateway -f`
+the same way 2A.6 watches `docker compose logs -f`.
+
+### 2B.4 Wire it into Alertmanager
+
+In-cluster Alertmanager: point the second `webhook_configs` entry (see
+2A.7 for the shape) at
+`http://victoria-gateway.victoria-gateway.svc.cluster.local:8090/webhook/alertmanager`.
+Alertmanager outside the cluster needs its own path in (Ingress,
+LoadBalancer, NodePort) — environment-specific, not picked for you here.
+
+That's the minimal install done (Kubernetes path).
+
+### For the rest of this document
+
+Sections 3 onward show Docker Compose commands (`docker compose up -d
+victoria-gateway`, etc.) since that's the path with the longer track
+record. On Kubernetes, wherever this doc says "restart," the equivalent
+is usually: update the Secret, then
+
+```bash
+kubectl -n victoria-gateway rollout restart deployment/victoria-gateway
+```
+
+`docker compose exec victoria-gateway <cmd>` becomes `kubectl -n
+victoria-gateway exec deploy/victoria-gateway -- <cmd>`. Everything about
+`config.yaml`'s *content* — which fields to set, what they do — is
+identical either way; only how the file reaches the container differs.
 
 ## 3. Optional: enable RAG
 
@@ -485,6 +589,13 @@ docker compose logs -f victoria-gateway
 `up -d` recreates the container on the new image. Thanks to
 `stop_grace_period`, the old container drains in-flight analyses before
 exiting, so an upgrade mid-escalation doesn't lose it.
+
+On Kubernetes: build and push a new tag (not just `:latest` — a
+`Recreate`-strategy Deployment with an unchanged image reference won't
+pull again), edit `deployment.yaml`'s `image:`, then `kubectl apply -f
+deployment.yaml` and `kubectl -n victoria-gateway rollout status
+deployment/victoria-gateway`. `terminationGracePeriodSeconds` does the
+same job `stop_grace_period` does on Compose.
 
 Your existing `config.yaml` keeps working: every feature added so far has
 shipped as an optional block that's off unless configured, and the README
