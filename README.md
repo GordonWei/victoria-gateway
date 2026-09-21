@@ -1201,8 +1201,17 @@ the 5 nodes that didn't yet trust that registry's CA, fixed via each
 node's container-runtime registry config), Secret-mounted config,
 `/healthz` reachable through the Service, and a real synthetic alert
 processed correctly end to end (Loki query, local LLM summary) through
-a port-forward. Torn down after verification — this deployment shape is
-new and unproven in long-running production, unlike the docker-compose
+a port-forward. **RAG verified separately, same day**: a second
+deployment with `rag.enabled: true` (same Postgres/pgvector store and
+embedding endpoint the docker-compose deployment uses) captured a real
+alert as Pending, retrieved and correctly referenced two genuinely
+existing Confirmed incidents in the generated summary (proving
+embedding + pgvector search + prompt grounding all work cross-subnet
+from inside the cluster, not just connectivity), and the web confirm
+form (`POST /pending/{id}`) moved it to Confirmed and onto `/incidents`
+correctly. Both deployments torn down after verification — this
+deployment shape is new and unproven in long-running production, unlike
+the docker-compose
 path below.
 
 Running in production against a home Alertmanager/Loki/LM Studio stack,
