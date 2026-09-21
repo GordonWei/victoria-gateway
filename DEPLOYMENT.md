@@ -368,7 +368,7 @@ curl -i http://localhost:8090/pending
 ```
 
 Both should return `200` with an HTML page. Send the synthetic alert from
-2.6 again (new fingerprint) and confirm a row appears on `/pending`, and
+2A.6 again (new fingerprint) and confirm a row appears on `/pending`, and
 that the Telegram push now carries a `/pending/{id}` link.
 
 **Expect `/incidents` and the "相似歷史事件" section to stay empty at
@@ -553,7 +553,7 @@ arrives) before trusting it.
 How to know it actually works, as opposed to merely running:
 
 - [ ] `curl -i http://localhost:8090/healthz` returns `200 ok`.
-- [ ] The synthetic POST from 2.6 returns `202` (async) or `200` with
+- [ ] The synthetic POST from 2A.6 returns `202` (async) or `200` with
       `results` (sync), and the container log shows the Loki query, LLM
       call, and Telegram push with no error lines.
 - [ ] The summary for that synthetic alert **arrived in the Telegram chat**.
@@ -590,12 +590,18 @@ docker compose logs -f victoria-gateway
 `stop_grace_period`, the old container drains in-flight analyses before
 exiting, so an upgrade mid-escalation doesn't lose it.
 
-On Kubernetes: build and push a new tag (not just `:latest` — a
-`Recreate`-strategy Deployment with an unchanged image reference won't
-pull again), edit `deployment.yaml`'s `image:`, then `kubectl apply -f
-deployment.yaml` and `kubectl -n victoria-gateway rollout status
-deployment/victoria-gateway`. `terminationGracePeriodSeconds` does the
-same job `stop_grace_period` does on Compose.
+On Kubernetes: `kubectl apply` only triggers a rollout when the pod
+template actually changes — pushing a new image to the same `:latest`
+tag and re-applying an unchanged manifest does nothing, since the
+Deployment spec looks identical either way. Build and push a new,
+distinct tag, edit `deployment.yaml`'s `image:` to it, then `kubectl
+apply -f deployment.yaml` and `kubectl -n victoria-gateway rollout
+status deployment/victoria-gateway`. (Staying on `:latest` instead and
+forcing a fresh pull is possible too — `kubectl -n victoria-gateway
+rollout restart deployment/victoria-gateway` — but a distinct tag per
+build is easier to reason about and to roll back.)
+`terminationGracePeriodSeconds` does the same job `stop_grace_period`
+does on Compose.
 
 Your existing `config.yaml` keeps working: every feature added so far has
 shipped as an optional block that's off unless configured, and the README

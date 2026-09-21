@@ -70,7 +70,7 @@ spec:
                   echo "victoria-gateway healthz FAILED after 3 attempts — alerting"
                   curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
                     -d chat_id="${CHAT_ID}" \
-                    -d text="🔴 victoria-gateway /healthz unreachable from the external monitor (rke2-home) after 3 attempts — the host or container at ${BASE_URL} may be down. This alert comes from outside victoria-gateway itself, so it still fires even if victoria-gateway's own Alertmanager can't." \
+                    -d text="🔴 victoria-gateway /healthz unreachable from the external monitor after 3 attempts — the host or container at ${BASE_URL} may be down. This alert comes from outside victoria-gateway itself, so it still fires even if victoria-gateway's own Alertmanager can't." \
                     > /dev/null
                   exit 1
               resources:

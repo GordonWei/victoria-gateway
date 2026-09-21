@@ -8,8 +8,11 @@
 // answer well: "who did this, and when," after the fact, queryable without
 // grepping historical container logs that may have rotated away.
 //
-// Deliberately reuses the RAG Postgres connection rather than inventing a
-// second storage dependency: audit logging is only available when
+// Deliberately reuses the RAG Postgres database rather than inventing a
+// second storage dependency (it opens its own separate *sql.DB pool
+// against the same rag.postgres_dsn — pkg/rag's own pool isn't exported
+// for this to share directly — but that's an implementation detail, not
+// a second database to provision): audit logging is only available when
 // rag.enabled is true (see config.RAGConfig.AuditLog), the same way
 // suppression-candidates already requires RAG to have any confirmed
 // history to analyze. A deployment that doesn't run RAG gets NoopLogger —

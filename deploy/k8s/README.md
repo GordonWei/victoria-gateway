@@ -69,10 +69,12 @@ one over the other.
    ```
 
    Then send a real synthetic alert through the same port-forward and
-   confirm it actually processes (Loki query, LLM call) — see the main
-   README's "Verify: a synthetic alert" for the exact payload shape and
-   `../../DEPLOYMENT.md` for the full walkthrough. `kubectl -n
-   victoria-gateway logs deploy/victoria-gateway -f` while you send it.
+   confirm it actually processes (Loki query, LLM call) — see
+   `../../DEPLOYMENT.md`'s "2A.6 Verify: a synthetic alert" for the exact
+   payload shape (same payload either way; only the target host/port
+   changes) and the rest of that document's section 2B for the full
+   Kubernetes walkthrough. `kubectl -n victoria-gateway logs
+   deploy/victoria-gateway -f` while you send it.
 
 6. **Point Alertmanager at it.** In-cluster:
    `http://victoria-gateway.victoria-gateway.svc.cluster.local:8090/webhook/alertmanager`.

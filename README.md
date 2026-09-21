@@ -584,7 +584,7 @@ The one question none of the above answers: *who* changed the
 maintenance windows, confirmed that pending incident, or applied that
 suppression candidate as a silence — and when. `rag.audit_log: true`
 (off by default; requires `rag.enabled: true`, since it reuses that same
-Postgres connection rather than adding a second storage dependency)
+Postgres database rather than adding a second storage dependency)
 records exactly those three operations to an `audit_log` table (see
 `pkg/audit` and `pkg/rag/schema.sql`), viewable at `GET /audit` —
 authenticated by `webui_auth` the same as `/incidents` and `/pending`.

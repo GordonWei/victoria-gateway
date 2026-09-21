@@ -1,10 +1,10 @@
 // Package alertmanager is a minimal client for Alertmanager's v2 silence
 // API (POST/GET /api/v2/silences) — used by `victoria-gateway
-// suppression-candidates -apply-silences` (see cmd/victoria-gateway's
+// suppression-candidates --apply-silences` (see cmd/victoria-gateway's
 // suppression.go) to create a real, time-bounded silence directly,
 // instead of only printing one for a human to run through amtool.
 //
-// This is deliberately narrow: it does exactly what -apply-silences
+// This is deliberately narrow: it does exactly what --apply-silences
 // needs and nothing else — no route/receiver management, no alert
 // querying, no general-purpose Alertmanager API coverage. In particular
 // it never edits Alertmanager's static config.yml or triggers a config
@@ -152,7 +152,7 @@ func (c *Client) CreateSilence(ctx context.Context, matchers []Matcher, duration
 
 // ActiveSilenceExists reports whether an active (not expired, not merely
 // pending-for-the-future) silence already matches exactly this set of
-// matchers — used to skip re-creating a silence -apply-silences already
+// matchers — used to skip re-creating a silence --apply-silences already
 // applied on a previous run, so repeated runs are idempotent rather than
 // piling up duplicate silences for the same candidate.
 func (c *Client) ActiveSilenceExists(ctx context.Context, matchers []Matcher) (bool, error) {
