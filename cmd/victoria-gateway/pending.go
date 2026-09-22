@@ -13,6 +13,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"html/template"
@@ -20,6 +21,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/audit"
 	"github.com/gordonwei/victoria-gateway/pkg/rag"
@@ -27,29 +29,62 @@ import (
 
 var pendingListTmpl = template.Must(template.New("pending-list").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>victoria-gateway pending</title><style>` + incidentsBaseCSS + incidentsFormCSS + `</style></head>
+<title>victoria-gateway pending</title><style>` + incidentsBaseCSS + incidentsFormCSS + `
+.grp { display:inline-block; margin-left:.3rem; padding:0 .4rem; border-radius:3px; background:#3a2f1d; color:#d9ad63; font-size:.78rem; font-weight:600; }
+.span { display:block; color:#7c828c; font-size:.75rem; }
+.batch { margin-top:1.4rem; padding:1rem; border:1px solid #2a2e37; border-radius:6px; background:#1b212b; }
+.batch h2 { margin:0 0 .4rem; font-size:1rem; }
+.batch textarea { width:100%; box-sizing:border-box; background:#1d2430; border:1px solid #2a2e37; color:#d7dae0; padding:.6rem; border-radius:4px; font-size:.95rem; font-family:inherit; min-height:5rem; }
+.batch button { margin-top:.6rem; background:#2f5d3a; border:1px solid #3f7a4e; color:#d7dae0; padding:.5rem 1.2rem; border-radius:4px; cursor:pointer; font-size:1rem; }
+.batch button:hover { background:#386f46; }
+.warnline { color:#d18b3a; }
+</style></head>
 <body>
-<h1>⚠️ 待確認事件（{{if or .AlertName .Host}}符合篩選條件{{else}}最近{{end}} {{len .Records}} 筆）</h1>
-<p class="muted">這些是尚未經人工確認的 LLM 分析猜測，不是驗證過的處置結論。</p>
+<h1>⚠️ 待確認事件（{{if or .AlertName .Host}}符合篩選條件{{else}}最近{{end}} {{.TotalRows}} 筆，收斂成 {{len .Groups}} 群）</h1>
+<p class="muted">這些是尚未經人工確認的 LLM 分析猜測，不是驗證過的處置結論。<br>
+同一個 <code>(告警, 對象)</code> 反覆觸發的會收成一列，右邊的 <span class="grp">×N</span> 是那一群的筆數。</p>
 <form class="filter" method="get" action="/pending">
   <label>告警名稱<input type="text" name="alertname" value="{{.AlertName}}" placeholder="alertname 子字串"></label>
   <label>主機<input type="text" name="host" value="{{.Host}}" placeholder="host 子字串"></label>
   <label>筆數上限<input type="number" name="limit" value="{{.Limit}}" min="1" max="100" style="width:5rem"></label>
   <button type="submit">篩選</button>
 </form>
-{{if .Records}}
+{{if .Groups}}
+{{if .BatchEnabled}}<form method="post" action="/pending/batch">{{end}}
 <table>
-<tr><th>ID</th><th>告警</th><th>主機</th><th>發生時間</th><th>LLM 摘要（未經驗證）</th></tr>
-{{range .Records}}
+<tr>{{if .BatchEnabled}}<th style="width:1.5rem"><input type="checkbox" id="all"></th>{{end}}<th>ID</th><th>告警</th><th>對象</th><th>發生時間</th><th>LLM 摘要（未經驗證）</th></tr>
+{{range .Groups}}
 <tr>
-<td><a href="/pending/{{.ID}}">{{.ID}}</a></td>
+{{if $.BatchEnabled}}<td><input type="checkbox" name="rep" value="{{.RepID}}"></td>{{end}}
+<td><a href="/pending/{{.RepID}}">{{.RepID}}</a>{{if gt .Size 1}} <span class="grp">×{{.Size}}</span>{{end}}</td>
 <td>{{.AlertName}}</td>
 <td>{{.Host}}</td>
-<td class="k">{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+<td class="k">{{.NewestAt.Format "2006-01-02 15:04"}}{{if gt .Size 1}}<span class="span">{{.SpanText}}</span>{{end}}</td>
 <td>{{.Summary}}</td>
 </tr>
 {{end}}
 </table>
+{{if .BatchEnabled}}
+<div class="batch">
+<h2>批次確認勾選的群組</h2>
+<p class="muted">🔑 <b>「×N」代表這一列背後有 N 筆同樣的 <code>(告警, 對象)</code> 待確認紀錄</b>——同一個檢查反覆觸發。
+勾一列就是把那 N 筆一起確認，共用你在下面寫的同一份結論。<br>
+每群<b>最新那筆</b>（就是顯示的 ID）會成為進 RAG 檢索的代表，其餘標為重複列——
+<b>每一筆都還是完整紀錄，<code>/incidents</code> 照樣看得到，只是不重複餵給模型</b>。<br>
+<span class="warnline">⚠️ 同群裡的其他筆你沒有逐筆看過。要逐筆檢視請點 ID 進單筆頁確認。</span></p>
+<textarea name="resolution" placeholder="實際原因是什麼、怎麼處理的（會套用到所有勾選的群組）" required></textarea>
+<br><button type="submit">批次確認</button>
+</div>
+</form>
+<script>
+document.getElementById('all').addEventListener('change', function (e) {
+  document.querySelectorAll('input[name="rep"]').forEach(function (c) { c.checked = e.target.checked; });
+});
+</script>
+{{else}}
+<p class="muted">⚠️ 批次確認未啟用：資料庫還沒有 <code>dup_of</code> 欄位。
+跑 <code>pkg/rag/migrate_0003_dup_of.sql</code> 後重啟即可，清單本身不受影響。</p>
+{{end}}
 {{else}}
 <p class="muted">目前沒有待確認的事件。</p>
 {{end}}
@@ -113,19 +148,109 @@ func (h *handler) handlePendingList(w http.ResponseWriter, r *http.Request) {
 		AlertName: r.URL.Query().Get("alertname"),
 		Host:      r.URL.Query().Get("host"),
 	}
+	grouper, ok := h.rag.(pendingGrouper)
+	if !ok {
+		// A Store implementation without grouping (the in-memory one used
+		// by tests) still gets a working list — just ungrouped.
+		h.renderUngroupedPending(w, r, filter, limit)
+		return
+	}
+	groups, err := grouper.ListPendingGroups(r.Context(), filter, limit)
+	if err != nil {
+		log.Printf("pending: list groups failed: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	totalRows, err := grouper.CountPending(r.Context(), filter)
+	if err != nil {
+		// Only a displayed number — fall back to what this page can see
+		// rather than failing the whole page over it.
+		log.Printf("pending: count failed, falling back to listed groups: %v", err)
+		for _, g := range groups {
+			totalRows += g.Size
+		}
+	}
+
+	views := make([]pendingGroupView, 0, len(groups))
+	for _, g := range groups {
+		views = append(views, pendingGroupView{PendingGroup: g, SpanText: spanText(g)})
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	page := struct {
+		Groups       []pendingGroupView
+		TotalRows    int
+		AlertName    string
+		Host         string
+		Limit        int
+		BatchEnabled bool
+	}{views, totalRows, filter.AlertName, filter.Host, limit, h.batchConfirm}
+	if err := pendingListTmpl.Execute(w, page); err != nil {
+		log.Printf("pending: render list: %v", err)
+	}
+}
+
+// pendingGrouper is the subset of the store that the grouped list needs.
+// Kept as a narrow interface rather than widening rag.Store so that
+// alternative Store implementations (and the test fake) don't all have to
+// grow three methods to stay compilable.
+type pendingGrouper interface {
+	ListPendingGroups(ctx context.Context, filter rag.ListFilter, limit int) ([]rag.PendingGroup, error)
+	CountPending(ctx context.Context, filter rag.ListFilter) (int, error)
+	GroupMemberIDs(ctx context.Context, repID int64) ([]int64, error)
+	ConfirmPendingGroup(ctx context.Context, ids []int64, resolution string, repID int64) (int, error)
+}
+
+type pendingGroupView struct {
+	rag.PendingGroup
+	SpanText string
+}
+
+// spanText renders how long a group has been recurring.
+//
+// 🔑 The distinction it exists to make: "35 firings in two minutes" is a
+// flapping check, "35 firings over nine days" is something nobody is
+// fixing. Both show as ×35 and they need different responses.
+func spanText(g rag.PendingGroup) string {
+	d := g.Span()
+	switch {
+	case d <= 0:
+		return ""
+	case d < time.Minute:
+		return fmt.Sprintf("%d 筆・%.0f 秒內", g.Size, d.Seconds())
+	case d < time.Hour:
+		return fmt.Sprintf("%d 筆・%.0f 分鐘內", g.Size, d.Minutes())
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d 筆・%.1f 小時內", g.Size, d.Hours())
+	default:
+		return fmt.Sprintf("%d 筆・橫跨 %.0f 天", g.Size, d.Hours()/24)
+	}
+}
+
+// renderUngroupedPending is the pre-grouping list, kept for Store
+// implementations that don't support grouping.
+func (h *handler) renderUngroupedPending(w http.ResponseWriter, r *http.Request, filter rag.ListFilter, limit int) {
 	records, err := h.rag.ListPending(r.Context(), filter, limit)
 	if err != nil {
 		log.Printf("pending: list failed: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	views := make([]pendingGroupView, 0, len(records))
+	for _, rec := range records {
+		views = append(views, pendingGroupView{PendingGroup: rag.PendingGroup{
+			RepID: rec.ID, AlertName: rec.AlertName, Host: rec.Host,
+			Size: 1, Summary: rec.Summary, NewestAt: rec.CreatedAt, OldestAt: rec.CreatedAt,
+		}})
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	page := struct {
-		Records   []rag.Record
-		AlertName string
-		Host      string
-		Limit     int
-	}{records, filter.AlertName, filter.Host, limit}
+		Groups       []pendingGroupView
+		TotalRows    int
+		AlertName    string
+		Host         string
+		Limit        int
+		BatchEnabled bool
+	}{views, len(records), filter.AlertName, filter.Host, limit, false}
 	if err := pendingListTmpl.Execute(w, page); err != nil {
 		log.Printf("pending: render list: %v", err)
 	}

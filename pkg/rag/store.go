@@ -216,6 +216,13 @@ func scanRecord(row interface{ Scan(...any) error }) (Record, error) {
 // vector_cosine_ops index in schema.sql). Each returned Record carries
 // its cosine similarity (1 - distance) so callers can threshold what a
 // human gets shown, not just rank order.
+// dup_of IS NULL keeps a confirmed duplicate group from crowding out
+// everything else: one batch-confirmed burst of 35 identical alerts would
+// otherwise fill every top-K it is remotely close to, and the LLM would
+// see the same example 35 times instead of 35 different ones. The
+// representative of each group is still searchable — only its duplicates
+// are skipped, and nothing is deleted or hidden from /incidents. See
+// pkg/rag/dupgroup.go.
 func (s *PGStore) Search(ctx context.Context, embedding []float32, topK int) ([]Record, error) {
 	if topK <= 0 {
 		topK = 3
@@ -225,6 +232,7 @@ func (s *PGStore) Search(ctx context.Context, embedding []float32, topK int) ([]
 		SELECT `+recordColumns+`, 1 - (embedding <=> $1::vector) AS similarity
 		FROM incidents
 		WHERE status = 'confirmed'
+		  AND dup_of IS NULL
 		ORDER BY embedding <=> $1::vector
 		LIMIT $2
 	`, vec, topK)

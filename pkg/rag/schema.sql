@@ -33,13 +33,33 @@ CREATE TABLE IF NOT EXISTS incidents (
     embedding          vector(1024) NOT NULL,
     embedding_model    TEXT NOT NULL DEFAULT '',
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    confirmed_at       TIMESTAMPTZ
+    confirmed_at       TIMESTAMPTZ,
+    -- Set when an operator batch-confirms a group of identical recurring
+    -- alerts from /pending: every row but the representative points at
+    -- the representative's id. It keeps the duplicates out of RAG
+    -- retrieval (see PGStore.Search) without deleting or hiding them —
+    -- they are still real alerts that fired and still show in /incidents.
+    dup_of             BIGINT
 );
 
 -- A fresh install gets embedding_model for free from CREATE TABLE above.
 -- An existing deployment from before this column existed should run
 -- migrate_0002_embedding_model.sql instead (see that file) — a fresh
 -- install does not need it.
+
+-- Only the representative of a confirmed duplicate group is offered to
+-- the LLM as a retrieval example, so Search filters on dup_of IS NULL.
+CREATE INDEX IF NOT EXISTS incidents_dup_of_idx
+    ON incidents (dup_of)
+ WHERE dup_of IS NOT NULL;
+
+-- Backs the (alert_name, host) grouping the batch-confirm UI lists.
+CREATE INDEX IF NOT EXISTS incidents_pending_group_idx
+    ON incidents (alert_name, host)
+ WHERE status = 'pending';
+
+-- An existing deployment from before dup_of existed should run
+-- migrate_0003_dup_of.sql instead of re-running this file.
 
 -- HNSW over cosine distance, matching the `<=>` operator PGStore.Search
 -- uses in pkg/rag/store.go. Built after rows exist (or empty is fine too
