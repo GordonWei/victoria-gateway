@@ -238,6 +238,19 @@ func runServe(args []string) {
 		} else if warning, ok := rag.CheckEmbeddingModelDrift(cfg.RAG.EmbeddingModel, models); !ok {
 			log.Printf("⚠️  %s", warning)
 		}
+		// Batch confirm needs dup_of (migrate_0003_dup_of.sql). Probe once
+		// here instead of failing later: an operator who upgraded the
+		// binary without running the migration keeps a working pending
+		// list, the page just says batch confirm is off and how to enable
+		// it. See pkg/rag/dupgroup.go.
+		if has, err := store.HasDupOf(context.Background()); err != nil {
+			log.Printf("rag: could not check for the dup_of column, batch confirm stays off: %v", err)
+		} else if has {
+			h.batchConfirm = true
+		} else {
+			log.Printf("rag: incidents has no dup_of column — batch confirm is off. " +
+				"Run pkg/rag/migrate_0003_dup_of.sql and restart to enable it.")
+		}
 		h.ragTopK = cfg.RAG.TopK
 		if h.ragTopK <= 0 {
 			h.ragTopK = 3
@@ -291,6 +304,10 @@ func runServe(args []string) {
 		mux.Handle("/incidents", webUI(http.HandlerFunc(h.handleIncidentsList)))
 		mux.Handle("/incidents/", webUI(http.HandlerFunc(h.handleIncidentDetail)))
 		mux.Handle("/pending", webUI(http.HandlerFunc(h.handlePendingList)))
+		// Registered before the "/pending/" subtree: Go's ServeMux picks the
+		// longest matching pattern, so this exact path wins over the prefix
+		// and handlePendingDetail never sees "batch" as an id.
+		mux.Handle("/pending/batch", webUI(http.HandlerFunc(h.handlePendingBatch)))
 		mux.Handle("/pending/", webUI(http.HandlerFunc(h.handlePendingDetail)))
 		// Tracker webhooks are their own auth (HMAC signature against
 		// WebhookSecret), never webUI's basic auth — Gitea/GitHub can't
@@ -470,7 +487,17 @@ type handler struct {
 	webUIAuth *config.WebhookAuthConfig
 	async     bool // respond 202 and analyze in the background (config.webhook_async)
 
-	rag             rag.Store     // nil if RAG is disabled
+	rag rag.Store // nil if RAG is disabled
+	// batchConfirm is true only when the store supports grouping *and*
+	// the incidents table actually has dup_of (migrate_0003). Checked
+	// once at startup rather than per request: a missing column is a
+	// deployment state, not something that changes under us, and probing
+	// information_schema on every page load would be silly.
+	//
+	// False keeps the pending list working without batch confirm, so an
+	// operator who upgraded the binary but hasn't run the migration isn't
+	// left with a broken page over an optional feature.
+	batchConfirm    bool
 	ragEmbedder     *rag.Embedder // nil if RAG is disabled
 	ragTopK         int
 	ragShowSimilar  bool

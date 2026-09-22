@@ -616,7 +616,13 @@ re-running `pkg/rag/schema.sql` is always safe and picks up new tables
 (section 5), while a database from before the Pending/Confirmed split or
 before the `embedding_model` column needs
 `pkg/rag/migrate_0001_pending_status.sql` and/or
-`pkg/rag/migrate_0002_embedding_model.sql` run by hand first. Also don't
+`pkg/rag/migrate_0002_embedding_model.sql` run by hand first, and one from
+before batch confirm needs `pkg/rag/migrate_0003_dup_of.sql`.
+
+`migrate_0003` is the only one you can skip without breaking anything:
+without the `dup_of` column the pending list still works, it just can't
+offer batch confirm and says so on the page (and once at startup). Run it
+and restart to turn the feature on. Also don't
 change `rag.embedding_model` casually across an upgrade: pgvector only
 enforces the dimension, not the model, and the startup warning about
 mismatched rows is the only thing that will tell you the old vectors no
