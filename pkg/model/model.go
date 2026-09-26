@@ -494,23 +494,7 @@ func (c *GeminiClient) Chat(messages []Message, opts *ChatOptions) (string, erro
 		}
 	}
 
-	var system *geminiContent
-	contents := make([]geminiContent, 0, len(messages))
-	for _, m := range messages {
-		if m.Role == "system" {
-			if system == nil {
-				system = &geminiContent{Parts: []geminiPart{{Text: m.Content}}}
-			} else {
-				system.Parts = append(system.Parts, geminiPart{Text: "\n\n" + m.Content})
-			}
-			continue
-		}
-		role := m.Role
-		if role == "assistant" {
-			role = "model"
-		}
-		contents = append(contents, geminiContent{Role: role, Parts: []geminiPart{{Text: m.Content}}})
-	}
+	system, contents := toGeminiContents(messages)
 
 	reqBody := geminiRequest{
 		Contents:          contents,
@@ -587,6 +571,31 @@ func (c *GeminiClient) ModelName() string {
 
 func (c *GeminiClient) Backend() string {
 	return "gemini"
+}
+
+// toGeminiContents splits a conversation into Gemini's separate
+// systemInstruction and contents list, renaming "assistant" to "model".
+// Shared by GeminiClient (API key, generativelanguage.googleapis.com) and
+// VertexAIClient (ADC, aiplatform.googleapis.com), which speak the same
+// generateContent request shape.
+func toGeminiContents(messages []Message) (system *geminiContent, contents []geminiContent) {
+	contents = make([]geminiContent, 0, len(messages))
+	for _, m := range messages {
+		if m.Role == "system" {
+			if system == nil {
+				system = &geminiContent{Parts: []geminiPart{{Text: m.Content}}}
+			} else {
+				system.Parts = append(system.Parts, geminiPart{Text: "\n\n" + m.Content})
+			}
+			continue
+		}
+		role := m.Role
+		if role == "assistant" {
+			role = "model"
+		}
+		contents = append(contents, geminiContent{Role: role, Parts: []geminiPart{{Text: m.Content}}})
+	}
+	return system, contents
 }
 
 type geminiPart struct {
