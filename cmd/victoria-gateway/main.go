@@ -244,9 +244,10 @@ func runServe(args []string) {
 	}
 
 	// webUI wraps a web-page handler with cfg.WebUIAuth's check — nil
-	// (the default) makes this a no-op, preserving every existing
-	// deployment's behavior exactly. See auth.go.
-	webUI := webUIAuthMiddleware(cfg.WebUIAuth)
+	// (the default) makes that part a no-op — and with sameOriginOnly,
+	// which refuses browser writes coming from another site whether or
+	// not auth is on. See auth.go.
+	webUI := webUIChain(webUIAuthMiddleware(cfg.WebUIAuth))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook/alertmanager", h.handleAlertmanagerWebhook)
