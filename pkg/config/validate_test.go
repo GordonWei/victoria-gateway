@@ -58,3 +58,29 @@ func TestValidateForServe_IncludesValidate(t *testing.T) {
 	c.Summarizer.Endpoint = ""
 	wantErrContaining(t, c.ValidateForServe(), "summarizer.endpoint is not set")
 }
+
+func TestValidate_LegacyNestedLokiEndpointRejected(t *testing.T) {
+	for _, typ := range []string{"", "loki"} {
+		c := validConfig()
+		c.LogSource = &LogSourceConfig{Type: typ, Loki: &LokiEndpointConfig{Endpoint: "http://other:3100"}}
+		err := c.Validate()
+		wantErrContaining(t, err, "log_source.loki.endpoint (http://other:3100) is only supported under log_sources with hybrid_routes")
+		wantErrContaining(t, err, "set the top-level loki.endpoint instead")
+	}
+	// An empty nested block changes nothing and stays accepted.
+	c := validConfig()
+	c.LogSource = &LogSourceConfig{Loki: &LokiEndpointConfig{}}
+	if err := c.Validate(); err != nil {
+		t.Errorf("empty log_source.loki: Validate = %v, want nil", err)
+	}
+	// The same override under log_sources (hybrid) is the supported place.
+	h := validHybridConfig()
+	for _, ls := range h.LogSources {
+		if ls.Type == "" || ls.Type == "loki" {
+			ls.Loki = &LokiEndpointConfig{Endpoint: "http://other:3100"}
+		}
+	}
+	if err := h.Validate(); err != nil {
+		t.Errorf("hybrid log_sources loki.endpoint: Validate = %v, want nil", err)
+	}
+}

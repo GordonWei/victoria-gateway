@@ -197,9 +197,8 @@ type LogSourceConfig struct {
 	// instance. Only meaningful inside log_sources (a hybrid deployment
 	// may have more than one Loki, e.g. one per site); unset falls back
 	// to the top-level loki.endpoint. Ignored by the other types, and
-	// ignored on the legacy top-level log_source block too (that path
-	// always uses loki.endpoint; startup prints a warning if this is set
-	// there).
+	// rejected by Validate on the legacy top-level log_source block (that
+	// path always uses loki.endpoint).
 	Loki *LokiEndpointConfig `yaml:"loki"`
 }
 
@@ -702,6 +701,12 @@ func (c *Config) ValidateForServe() error {
 // startup instead of surfacing as "logs are always empty" on the first
 // alert.
 func (c *Config) validateLogSource() error {
+	// The per-source Loki endpoint is a log_sources feature. On the
+	// legacy block it used to be silently ignored, leaving an operator
+	// believing logs came from somewhere they didn't — refuse it instead.
+	if c.LogSource != nil && c.LogSource.Loki != nil && c.LogSource.Loki.Endpoint != "" {
+		return fmt.Errorf("log_source.loki.endpoint (%s) is only supported under log_sources with hybrid_routes — without hybrid_routes, set the top-level loki.endpoint instead", c.LogSource.Loki.Endpoint)
+	}
 	if (c.LogSource == nil || c.LogSource.Type == "" || c.LogSource.Type == "loki") && c.Loki.Endpoint == "" {
 		return fmt.Errorf("loki.endpoint is not set in config.yaml")
 	}
