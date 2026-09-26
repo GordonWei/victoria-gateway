@@ -75,6 +75,16 @@ summarizer:
   # idle can exceed 60s) so the first analysis after an idle period doesn't
   # die at the default limit.
   timeout_sec: 180
+  # Optional, on by default. A GET /v1/models health check (bounded by
+  # probe_timeout_sec) before each call, and a per-backend circuit breaker
+  # that skips a backend for breaker_cooldown_sec after breaker_failures
+  # unavailable failures in a row — so a host that accepts connections but
+  # never answers costs seconds per alert, not timeout_sec. 0 turns either
+  # off; fallbacks inherit these unless they set their own. README: "Health
+  # checks and the circuit breaker".
+  # probe_timeout_sec: 5
+  # breaker_failures: 2
+  # breaker_cooldown_sec: 120
   # Optional. Other local model servers to try, in order, when the one
   # above can't be reached (connection refused, timeout, non-2xx). A reply
   # that isn't valid JSON is still an answer and doesn't switch. If every

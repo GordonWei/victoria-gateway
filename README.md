@@ -168,6 +168,9 @@ summarizer:
                      # model server's cold-load time (LM Studio JIT reload after idle).
                      # Connecting is capped separately at 5s, so a host that's
                      # powered off fails over in seconds, not after timeout_sec.
+  # probe_timeout_sec: 5      # optional; health check before each call, 0 = off
+  # breaker_failures: 2       # optional; circuit breaker, 0 = off
+  # breaker_cooldown_sec: 120 # optional; see "Health checks and the circuit breaker"
 
 telegram:
   bot_token: ""   # leave empty to disable the push
@@ -978,6 +981,66 @@ If an escalation target is configured, also set `escalation.max_per_hour`:
 while the local model is down every alert becomes a cloud call, and
 this is what caps that bill during an outage or an alert storm.
 
+### Health checks and the circuit breaker
+
+The 5-second connect cap only helps when the host is gone. A Mac that
+went to sleep, or a model server that's wedged, still accepts the TCP
+connection and then never sends a response header — without anything
+else, every alert would wait out the whole `timeout_sec` (180s in the
+example above) before moving on, and each fallback adds its own wait on
+top. Two things, both on by default, stop that:
+
+- **Health check.** Before every chat call, each backend gets a
+  `GET /v1/models` bounded by `probe_timeout_sec` (default 5). If that
+  times out, can't connect, or gets a 5xx or 429, the backend is skipped
+  as unavailable — the chat isn't sent — and the next fallback, or the
+  cloud, takes the alert. Any other answer, such as a 404 from a server
+  that doesn't implement `/v1/models` or a 401, says nothing about
+  whether chat works, so chat goes ahead (logged once per backend).
+  `/v1/models` is a static list on LM Studio, Ollama and the MLX shim and
+  answers while a generation is running, so the check adds milliseconds
+  on a healthy host.
+- **Circuit breaker.** After `breaker_failures` (default 2) unavailable
+  failures in a row — health check or chat — the backend's breaker opens
+  and for `breaker_cooldown_sec` (default 120) it's skipped outright, with
+  no health check and no chat. When the cooldown ends, the next alert is
+  let through as a trial while concurrent alerts keep skipping: if it
+  gets an answer the breaker closes, otherwise it opens for another
+  cooldown. Only unavailable failures count; any answer, including one
+  that isn't valid JSON or a 4xx configuration error, resets the count.
+
+```yaml
+summarizer:
+  endpoint: "http://llm-a:8091"
+  timeout_sec: 180
+  probe_timeout_sec: 5         # 0 turns the health check off
+  breaker_failures: 2          # 0 turns the breaker off
+  breaker_cooldown_sec: 120    # 0 turns the breaker off too
+  fallbacks:
+    - endpoint: "http://llm-b:1234"
+      probe_timeout_sec: 10    # a fallback inherits the three values above
+                               # unless it sets its own
+```
+
+A config that doesn't mention these fields gets the defaults. Setting
+`probe_timeout_sec: 0` and `breaker_failures: 0` gives exactly the
+behavior from before they existed. Negative values are rejected at
+startup.
+
+When every local backend is skipped — each one's health check failed or
+its breaker is open — the alert goes down the same **If every local
+model is down** path as before: escalated with reason `local LLM
+unavailable` when there's a target, failed otherwise. Breaker changes
+are logged with the backend name (`circuit breaker for summarizer
+opened after 2 consecutive unavailable failure(s); skipping it for
+2m0s`, `... half-open after 2m0s; letting one alert through to test it`,
+`... closed; it is answering again`, `... re-opened: the trial alert
+failed too`), and `/metrics` has
+`victoria_gateway_local_llm_breaker_open{backend=...}` (1 while open or
+testing, 0 while closed) and
+`victoria_gateway_local_llm_skipped_total{backend=...,reason="probe"|"breaker"}`.
+Breaker state lives in memory, so a restart starts every backend closed.
+
 ### Escalation target fallbacks
 
 Single-`cloud` configs add `cloud_fallbacks`, a list of blocks with the
@@ -1459,11 +1522,13 @@ unlabeled `0`.
 | `victoria_gateway_escalation_no_target_total` | `route` | `legacy` |
 | `victoria_gateway_loki_query_duration_seconds_sum`/`_count` (every log backend, despite the name) | `log_source` (log source name) | the type: `loki`, `cloudwatch`, `gcp_logging` |
 | `victoria_gateway_log_query_refused_total` (alert summarized without logs because its search term was refused) | `log_source` | as above |
+| `victoria_gateway_cloud_llm_duration_seconds_sum`/`_count` | `target` | as for `escalations_total` |
+| `victoria_gateway_local_llm_skipped_total` (local backend skipped without a chat call) | `backend` (`summarizer` or `summarizer.fallbacks[N]`), `reason` (`probe` or `breaker`) | same |
+| `victoria_gateway_local_llm_breaker_open` (gauge, 1 = open) | `backend` | same; one series per backend with a breaker from startup, none if every breaker is off |
 
 Label values are written with the text format's own escaping (only `\`,
 `"` and newline), so a route, target or channel name comes back from a
 scrape exactly as configured.
-| `victoria_gateway_cloud_llm_duration_seconds_sum`/`_count` | `target` | as for `escalations_total` |
 
 Or in a container — same image either way, two deployment shapes on top
 of it depending on where the rest of your monitoring stack already runs:
