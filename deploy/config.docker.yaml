@@ -101,10 +101,21 @@ summarizer:
 # or the local model's own reply asks to escalate (see README's Triage
 # section).
 # cloud:
-#   provider: "gemini"   # optional, defaults to "gemini"; "anthropic" also supported
+#   provider: "gemini"   # optional, defaults to "gemini"; also "anthropic", "bedrock", "azure-openai", "aws-devops-agent", "openai-compatible", "vertex-ai", "gcp-cloud-assist"
 #   endpoint: ""   # optional; each provider has its own default
 #   api_key: "REPLACE-gemini-api-key"
 #   model: "gemini-2.5-flash"
+# Other providers, same block (README: "Triage"):
+#   provider: "openai-compatible"   # vLLM / LiteLLM / OpenRouter / Ollama
+#   endpoint: "http://REPLACE:4000" # base URL, /v1/chat/completions is appended
+#   model: "REPLACE-model-name"
+#   api_key: ""                     # optional
+#   timeout_sec: 120                # optional, default 60
+# ---
+#   provider: "vertex-ai"           # Gemini on Vertex AI, Application Default Credentials, no api_key
+#   project: "REPLACE-gcp-project"
+#   model: "gemini-2.5-flash"
+#   location: "global"              # optional, default global; or e.g. us-central1, us, eu
 # Optional. Tried in order when the cloud block's own call fails; one
 # escalation uses one max_per_hour slot however many of these it tries.
 # Not allowed together with hybrid_routes (list targets per route there).
@@ -122,15 +133,25 @@ summarizer:
 #   aws:
 #     type: cloudwatch
 #     cloudwatch: {region: "us-east-1", log_group_names: ["/aws/lambda/REPLACE"]}
+#   gcp:
+#     type: gcp_logging
+#     gcp_logging: {project_id: "REPLACE-gcp-project"}
 # escalation_targets:
 #   default: {provider: "gemini", model: "gemini-2.5-flash"}   # key: VICTORIA_GATEWAY_ESCALATION_DEFAULT_API_KEY
 #   aws:
 #     provider: "aws-devops-agent"
 #     aws_devops_agent: {user_id: "REPLACE", space_id: "REPLACE"}
+#   gcp:   # needs Premium Support or account-team access to run investigations (README)
+#     provider: "gcp-cloud-assist"
+#     project: "REPLACE-gcp-project"
+#     poll_timeout_sec: 600   # optional, default 600
 # hybrid_routes:
 #   - matchers: {cloud: "aws"}
 #     log_source: aws
 #     escalation: [aws, default]   # or a single name; later ones only if earlier fail
+#   - matchers: {cloud: "gcp"}
+#     log_source: gcp
+#     escalation: [gcp, default]
 #   - default: true
 #     log_source: onprem
 #     escalation: default
