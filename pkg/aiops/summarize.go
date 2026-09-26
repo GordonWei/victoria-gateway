@@ -63,6 +63,9 @@ type SummarizeResult struct {
 type Summarizer struct {
 	steps []SummarizerBackend
 	state []*backendState
+	// now is the breakers' clock; tests swap it to step through a
+	// cooldown without sleeping.
+	now func() time.Time
 }
 
 // SummarizerBackend is one local model a Summarizer can call. Name only
@@ -76,6 +79,13 @@ type SummarizerBackend struct {
 	// unavailable skips this backend without calling chat at all. 0
 	// calls chat directly, as before the check existed.
 	ProbeTimeout time.Duration
+	// BreakerFailures and BreakerCooldown configure this backend's
+	// circuit breaker: after BreakerFailures consecutive unavailable
+	// failures it is skipped outright (no probe, no chat) for
+	// BreakerCooldown, then one alert is let through to test it. Either
+	// being 0 turns the breaker off.
+	BreakerFailures int
+	BreakerCooldown time.Duration
 }
 
 // Prober is the optional health check a summarizer backend can offer —
@@ -93,6 +103,8 @@ type backendState struct {
 	// error, calling chat anyway" line print once per backend rather than
 	// once per alert.
 	probeInconclusive sync.Once
+	// breaker is nil when the backend has no circuit breaker.
+	breaker *breaker
 }
 
 // NewSummarizer wraps a single LLM with no fallbacks — the original
@@ -104,9 +116,9 @@ func NewSummarizer(llm model.LLM) *Summarizer {
 // NewSummarizerWithFallbacks builds a Summarizer that tries backends in
 // order. backends[0] is the primary.
 func NewSummarizerWithFallbacks(backends []SummarizerBackend) *Summarizer {
-	s := &Summarizer{steps: backends, state: make([]*backendState, len(backends))}
-	for i := range backends {
-		s.state[i] = &backendState{}
+	s := &Summarizer{steps: backends, state: make([]*backendState, len(backends)), now: time.Now}
+	for i, b := range backends {
+		s.state[i] = &backendState{breaker: newBreaker(b.BreakerFailures, b.BreakerCooldown)}
 	}
 	return s
 }
@@ -197,13 +209,50 @@ func (s *Summarizer) Summarize(alert Alert, logs []LogEntry, ragContext string) 
 	return SummarizeResult{}, markUnavailable(fmt.Errorf("all %d local summarizers failed: %s", len(s.steps), strings.Join(failures, "; ")))
 }
 
-// try runs one backend: the health check when configured, then the chat.
-func (s *Summarizer) try(i int, alert Alert, logs []LogEntry, ragContext string) (SummarizeResult, error) {
-	step := s.steps[i]
+// try runs one backend: its circuit breaker, then the health check, then
+// the chat — each only when configured.
+func (s *Summarizer) try(i int, alert Alert, logs []LogEntry, ragContext string) (res SummarizeResult, err error) {
+	step, b := s.steps[i], s.state[i].breaker
+	if b != nil {
+		ok, retryIn, tr := b.allow(s.now())
+		s.breakerChanged(i, tr)
+		if !ok {
+			wait := "a trial alert is already testing it"
+			if retryIn > 0 {
+				wait = "next try in " + retryIn.Round(time.Second).String()
+			}
+			return SummarizeResult{}, markUnavailable(fmt.Errorf("summarize: %s skipped: circuit breaker open (%s)", step.Name, wait))
+		}
+		// Deferred, with a panic counted as a failure, so a trial can
+		// never leave the breaker half-open and the backend skipped for
+		// good.
+		defer func() {
+			if r := recover(); r != nil {
+				s.breakerChanged(i, b.record(s.now(), true))
+				panic(r)
+			}
+			s.breakerChanged(i, b.record(s.now(), IsLLMUnavailable(err)))
+		}()
+	}
 	if err := s.probe(i); err != nil {
 		return SummarizeResult{}, err
 	}
 	return SummarizeWithLLM(step.LLM, alert, logs, ragContext)
+}
+
+// breakerChanged logs a breaker transition on backend i.
+func (s *Summarizer) breakerChanged(i int, tr breakerTransition) {
+	step, b := s.steps[i], s.state[i].breaker
+	switch tr {
+	case transitionOpen:
+		log.Printf("aiops: circuit breaker for %s opened after %d consecutive unavailable failure(s); skipping it for %s", step.Name, b.threshold, b.cooldown)
+	case transitionReopen:
+		log.Printf("aiops: circuit breaker for %s re-opened: the trial alert failed too; skipping it for another %s", step.Name, b.cooldown)
+	case transitionHalfOpen:
+		log.Printf("aiops: circuit breaker for %s half-open after %s; letting one alert through to test it", step.Name, b.cooldown)
+	case transitionClose:
+		log.Printf("aiops: circuit breaker for %s closed; it is answering again", step.Name)
+	}
 }
 
 // probe runs backend i's health check and returns a non-nil error only

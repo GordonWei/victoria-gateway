@@ -341,6 +341,18 @@ type LLMConfig struct {
 	// summarizer's value. A pointer so an explicit 0 is distinguishable
 	// from "not written".
 	ProbeTimeoutSec *int `yaml:"probe_timeout_sec,omitempty"`
+
+	// BreakerFailures and BreakerCooldownSec set this backend's circuit
+	// breaker: after BreakerFailures consecutive unavailable failures
+	// (connect error, timeout, 5xx, 429, failed health check) the backend
+	// is skipped outright — no health check, no chat — for
+	// BreakerCooldownSec seconds, then one alert is let through to test
+	// it. Unset means DefaultSummarizerBreakerFailures /
+	// DefaultSummarizerBreakerCooldownSec; 0 in either turns the breaker
+	// off. A fallbacks entry inherits the top-level values unless it sets
+	// its own.
+	BreakerFailures    *int `yaml:"breaker_failures,omitempty"`
+	BreakerCooldownSec *int `yaml:"breaker_cooldown_sec,omitempty"`
 }
 
 // DefaultSummarizerProbeTimeoutSec is summarizer.probe_timeout_sec's
@@ -350,16 +362,29 @@ type LLMConfig struct {
 // ever trips on a host that isn't really there.
 const DefaultSummarizerProbeTimeoutSec = 5
 
+// DefaultSummarizerBreakerFailures and DefaultSummarizerBreakerCooldownSec
+// are the circuit breaker defaults: two failures in a row is past a
+// one-off blip, and two minutes spaces the retries out without leaving a
+// backend that came back idle for long.
+const (
+	DefaultSummarizerBreakerFailures    = 2
+	DefaultSummarizerBreakerCooldownSec = 120
+)
+
 // SummarizerHealth is one summarizer backend's resolved health-check
 // settings, with defaults and fallback inheritance already applied.
 type SummarizerHealth struct {
-	ProbeTimeoutSec int
+	ProbeTimeoutSec    int
+	BreakerFailures    int
+	BreakerCooldownSec int
 }
 
 // DefaultSummarizerHealth is what a summarizer block with none of the
 // health-check fields written resolves to.
 var DefaultSummarizerHealth = SummarizerHealth{
-	ProbeTimeoutSec: DefaultSummarizerProbeTimeoutSec,
+	ProbeTimeoutSec:    DefaultSummarizerProbeTimeoutSec,
+	BreakerFailures:    DefaultSummarizerBreakerFailures,
+	BreakerCooldownSec: DefaultSummarizerBreakerCooldownSec,
 }
 
 // Health resolves c's health-check settings: every field c leaves unset
@@ -371,6 +396,12 @@ func (c LLMConfig) Health(inherit SummarizerHealth) SummarizerHealth {
 	if c.ProbeTimeoutSec != nil {
 		h.ProbeTimeoutSec = *c.ProbeTimeoutSec
 	}
+	if c.BreakerFailures != nil {
+		h.BreakerFailures = *c.BreakerFailures
+	}
+	if c.BreakerCooldownSec != nil {
+		h.BreakerCooldownSec = *c.BreakerCooldownSec
+	}
 	return h
 }
 
@@ -379,6 +410,12 @@ func (c LLMConfig) Health(inherit SummarizerHealth) SummarizerHealth {
 func (c LLMConfig) validateHealth(label string) error {
 	if c.ProbeTimeoutSec != nil && *c.ProbeTimeoutSec < 0 {
 		return fmt.Errorf("%s.probe_timeout_sec must be >= 0 (0 turns the health check off)", label)
+	}
+	if c.BreakerFailures != nil && *c.BreakerFailures < 0 {
+		return fmt.Errorf("%s.breaker_failures must be >= 0 (0 turns the circuit breaker off)", label)
+	}
+	if c.BreakerCooldownSec != nil && *c.BreakerCooldownSec < 0 {
+		return fmt.Errorf("%s.breaker_cooldown_sec must be >= 0 (0 turns the circuit breaker off)", label)
 	}
 	return nil
 }
