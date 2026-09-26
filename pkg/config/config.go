@@ -1014,14 +1014,15 @@ func validateCloudEntry(label string, c *CloudConfig) error {
 			return fmt.Errorf("%s.provider is \"gcp-cloud-assist\" but %s.project is missing", label, label)
 		}
 	default:
-		return fmt.Errorf("%s.provider is %q, want %s", label, c.Provider, cloudProviderList)
+		return fmt.Errorf("%s.provider is %q, want %s", label, c.Provider, CloudProviderList)
 	}
 	return validateCloudCommon(label, c)
 }
 
-// cloudProviderList is every accepted provider value, as quoted in the
-// "unknown provider" errors.
-const cloudProviderList = `"gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", "openai-compatible", "vertex-ai", or "gcp-cloud-assist"`
+// CloudProviderList is every accepted provider value, as quoted in the
+// "unknown provider" errors here and in cmd/victoria-gateway's
+// buildCloud. A new provider is added here once.
+const CloudProviderList = `"gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", "openai-compatible", "vertex-ai", or "gcp-cloud-assist"`
 
 // gcpProjectPattern and gcpLocationPattern are deliberately loose — they
 // don't try to be GCP's exact naming rules, only to stop a value that

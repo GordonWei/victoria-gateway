@@ -8,10 +8,6 @@ import (
 	"github.com/gordonwei/victoria-gateway/pkg/model"
 )
 
-// cloudProviderNames is every provider buildCloud accepts, as quoted in
-// its "unknown provider" error.
-const cloudProviderNames = `"gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", "openai-compatible", "vertex-ai", or "gcp-cloud-assist"`
-
 // buildCloud constructs the escalation client one cloud block describes —
 // the legacy top-level cloud (label "cloud") or one named entry of
 // escalation_targets (label "escalation_targets.<name>"). Shared by both
@@ -110,6 +106,6 @@ func buildCloud(label string, c *config.CloudConfig) (model.LLM, error) {
 			PollTimeout:  time.Duration(c.PollTimeoutSec) * time.Second,
 		}), nil
 	default:
-		return nil, fmt.Errorf("unknown %s.provider %q (must be %s)", label, c.Provider, cloudProviderNames)
+		return nil, fmt.Errorf("unknown %s.provider %q (must be %s)", label, c.Provider, config.CloudProviderList)
 	}
 }
