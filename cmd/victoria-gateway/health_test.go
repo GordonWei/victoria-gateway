@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,4 +50,41 @@ func TestSummarizeOne_HungLocal_ProbeEscalatesWithoutWaitingTimeout(t *testing.T
 		t.Errorf("summarizeOne took %v, want roughly the 1s probe timeout", d)
 	}
 	wantContains(t, "log", logs(), "local summarizer unavailable", "health check failed", "no answer within 1s")
+}
+
+// A config that doesn't mention any of the new fields gets the breaker:
+// after two unavailable alerts the local model is no longer contacted,
+// and alerts still go to the cloud.
+func TestSummarizeOne_DefaultBreaker_OpenLocalStillEscalates(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+	var localRequests atomic.Int64
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		localRequests.Add(1)
+		http.Error(w, "no model loaded", http.StatusServiceUnavailable)
+	}))
+	defer down.Close()
+	var cloudCalls int
+	cloud := countingCloud(t, "cloud took over", http.StatusOK, &cloudCalls)
+	logs := captureLog(t)
+
+	h := newTestHandler(t, lokiSrv.URL, down.URL)
+	h.summarizer = buildSummarizer(config.LLMConfig{Endpoint: down.URL, Model: "m", TimeoutSec: 180})
+	h.cloud = anthropicAt(cloud.URL)
+	h.legacyEscalations = []escalationStep{{display: "bedrock", llm: h.cloud}}
+	h.metrics = &metrics.Counters{}
+
+	for i := range 4 {
+		res := h.summarizeOne(testAlert())
+		if res.Error != "" || res.AnalyzedBy != "cloud" {
+			t.Fatalf("alert %d: res = %+v, want the cloud's answer", i+1, res)
+		}
+	}
+	if got := localRequests.Load(); got != 2 {
+		t.Errorf("local requests = %d, want 2 (one probe per alert until the breaker opened)", got)
+	}
+	if cloudCalls != 4 {
+		t.Errorf("cloud calls = %d, want 4", cloudCalls)
+	}
+	wantContains(t, "log", logs(), "circuit breaker for summarizer opened", "summarizer skipped: circuit breaker open")
 }

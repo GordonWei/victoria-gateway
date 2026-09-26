@@ -34,8 +34,9 @@ func TestLoad_SummarizerHealthTopLevelOverrideIsInherited(t *testing.T) {
 summarizer:
   endpoint: "http://mlx:8091"
   probe_timeout_sec: 0
+  breaker_failures: 5
   fallbacks:
-    - {endpoint: "http://a:1234", probe_timeout_sec: 3}
+    - {endpoint: "http://a:1234", probe_timeout_sec: 3, breaker_cooldown_sec: 0}
     - {endpoint: "http://b:1234"}
 loki: {endpoint: "http://loki:3100"}
 `)
@@ -49,6 +50,12 @@ loki: {endpoint: "http://loki:3100"}
 	if got := c.Summarizer.Fallbacks[1].Health(top).ProbeTimeoutSec; got != 0 {
 		t.Errorf("fallbacks[1] probe_timeout_sec = %d, want the top-level 0 inherited", got)
 	}
+	if top.BreakerFailures != 5 || top.BreakerCooldownSec != DefaultSummarizerBreakerCooldownSec {
+		t.Errorf("top breaker = %d/%d, want 5 and the default cooldown", top.BreakerFailures, top.BreakerCooldownSec)
+	}
+	if got := c.Summarizer.Fallbacks[0].Health(top); got.BreakerFailures != 5 || got.BreakerCooldownSec != 0 {
+		t.Errorf("fallbacks[0] breaker = %d/%d, want 5 inherited and its own 0", got.BreakerFailures, got.BreakerCooldownSec)
+	}
 }
 
 func TestValidate_SummarizerHealthRejectsNegative(t *testing.T) {
@@ -59,4 +66,18 @@ func TestValidate_SummarizerHealthRejectsNegative(t *testing.T) {
 	c = validConfig()
 	c.Summarizer.Fallbacks = []LLMConfig{{Endpoint: "http://b", ProbeTimeoutSec: intp(-1)}}
 	wantErrContaining(t, c.Validate(), "summarizer.fallbacks[0].probe_timeout_sec must be >= 0")
+
+	c = validConfig()
+	c.Summarizer.BreakerFailures = intp(-1)
+	wantErrContaining(t, c.Validate(), "summarizer.breaker_failures must be >= 0")
+
+	c = validConfig()
+	c.Summarizer.Fallbacks = []LLMConfig{{Endpoint: "http://b", BreakerCooldownSec: intp(-5)}}
+	wantErrContaining(t, c.Validate(), "summarizer.fallbacks[0].breaker_cooldown_sec must be >= 0")
+
+	c = validConfig()
+	c.Summarizer.ProbeTimeoutSec, c.Summarizer.BreakerFailures, c.Summarizer.BreakerCooldownSec = intp(0), intp(0), intp(0)
+	if err := c.Validate(); err != nil {
+		t.Errorf("all-zero health settings (everything off) rejected: %v", err)
+	}
 }

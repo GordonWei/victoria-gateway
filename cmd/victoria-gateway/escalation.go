@@ -111,7 +111,9 @@ func buildSummarizer(c config.LLMConfig) *aiops.Summarizer {
 				APIKey:   lc.APIKey,
 				Timeout:  time.Duration(lc.TimeoutSec) * time.Second,
 			}),
-			ProbeTimeout: time.Duration(h.ProbeTimeoutSec) * time.Second,
+			ProbeTimeout:    time.Duration(h.ProbeTimeoutSec) * time.Second,
+			BreakerFailures: h.BreakerFailures,
+			BreakerCooldown: time.Duration(h.BreakerCooldownSec) * time.Second,
 		}
 	}
 	top := c.Health(config.DefaultSummarizerHealth)
