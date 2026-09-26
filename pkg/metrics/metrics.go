@@ -32,6 +32,7 @@ type Counters struct {
 	escalationsTotal                atomic.Int64
 	escalationFailuresTotal         atomic.Int64
 	escalationRateLimitedTotal      atomic.Int64
+	escalationNoTargetTotal         atomic.Int64
 	ragCaptureTotal                 atomic.Int64
 	ragCaptureFailuresTotal         atomic.Int64
 	ragSearchFailuresTotal          atomic.Int64
@@ -139,6 +140,15 @@ func (c *Counters) IncEscalationsTotal() {
 func (c *Counters) IncEscalationFailuresTotal() {
 	if c != nil {
 		c.escalationFailuresTotal.Add(1)
+	}
+}
+
+// IncEscalationNoTargetTotal counts alerts that asked to escalate but whose
+// route had nowhere to escalate to — a hybrid route with no escalation, or
+// a legacy config with no cloud block.
+func (c *Counters) IncEscalationNoTargetTotal() {
+	if c != nil {
+		c.escalationNoTargetTotal.Add(1)
 	}
 }
 
@@ -252,8 +262,9 @@ func (c *Counters) snapshot() []counterDef {
 		{"victoria_gateway_resolved_skipped_total", "Resolved deliveries received (never analyzed).", c.resolvedSkippedTotal.Load()},
 		{"victoria_gateway_webhook_auth_rejected_total", "Webhook requests rejected for missing or wrong Basic Auth credentials.", c.webhookAuthRejectedTotal.Load()},
 		{"victoria_gateway_escalations_total", "Alerts successfully escalated to and answered by the cloud model.", c.escalationsTotal.Load()},
-		{"victoria_gateway_escalation_failures_total", "Escalation attempts where the cloud call itself failed (fell back to the local result).", c.escalationFailuresTotal.Load()},
+		{"victoria_gateway_escalation_failures_total", "Escalation attempts where the cloud call itself failed (fell back to the next target, or the local result).", c.escalationFailuresTotal.Load()},
 		{"victoria_gateway_escalation_rate_limited_total", "Escalations skipped because escalation.max_per_hour was already reached (stayed on the local result).", c.escalationRateLimitedTotal.Load()},
+		{"victoria_gateway_escalation_no_target_total", "Alerts that would have escalated but whose route has no escalation target (stayed on the local result).", c.escalationNoTargetTotal.Load()},
 		{"victoria_gateway_rag_capture_total", "Incidents successfully captured as a Pending RAG record.", c.ragCaptureTotal.Load()},
 		{"victoria_gateway_rag_capture_failures_total", "RAG capture attempts that failed (embedding or Postgres insert error).", c.ragCaptureFailuresTotal.Load()},
 		{"victoria_gateway_rag_search_failures_total", "RAG past-incident lookups that failed (embedding or Postgres search error).", c.ragSearchFailuresTotal.Load()},

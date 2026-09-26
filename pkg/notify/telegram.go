@@ -116,6 +116,9 @@ func FormatTelegramText(msg Message) string {
 	case msg.Error != "":
 		text = fmt.Sprintf("⚠️ <b>%s</b> (%s)\n無法產生摘要：%s",
 			html.EscapeString(msg.AlertName), html.EscapeString(msg.Host), html.EscapeString(msg.Error))
+	case msg.AnalyzedBy == "cloud" && msg.EscalatedTo != "":
+		text = fmt.Sprintf("🔍 <b>%s</b> (%s)\n<i>已升級至 cloud model（%s）深度分析</i>\n\n%s",
+			html.EscapeString(msg.AlertName), html.EscapeString(msg.Host), html.EscapeString(msg.EscalatedTo), html.EscapeString(msg.Summary))
 	case msg.AnalyzedBy == "cloud":
 		text = fmt.Sprintf("🔍 <b>%s</b> (%s)\n<i>已升級至 cloud model 深度分析</i>\n\n%s",
 			html.EscapeString(msg.AlertName), html.EscapeString(msg.Host), html.EscapeString(msg.Summary))

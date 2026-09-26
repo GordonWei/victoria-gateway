@@ -21,8 +21,8 @@ func validHybridConfig() *Config {
 		"aws":     {Provider: "aws-devops-agent", DevOpsAgent: &DevOpsAgentConfig{SpaceID: "s"}},
 	}
 	c.HybridRoutes = []HybridRouteConfig{
-		{Matchers: map[string]string{"cloud": "aws"}, LogSource: "aws", Escalation: "aws"},
-		{Default: true, LogSource: "onprem", Escalation: "default"},
+		{Matchers: map[string]string{"cloud": "aws"}, LogSource: "aws", Escalation: EscalationList{"aws"}},
+		{Default: true, LogSource: "onprem", Escalation: EscalationList{"default"}},
 	}
 	return c
 }
@@ -51,8 +51,8 @@ func TestValidateHybrid_TopLevelLokiNotRequiredWhenNoLokiSource(t *testing.T) {
 		"gcp": {Type: "gcp_logging", GCPLogging: &GCPLoggingConfig{ProjectID: "p"}},
 	}
 	c.HybridRoutes = []HybridRouteConfig{
-		{Matchers: map[string]string{"cloud": "aws"}, LogSource: "aws", Escalation: "aws"},
-		{Default: true, LogSource: "gcp", Escalation: "default"},
+		{Matchers: map[string]string{"cloud": "aws"}, LogSource: "aws", Escalation: EscalationList{"aws"}},
+		{Default: true, LogSource: "gcp", Escalation: EscalationList{"default"}},
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate() = %v, want nil (no loki source, so loki.endpoint is not needed)", err)
@@ -114,13 +114,13 @@ func TestValidateHybrid_MissingLogSourceName(t *testing.T) {
 
 func TestValidateHybrid_UndefinedEscalation(t *testing.T) {
 	c := validHybridConfig()
-	c.HybridRoutes[0].Escalation = "devops"
+	c.HybridRoutes[0].Escalation = EscalationList{"devops"}
 	wantErrContaining(t, c.Validate(), `hybrid_routes[0]: escalation "devops" is not defined`)
 }
 
 func TestValidateHybrid_RouteWithoutEscalationIsAllowed(t *testing.T) {
 	c := validHybridConfig()
-	c.HybridRoutes[1].Escalation = ""
+	c.HybridRoutes[1].Escalation = nil
 	delete(c.EscalationTargets, "default")
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate() = %v, want nil (a route may opt out of escalation)", err)

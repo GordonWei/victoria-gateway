@@ -2,6 +2,7 @@ package aiops
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -51,14 +52,51 @@ type SummarizeResult struct {
 
 // Summarizer turns an alert + its surrounding logs into a plain-language
 // incident summary via a local LLM (LM Studio, MLX, Ollama — anything
-// pkg/model.OpenAIClient already speaks).
+// pkg/model.OpenAIClient already speaks). It may hold several backends:
+// the first is the primary, the rest are fallbacks tried in order only
+// when the one before couldn't be reached — see Summarize.
 type Summarizer struct {
-	llm model.LLM
+	steps []SummarizerBackend
 }
 
-func NewSummarizer(llm model.LLM) *Summarizer {
-	return &Summarizer{llm: llm}
+// SummarizerBackend is one local model a Summarizer can call. Name only
+// appears in log lines and error messages (e.g. "summarizer",
+// "summarizer.fallbacks[0]"), so an operator can tell which one answered.
+type SummarizerBackend struct {
+	Name string
+	LLM  model.LLM
 }
+
+// NewSummarizer wraps a single LLM with no fallbacks — the original
+// behavior, byte for byte: no extra log lines, same error text.
+func NewSummarizer(llm model.LLM) *Summarizer {
+	return &Summarizer{steps: []SummarizerBackend{{Name: "summarizer", LLM: llm}}}
+}
+
+// NewSummarizerWithFallbacks builds a Summarizer that tries backends in
+// order. backends[0] is the primary.
+func NewSummarizerWithFallbacks(backends []SummarizerBackend) *Summarizer {
+	return &Summarizer{steps: backends}
+}
+
+// ErrLLMUnavailable marks a failure where the model server itself couldn't
+// be used — connection refused, timeout, non-2xx, an unreadable response
+// body — as opposed to the model answering badly (empty reply twice,
+// which a different server isn't obviously better at). Only this kind of
+// failure moves on to the next fallback, and only an error that is this
+// kind all the way down lets the caller escalate instead (see
+// IsLLMUnavailable).
+var ErrLLMUnavailable = errors.New("llm unavailable")
+
+// unavailableError keeps the original error text (so log lines and
+// alertResult.Error read the same as before this existed) while still
+// matching ErrLLMUnavailable under errors.Is.
+type unavailableError struct{ err error }
+
+func (e *unavailableError) Error() string   { return e.err.Error() }
+func (e *unavailableError) Unwrap() []error { return []error{e.err, ErrLLMUnavailable} }
+func markUnavailable(err error) error       { return &unavailableError{err: err} }
+func IsLLMUnavailable(err error) bool       { return errors.Is(err, ErrLLMUnavailable) }
 
 // Summarize produces a structured incident summary for one alert using
 // the Summarizer's configured LLM. logs should already be scoped to the
@@ -67,11 +105,40 @@ func NewSummarizer(llm model.LLM) *Summarizer {
 // incidents retrieved from the RAG store (see pkg/rag) and is inserted
 // into the prompt as extra reference material; pass "" when RAG is
 // disabled or nothing relevant was found.
+//
+// With fallbacks, a backend that fails with ErrLLMUnavailable hands over
+// to the next one (logged, so the switch is visible); any other failure
+// is returned as-is, and a reply that merely fails to parse as JSON
+// (ParseFailed) is a successful answer, never a reason to switch. When
+// every backend is unavailable, the returned error names each failure and
+// still satisfies IsLLMUnavailable.
 func (s *Summarizer) Summarize(alert Alert, logs []LogEntry, ragContext string) (SummarizeResult, error) {
-	if s.llm == nil {
+	if len(s.steps) == 0 || s.steps[0].LLM == nil {
 		return SummarizeResult{}, fmt.Errorf("summarize: no LLM configured")
 	}
-	return SummarizeWithLLM(s.llm, alert, logs, ragContext)
+	if len(s.steps) == 1 {
+		return SummarizeWithLLM(s.steps[0].LLM, alert, logs, ragContext)
+	}
+	var failures []string
+	for i, step := range s.steps {
+		res, err := SummarizeWithLLM(step.LLM, alert, logs, ragContext)
+		if err == nil {
+			if i > 0 {
+				log.Printf("aiops: alert %q summarized by fallback %s after %d failure(s)", alert.Labels["alertname"], step.Name, i)
+			}
+			return res, nil
+		}
+		if !IsLLMUnavailable(err) {
+			return SummarizeResult{}, err
+		}
+		failures = append(failures, fmt.Sprintf("%s: %v", step.Name, err))
+		if i+1 < len(s.steps) {
+			log.Printf("aiops: %s failed for alert %q: %v; trying %s", step.Name, alert.Labels["alertname"], err, s.steps[i+1].Name)
+		} else {
+			log.Printf("aiops: %s failed for alert %q: %v; no local fallback left", step.Name, alert.Labels["alertname"], err)
+		}
+	}
+	return SummarizeResult{}, markUnavailable(fmt.Errorf("all %d local summarizers failed: %s", len(s.steps), strings.Join(failures, "; ")))
 }
 
 // SummarizeWithLLM runs the same prompt against an arbitrary LLM backend.
@@ -139,7 +206,7 @@ var emptyReplyRetrySleep = time.Sleep
 func chatWithEmptyReplyRetry(llm model.LLM, messages []model.Message) (string, error) {
 	reply, err := llm.Chat(messages, &model.ChatOptions{MaxTokens: summarizeMaxTokens, Temperature: 0.2})
 	if err != nil {
-		return "", fmt.Errorf("summarize: %s chat failed: %w", llm.Backend(), err)
+		return "", markUnavailable(fmt.Errorf("summarize: %s chat failed: %w", llm.Backend(), err))
 	}
 	if strings.TrimSpace(reply) != "" {
 		return reply, nil
@@ -150,7 +217,7 @@ func chatWithEmptyReplyRetry(llm model.LLM, messages []model.Message) (string, e
 
 	reply, err = llm.Chat(messages, &model.ChatOptions{MaxTokens: summarizeMaxTokens, Temperature: 0.2})
 	if err != nil {
-		return "", fmt.Errorf("summarize: %s chat failed on retry: %w", llm.Backend(), err)
+		return "", markUnavailable(fmt.Errorf("summarize: %s chat failed on retry: %w", llm.Backend(), err))
 	}
 	if strings.TrimSpace(reply) == "" {
 		return "", fmt.Errorf("summarize: %s returned an empty reply twice in a row", llm.Backend())

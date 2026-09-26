@@ -344,3 +344,37 @@ func TestWebhookChannel_RetriesOn5xx_FailsOn4xx(t *testing.T) {
 		t.Errorf("a 403 must not be retried, got %d attempts", calls4.Load())
 	}
 }
+
+func TestFormatTelegramText_EscalatedTo(t *testing.T) {
+	got := FormatTelegramText(Message{AlertName: "A", Host: "h", Summary: "s", AnalyzedBy: "cloud", EscalatedTo: "aws<prod>"})
+	if !strings.Contains(got, "已升級至 cloud model（aws&lt;prod&gt;）深度分析") {
+		t.Errorf("text = %q, want the escaped target name", got)
+	}
+	// Without a target name the line is exactly what it always was.
+	got = FormatTelegramText(Message{AlertName: "A", Host: "h", Summary: "s", AnalyzedBy: "cloud"})
+	if !strings.Contains(got, "<i>已升級至 cloud model 深度分析</i>") {
+		t.Errorf("text = %q, want the unchanged legacy line", got)
+	}
+}
+
+func TestWebhookChannel_CarriesEscalatedTo(t *testing.T) {
+	var raw map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+	}))
+	defer srv.Close()
+	ch := NewWebhookChannel("itsm", srv.URL, "", nil)
+	if err := ch.Send(Message{AlertName: "A", AnalyzedBy: "cloud", EscalatedTo: "bedrock"}); err != nil {
+		t.Fatal(err)
+	}
+	if raw["escalated_to"] != "bedrock" || raw["analyzed_by"] != "cloud" {
+		t.Errorf("body = %v", raw)
+	}
+	raw = nil
+	if err := ch.Send(Message{AlertName: "A", AnalyzedBy: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["escalated_to"]; ok {
+		t.Errorf("escalated_to present on a local result: %v", raw)
+	}
+}

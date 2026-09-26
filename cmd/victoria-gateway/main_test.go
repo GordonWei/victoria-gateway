@@ -503,6 +503,7 @@ func (f *fakeAuditLogger) List(ctx context.Context, limit int) ([]audit.Entry, e
 type fakeTracker struct {
 	createErr error
 	nextIssue int64
+	bodies    []string // every CreateIssue body, in call order
 
 	states   map[int64]string
 	comments map[int64]string
@@ -521,6 +522,7 @@ func (f *fakeTracker) CreateIssue(ctx context.Context, title, body string) (int6
 	if f.createErr != nil {
 		return 0, f.createErr
 	}
+	f.bodies = append(f.bodies, body)
 	f.nextIssue++
 	return f.nextIssue, nil
 }

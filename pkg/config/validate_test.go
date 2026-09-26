@@ -6,6 +6,7 @@ func TestValidateHybrid_EnvNameCollision(t *testing.T) {
 	c := validHybridConfig()
 	c.EscalationTargets["aws-prod"] = &CloudConfig{Provider: "gemini", APIKey: "k"}
 	c.EscalationTargets["aws_prod"] = &CloudConfig{Provider: "gemini", APIKey: "k"}
+	c.HybridRoutes[0].Escalation = EscalationList{"aws", "aws-prod", "aws_prod"}
 	wantErrContaining(t, c.Validate(), `"aws-prod" and "aws_prod" both map to the env var VICTORIA_GATEWAY_ESCALATION_AWS_PROD_API_KEY`)
 }
 
