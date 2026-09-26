@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 	"unicode"
@@ -56,6 +57,32 @@ func (id LogIdentity) LokiSelector() string {
 	return fmt.Sprintf(`{host=%q}`, id.Host)
 }
 
+// ForLogQuery returns the identity to search logs with: the same
+// identity, except that a Host that is a URL with a scheme and a host —
+// a blackbox probe's instance="https://kmp.tw/health" — is cut down to
+// the URL's hostname ("kmp.tw", no port, path or query). The URL as a
+// whole can't be searched for (SafeTerm refuses its '/', and no Loki
+// stream is labeled with it), while the hostname is what the probed
+// machine's own logs, if any are collected, would carry.
+//
+// Anything that doesn't parse as such a URL is returned unchanged,
+// including host:port instances like "192.0.2.6:9100" (not a valid
+// URL) and "node1:9100" (parses with node1 as the scheme but no host),
+// so non-URL alerts query exactly as before. The display string an
+// alert is shown and filed under is not affected — only the log query.
+func (id LogIdentity) ForLogQuery() LogIdentity {
+	id.Host = searchHost(id.Host)
+	return id
+}
+
+func searchHost(host string) string {
+	u, err := url.Parse(host)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.Hostname() == "" {
+		return host
+	}
+	return u.Hostname()
+}
+
 // SafeTerm returns Term() for splicing into a CloudWatch Logs Insights
 // query or a Cloud Logging filter, or an error if the term contains a
 // character that could step outside the literal it's placed in. Neither
@@ -64,10 +91,10 @@ func (id LogIdentity) LokiSelector() string {
 // string, or bare), so instead of escaping, anything that isn't plausibly
 // part of a host/pod/instance name is refused: quotes, backslash, '/',
 // '|', backtick, parentheses, whitespace and control characters. A host
-// or pod name never contains these. A label that does — a blackbox
-// probe's instance="https://x/health" is the common harmless case, an
-// injection attempt the uncommon one — can't be searched for safely, so
-// that alert's log query is skipped rather than sent.
+// or pod name never contains these, and neither does a probe URL once
+// ForLogQuery has reduced it to its hostname. A label that still does —
+// an odd hostname, or an injection attempt — can't be searched for
+// safely, so that alert's log query is skipped rather than sent.
 // The returned error matches ErrUnsafeSearchTerm under errors.Is, so the
 // caller can carry on without logs instead of failing the alert.
 func (id LogIdentity) SafeTerm() (string, error) {
