@@ -259,3 +259,18 @@ func TestValidate_VertexAIModelID(t *testing.T) {
 		t.Errorf("openai-compatible with a slash in model: Validate = %v, want nil", err)
 	}
 }
+
+// openai-compatible sends no Authorization header without a key, so a
+// legacy cloud block (and a fallback) without api_key is valid for serve,
+// unlike gemini/anthropic.
+func TestValidateForServe_OpenAICompatibleWithoutAPIKey(t *testing.T) {
+	c := validConfig()
+	c.Cloud = &CloudConfig{Provider: "openai-compatible", Endpoint: "http://litellm:4000", Model: "m"}
+	if err := c.ValidateForServe(); err != nil {
+		t.Errorf("legacy cloud: ValidateForServe = %v, want nil", err)
+	}
+	c.CloudFallbacks = []*CloudConfig{{Provider: "openai-compatible", Endpoint: "http://ollama:11434", Model: "m2"}}
+	if err := c.ValidateForServe(); err != nil {
+		t.Errorf("with fallback: ValidateForServe = %v, want nil", err)
+	}
+}
