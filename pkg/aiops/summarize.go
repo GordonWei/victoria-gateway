@@ -1,10 +1,14 @@
 package aiops
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -80,12 +84,14 @@ func NewSummarizerWithFallbacks(backends []SummarizerBackend) *Summarizer {
 }
 
 // ErrLLMUnavailable marks a failure where the model server itself couldn't
-// be used — connection refused, timeout, non-2xx, an unreadable response
-// body — as opposed to the model answering badly (empty reply twice,
-// which a different server isn't obviously better at). Only this kind of
-// failure moves on to the next fallback, and only an error that is this
-// kind all the way down lets the caller escalate instead (see
-// IsLLMUnavailable).
+// be used — connection refused/reset, timeout, 5xx, 429 — as opposed to
+// the model answering badly (empty reply twice, which a different server
+// isn't obviously better at) or our side being misconfigured (401, 400,
+// 404 and the other 4xx: a wrong key, model name or path, which neither a
+// fallback nor the cloud should be quietly papering over). Only this kind
+// of failure moves on to the next fallback, and only an error that is
+// this kind all the way down lets the caller escalate instead (see
+// IsLLMUnavailable and classifyChatError).
 var ErrLLMUnavailable = errors.New("llm unavailable")
 
 // unavailableError keeps the original error text (so log lines and
@@ -97,6 +103,27 @@ func (e *unavailableError) Error() string   { return e.err.Error() }
 func (e *unavailableError) Unwrap() []error { return []error{e.err, ErrLLMUnavailable} }
 func markUnavailable(err error) error       { return &unavailableError{err: err} }
 func IsLLMUnavailable(err error) bool       { return errors.Is(err, ErrLLMUnavailable) }
+
+// classifyChatError marks err unavailable only when it says the server
+// couldn't be reached or couldn't serve us right now: a transport-level
+// failure (dial error, timeout, connection reset — all net.Error, which
+// *url.Error from http.Client.Do also is), a body cut off mid-read, or an
+// HTTP 5xx/429. Every other failure — notably a 4xx other than 429, which
+// means the request itself is wrong — is returned unmarked.
+func classifyChatError(err error) error {
+	var statusErr *model.HTTPStatusError
+	if errors.As(err, &statusErr) {
+		if statusErr.StatusCode >= 500 || statusErr.StatusCode == http.StatusTooManyRequests {
+			return markUnavailable(err)
+		}
+		return err
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, context.DeadlineExceeded) {
+		return markUnavailable(err)
+	}
+	return err
+}
 
 // Summarize produces a structured incident summary for one alert using
 // the Summarizer's configured LLM. logs should already be scoped to the
@@ -206,7 +233,7 @@ var emptyReplyRetrySleep = time.Sleep
 func chatWithEmptyReplyRetry(llm model.LLM, messages []model.Message) (string, error) {
 	reply, err := llm.Chat(messages, &model.ChatOptions{MaxTokens: summarizeMaxTokens, Temperature: 0.2})
 	if err != nil {
-		return "", markUnavailable(fmt.Errorf("summarize: %s chat failed: %w", llm.Backend(), err))
+		return "", classifyChatError(fmt.Errorf("summarize: %s chat failed: %w", llm.Backend(), err))
 	}
 	if strings.TrimSpace(reply) != "" {
 		return reply, nil
@@ -217,7 +244,7 @@ func chatWithEmptyReplyRetry(llm model.LLM, messages []model.Message) (string, e
 
 	reply, err = llm.Chat(messages, &model.ChatOptions{MaxTokens: summarizeMaxTokens, Temperature: 0.2})
 	if err != nil {
-		return "", markUnavailable(fmt.Errorf("summarize: %s chat failed on retry: %w", llm.Backend(), err))
+		return "", classifyChatError(fmt.Errorf("summarize: %s chat failed on retry: %w", llm.Backend(), err))
 	}
 	if strings.TrimSpace(reply) == "" {
 		return "", fmt.Errorf("summarize: %s returned an empty reply twice in a row", llm.Backend())

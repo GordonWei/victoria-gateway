@@ -131,7 +131,7 @@ func (c *OpenAIClient) Chat(messages []Message, opts *ChatOptions) (string, erro
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("%s returned %d: %s", c.backend, resp.StatusCode, string(respBody))
+		return "", &HTTPStatusError{Backend: c.backend, StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	var result openAIResponse
@@ -165,6 +165,22 @@ func (c *OpenAIClient) ModelName() string {
 
 func (c *OpenAIClient) Backend() string {
 	return c.backend
+}
+
+// HTTPStatusError is returned by OpenAIClient.Chat when the server
+// answers with a non-200 status. Its text is exactly what Chat returned
+// before this type existed ("<backend> returned <code>: <body>"), so log
+// lines don't change; callers that need to tell "server is down/overloaded"
+// (5xx, 429) apart from "our request or credentials are wrong" (other
+// 4xx) can errors.As it and look at StatusCode.
+type HTTPStatusError struct {
+	Backend    string
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s returned %d: %s", e.Backend, e.StatusCode, e.Body)
 }
 
 // --- Request/Response types ---

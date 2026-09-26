@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -550,5 +551,22 @@ func TestNewOpenAIClient_TimeoutConfigurable(t *testing.T) {
 	custom := NewOpenAIClient(OpenAIClientConfig{Endpoint: "http://x", Model: "m", Timeout: 180 * time.Second})
 	if custom.client.Timeout != 180*time.Second {
 		t.Errorf("custom timeout = %v, want 180s", custom.client.Timeout)
+	}
+}
+
+func TestOpenAIClient_NonOKReturnsTypedStatusError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("bad key"))
+	}))
+	defer srv.Close()
+	c := NewOpenAIClient(OpenAIClientConfig{Endpoint: srv.URL, Model: "m", Backend: "lm"})
+	_, err := c.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("err = %v, want *HTTPStatusError with 401", err)
+	}
+	if err.Error() != "lm returned 401: bad key" {
+		t.Errorf("err text = %q, want the pre-typed-error text", err.Error())
 	}
 }
