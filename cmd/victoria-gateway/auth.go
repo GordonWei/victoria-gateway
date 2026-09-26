@@ -106,12 +106,16 @@ func actorFromRequest(r *http.Request, authenticated bool) string {
 // The check uses what browsers already send rather than a CSRF token:
 // Sec-Fetch-Site (every current browser) must be "same-origin" or "none"
 // (typed into the address bar / a bookmark); failing that, Origin, then
-// Referer, must name this same host. A request with none of the three —
-// curl, scripts, the maintenance-window API's usual callers — is not a
-// browser acting on someone's behalf and passes through unchanged.
-func sameOriginOnly(next http.Handler) http.Handler {
+// Referer, must name this same host — either the Host the request
+// arrived with, or, behind a reverse proxy that rewrites Host, the
+// scheme and host of rag.public_base_url (the address operators actually
+// open the pages at). A request with none of the three — curl, scripts,
+// the maintenance-window API's usual callers — is not a browser acting
+// on someone's behalf and passes through unchanged.
+func sameOriginOnly(next http.Handler, publicBaseURL string) http.Handler {
+	public := parsePublicOrigin(publicBaseURL)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !crossSiteWrite(r) {
+		if !crossSiteWrite(r, public) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -119,7 +123,21 @@ func sameOriginOnly(next http.Handler) http.Handler {
 	})
 }
 
-func crossSiteWrite(r *http.Request) bool {
+// parsePublicOrigin returns publicBaseURL as a URL usable for an origin
+// comparison, or nil when it's unset or has no scheme and host (in which
+// case only the request's own Host counts as same-origin).
+func parsePublicOrigin(publicBaseURL string) *url.URL {
+	if publicBaseURL == "" {
+		return nil
+	}
+	u, err := url.Parse(publicBaseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil
+	}
+	return u
+}
+
+func crossSiteWrite(r *http.Request, public *url.URL) bool {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return false
@@ -136,13 +154,21 @@ func crossSiteWrite(r *http.Request) bool {
 		if err != nil || u.Host == "" {
 			return true // includes Origin: null
 		}
-		return !strings.EqualFold(u.Host, r.Host)
+		if strings.EqualFold(u.Host, r.Host) {
+			return false
+		}
+		if public != nil && strings.EqualFold(u.Scheme, public.Scheme) && strings.EqualFold(u.Host, public.Host) {
+			return false
+		}
+		return true
 	}
 	return false
 }
 
 // webUIChain wraps a web page handler with the CSRF check and then the
 // configured auth. Every web UI route goes through this (see runServe).
-func webUIChain(auth AuthMiddleware) func(http.Handler) http.Handler {
-	return func(h http.Handler) http.Handler { return auth(sameOriginOnly(h)) }
+// publicBaseURL is rag.public_base_url ("" when unset); see
+// sameOriginOnly.
+func webUIChain(auth AuthMiddleware, publicBaseURL string) func(http.Handler) http.Handler {
+	return func(h http.Handler) http.Handler { return auth(sameOriginOnly(h, publicBaseURL)) }
 }
