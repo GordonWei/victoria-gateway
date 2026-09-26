@@ -195,6 +195,7 @@ set):
 |---|---|
 | `summarizer.api_key` | `VICTORIA_GATEWAY_SUMMARIZER_API_KEY` |
 | `cloud.api_key` | `VICTORIA_GATEWAY_CLOUD_API_KEY` |
+| `escalation_targets.<name>.api_key` | `VICTORIA_GATEWAY_ESCALATION_<NAME>_API_KEY` (name upper-cased, non-alphanumerics → `_`, e.g. `aws-prod` → `…_AWS_PROD_API_KEY`) |
 | `judge.api_key` | `VICTORIA_GATEWAY_JUDGE_API_KEY` |
 | `telegram.bot_token` | `VICTORIA_GATEWAY_TELEGRAM_BOT_TOKEN` |
 | `rag.postgres_dsn` | `VICTORIA_GATEWAY_RAG_POSTGRES_DSN` |
@@ -270,6 +271,11 @@ CloudWatch Logs Insights queries are asynchronous (StartQuery, then poll
 GetQueryResults) — `timeout_sec` bounds that whole poll loop, not just one
 HTTP call. GCP Cloud Logging's `entries.list` is a single synchronous
 call, so its `timeout_sec` is a plain HTTP timeout.
+
+`log_source` picks exactly one backend for the whole deployment. To use
+several at once — on-prem Loki *and* CloudWatch *and* Cloud Logging, with
+each alert queried against the one it actually lives in — see
+**Hybrid cloud routing** below.
 
 `summarizer` is normally an unauthenticated local server, but
 `summarizer.api_key` lets it be a real cloud OpenAI-compatible endpoint
@@ -814,6 +820,12 @@ completion) rather than the few seconds Gemini/Anthropic take — factor that
 into `escalation.max_per_hour` and expectations about how quickly an
 escalated alert's result shows up.
 
+Because the agent can only see AWS, a deployment that also watches
+on-prem hosts shouldn't send *those* alerts to it. **Hybrid cloud
+routing** (below) lets AWS alerts escalate to the DevOps Agent while
+everything else keeps escalating to Gemini/Anthropic/Bedrock, from one
+deployment.
+
 `escalation.max_per_hour` is an optional spend guardrail: at most this many
 alerts escalate to `cloud` within a rolling hour, 0 (default) meaning
 unlimited. Nothing else bounds cost if the local model's `escalate` signal
@@ -855,6 +867,96 @@ before-cutover check (repeat-calling the same input several times to
 separate genuine model variance from ordinary record-to-record text
 differences) is the standard this threshold should be re-checked against
 if you significantly change your alert mix or summarizer prompt.
+
+## Hybrid cloud routing: several log backends and escalation targets in one deployment
+
+`log_source` and `cloud` each pick exactly one thing for the whole
+deployment. That's fine when everything you watch lives in one place, but
+it breaks down as soon as a cloud account is meant to be an extension of
+the machine room rather than a separate world: an alert about an on-prem
+host has its logs in Loki, an alert about a Lambda function has them in
+CloudWatch, and only the latter makes sense to hand to AWS DevOps Agent,
+which can see the AWS account and nothing else.
+
+`hybrid_routes` routes each alert by its labels to a named log source and
+a named escalation target:
+
+```yaml
+loki:
+  endpoint: "http://loki:3100"   # default for any type-loki source below
+  lookback_sec: 300              # still global, for every backend
+  limit: 200
+
+log_sources:
+  onprem: {type: loki}
+  site-b:
+    type: loki
+    loki: {endpoint: "http://loki-site-b:3100"}   # a second Loki, e.g. another site
+  aws:
+    type: cloudwatch
+    cloudwatch: {region: us-east-1, log_group_names: ["/aws/lambda/checkout"]}
+  gcp:
+    type: gcp_logging
+    gcp_logging: {project_id: my-project}
+
+escalation_targets:
+  default: {provider: gemini, model: gemini-2.5-flash}   # api_key via VICTORIA_GATEWAY_ESCALATION_DEFAULT_API_KEY
+  aws:
+    provider: aws-devops-agent
+    aws_devops_agent: {user_id: "...", space_id: "..."}
+
+hybrid_routes:
+  - matchers: {cloud: aws}
+    log_source: aws
+    escalation: aws
+  - matchers: {cloud: gcp}
+    log_source: gcp
+    escalation: default
+  - matchers: {site: b}
+    log_source: site-b
+    escalation: default
+  - default: true
+    log_source: onprem
+    escalation: default
+```
+
+How it's evaluated:
+
+- Routes are checked in config order; the first route whose matchers all
+  match the alert's labels wins. Matchers use the same glob syntax as
+  maintenance windows and `notifications.routes` (`env: "prod-*"`).
+- A `default: true` route is required and must be last — every alert needs
+  somewhere to get its logs from.
+- `escalation` may be left out of a route: alerts on it never escalate,
+  and the local result is final.
+- Routes that share a log source or escalation target name share one
+  client.
+- Where the `cloud` label comes from is up to you — typically a static
+  label on the Prometheus/CloudWatch-exporter scrape job or the
+  Alertmanager route that forwards those alerts.
+
+What stays global: `loki.lookback_sec`/`loki.limit`, `escalation.always_cloud`
+(an alert on a route without an escalation target still can't escalate),
+`escalation.max_per_hour` (one budget shared by every target), and the Jev
+judge. `analyzed_by` in results and RAG records is still `local`/`cloud`;
+which route, log source and escalation target an alert used is logged per
+alert (`routed via hybrid_routes[0] → log source "aws", escalation "aws"`),
+and the startup line lists every configured source and target.
+
+**Relationship to the single-backend config:** with `hybrid_routes` unset,
+`log_source`/`cloud` work exactly as before — existing configs need no
+change. `hybrid_routes` and the legacy `log_source` or `cloud` block can't
+be set together; `Validate` rejects that instead of silently picking one,
+so there's never a question of which one is actually in effect. It also
+rejects routes that reference an undefined name, and `log_sources`/
+`escalation_targets` entries no route uses (almost always a typo'd route
+name that would otherwise fall through to the default route unnoticed).
+
+Shared incident memory falls out of this for free: one deployment means
+one RAG store, so an incident confirmed on an AWS alert is retrievable
+context for the next on-prem alert that looks like it, and vice versa —
+including AWS DevOps Agent's conclusions, which are captured like any
+other escalation result.
 
 ## RAG: grounding the summary in past incidents
 
