@@ -623,3 +623,18 @@ type geminiResponse struct {
 		Content geminiContent `json:"content"`
 	} `json:"candidates"`
 }
+
+// sleepCtx waits for d or until ctx is done, whichever comes first, and
+// returns ctx.Err() in the second case. Unlike a select on time.After, the
+// timer is stopped as soon as ctx wins instead of lingering until d has
+// passed.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}

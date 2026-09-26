@@ -277,10 +277,8 @@ func (c *CloudAssistClient) waitForOperation(ctx context.Context, op caOperation
 		}
 		// Don't sleep past the deadline: the last poll happens at it.
 		wait := min(c.pollInterval, left)
-		select {
-		case <-ctx.Done():
+		if err := sleepCtx(ctx, wait); err != nil {
 			return timedOut()
-		case <-time.After(wait):
 		}
 		name := op.Name
 		op = caOperation{}
