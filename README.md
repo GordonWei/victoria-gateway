@@ -928,6 +928,8 @@ cloud:
     region: "us-east-1"      # optional, defaults to us-east-1
     space_id: "..."          # the AgentSpace ID; see ONBOARDING.md below
     priority: "HIGH"         # optional, defaults to HIGH
+    mitigation_plan: false   # optional; true attaches a mitigation plan to the tracker issue (see below)
+    mitigation_timeout_sec: 300  # optional, default 300
 ```
 
 This only makes sense when the alert being escalated is *about* AWS
@@ -964,6 +966,57 @@ Escalations here take 5-8 minutes (a real investigation, not a single
 completion) rather than the few seconds Gemini/Anthropic take — factor that
 into `escalation.max_per_hour` and expectations about how quickly an
 escalated alert's result shows up.
+
+#### Mitigation plan in the tracker issue (`mitigation_plan`)
+
+With `mitigation_plan: true`, a completed investigation is followed by
+a request for AWS DevOps Agent's
+[mitigation plan](https://docs.aws.amazon.com/devopsagent/latest/userguide/production-operations-autonomous-incident-response.html)
+— its proposed Prepare / Pre-Validate / Apply / Post-Validate steps —
+and the plan goes into the alert's tracker issue as its own section,
+"建議處置（AWS DevOps Agent mitigation plan）", between the analysis and
+the footer. The notification gets one line pointing at the issue, not
+the plan (it's long, and Telegram caps a message at 4096 characters).
+
+How it's fetched:
+
+1. If the investigation already carries a mitigation summary (AWS
+   documents inline mitigation proposals for alarm-triggered
+   investigations), that's used and nothing else is started.
+2. Otherwise `create_mitigation_plan` starts one — `UpdateBacklogTask`
+   with `taskStatus: PENDING_START` on the completed task, the same
+   thing the web app's "Generate mitigation plan" button does. This tool
+   was added in v1.1.0 of the sample MCP server; an older install
+   answers with an unknown-tool error and no plan is attached.
+3. The task is polled until it completes again, and its executions are
+   searched for the `mitigation_summary_md` journal record
+   ([documented here](https://docs.aws.amazon.com/devopsagent/latest/userguide/configuring-integrations-and-knowledge-integrating-devops-agent-into-event-driven-applications-using-amazon-eventbridge-index.html#retrieving-an-investigation-or-mitigation-summary)).
+
+The plan is only read. victoria-gateway never approves or applies it —
+the issue says so, and acting on it stays a human decision.
+
+It's best-effort: no plan, an API error (e.g. `AccessDeniedException`)
+or running past `mitigation_timeout_sec` leaves the investigation's
+analysis exactly as it would have been, logs why, and counts it in
+`victoria_gateway_mitigation_plan_total{target,result="ok|none|error"}`.
+If no tracker issue gets filed (no `rag.gitea`/`rag.github`, RAG off,
+or filing failed), the plan is written to the log instead and the
+notification line says so. RAG records don't store the plan.
+
+**Off by default**, for cost and time: the mitigation run is a second
+agent run billed per agent-second like the investigation
+([$0.0083/agent-second](https://aws.amazon.com/devops-agent/pricing/);
+AWS's sample documents 2-5 minutes per plan, so roughly $1-2.50 on top
+of the investigation), and it adds those minutes to the escalation.
+The startup banner's shutdown-grace warning counts
+`mitigation_timeout_sec` on top of the 10-minute investigation limit.
+
+IAM: the caller needs `aidevops:UpdateBacklogTask` ("approve a
+mitigation plan" in the
+[IAM reference](https://docs.aws.amazon.com/devopsagent/latest/userguide/aws-devops-agent-security-devops-agent-iam-permissions.html)),
+`aidevops:GetBacklogTask`, `aidevops:ListExecutions` and
+`aidevops:ListJournalRecords`. `AIDevOpsAgentFullAccess` already covers
+all four.
 
 Because the agent can only see AWS, a deployment that also watches
 on-prem hosts shouldn't send *those* alerts to it. **Hybrid cloud
@@ -1676,6 +1729,7 @@ unlabeled `0`.
 | `victoria_gateway_cloud_llm_duration_seconds_sum`/`_count` | `target` | as for `escalations_total` |
 | `victoria_gateway_local_llm_skipped_total` (local backend skipped without a chat call) | `backend` (`summarizer` or `summarizer.fallbacks[N]`), `reason` (`probe` or `breaker`) | same |
 | `victoria_gateway_local_llm_breaker_open` (gauge, 1 = open) | `backend` | same; one series per backend with a breaker from startup, none if every breaker is off |
+| `victoria_gateway_mitigation_plan_total` (mitigation plans requested alongside a successful escalation; only `aws-devops-agent` with `mitigation_plan: true` today) | `target`, `result` (`ok`, `none`, `error`) | as for `escalations_total` |
 
 Label values are written with the text format's own escaping (only `\`,
 `"` and newline), so a route, target or channel name comes back from a
