@@ -141,6 +141,8 @@ summarizer:
 #   aws:
 #     provider: "aws-devops-agent"
 #     aws_devops_agent: {user_id: "REPLACE", space_id: "REPLACE"}
+#     # Add mitigation_plan: true inside aws_devops_agent to attach its mitigation plan to the
+#     # tracker issue (a second billed agent run, 2-5 min; off by default — see README).
 #   gcp:   # needs Premium Support or account-team access to run investigations (README)
 #     provider: "gcp-cloud-assist"
 #     project: "REPLACE-gcp-project"
