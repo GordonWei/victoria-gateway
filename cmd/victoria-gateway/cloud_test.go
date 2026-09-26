@@ -19,7 +19,9 @@ func TestBuildCloud_Providers(t *testing.T) {
 		{config.CloudConfig{Provider: "azure-openai", Endpoint: "https://x", Deployment: "d"}, "*model.AzureOpenAIClient"},
 		{config.CloudConfig{Provider: "aws-devops-agent", DevOpsAgent: &config.DevOpsAgentConfig{SpaceID: "s"}}, "*model.DevOpsAgentClient"},
 		{config.CloudConfig{Provider: "openai-compatible", Endpoint: "http://x", Model: "m"}, "*model.OpenAIClient"},
+		{config.CloudConfig{Provider: "vertex-ai", Project: "p", Model: "m"}, "*model.VertexAIClient"},
 	}
+	noADC(t)
 	for _, tc := range cases {
 		c := tc.cfg
 		got, err := buildCloud("cloud", &c)
@@ -47,7 +49,9 @@ func TestBuildCloud_LegacyErrorMessagesUnchanged(t *testing.T) {
 		{config.CloudConfig{Provider: "aws-devops-agent"}, `cloud.provider is "aws-devops-agent" but cloud.aws_devops_agent is not set`},
 		{config.CloudConfig{Provider: "openai-compatible", Model: "m"}, `cloud.provider is "openai-compatible" but cloud.endpoint is not set`},
 		{config.CloudConfig{Provider: "openai-compatible", Endpoint: "http://x"}, `cloud.provider is "openai-compatible" but cloud.model is not set`},
-		{config.CloudConfig{Provider: "nope"}, `unknown cloud.provider "nope" (must be "gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", or "openai-compatible")`},
+		{config.CloudConfig{Provider: "vertex-ai", Model: "m"}, `cloud.provider is "vertex-ai" but cloud.project is not set`},
+		{config.CloudConfig{Provider: "vertex-ai", Project: "p"}, `cloud.provider is "vertex-ai" but cloud.model is not set`},
+		{config.CloudConfig{Provider: "nope"}, `unknown cloud.provider "nope" (must be "gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", "openai-compatible", or "vertex-ai")`},
 	}
 	for _, tc := range cases {
 		c := tc.cfg
@@ -72,6 +76,8 @@ func typeName(v model.LLM) string {
 		return "*model.DevOpsAgentClient"
 	case *model.OpenAIClient:
 		return "*model.OpenAIClient"
+	case *model.VertexAIClient:
+		return "*model.VertexAIClient"
 	}
 	return "unknown"
 }

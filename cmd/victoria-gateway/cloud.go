@@ -10,7 +10,7 @@ import (
 
 // cloudProviderNames is every provider buildCloud accepts, as quoted in
 // its "unknown provider" error.
-const cloudProviderNames = `"gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", or "openai-compatible"`
+const cloudProviderNames = `"gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", "openai-compatible", or "vertex-ai"`
 
 // buildCloud constructs the escalation client one cloud block describes —
 // the legacy top-level cloud (label "cloud") or one named entry of
@@ -82,6 +82,20 @@ func buildCloud(label string, c *config.CloudConfig) (model.LLM, error) {
 			Model:    c.Model,
 			Backend:  "openai-compatible",
 			APIKey:   c.APIKey,
+			Timeout:  time.Duration(c.TimeoutSec) * time.Second,
+		}), nil
+	case "vertex-ai":
+		if c.Project == "" {
+			return nil, fmt.Errorf("%s.provider is \"vertex-ai\" but %s.project is not set", label, label)
+		}
+		if c.Model == "" {
+			return nil, fmt.Errorf("%s.provider is \"vertex-ai\" but %s.model is not set", label, label)
+		}
+		return model.NewVertexAIClient(model.VertexAIClientConfig{
+			Project:  c.Project,
+			Location: c.Location,
+			Model:    c.Model,
+			Endpoint: c.Endpoint,
 			Timeout:  time.Duration(c.TimeoutSec) * time.Second,
 		}), nil
 	default:
