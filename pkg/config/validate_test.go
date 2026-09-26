@@ -119,3 +119,74 @@ func TestValidate_NegativeCloudTimeout(t *testing.T) {
 	h.EscalationTargets["default"] = &CloudConfig{Provider: "openai-compatible", Endpoint: "http://x", Model: "m", TimeoutSec: -5}
 	wantErrContaining(t, h.Validate(), "escalation_targets.default.timeout_sec must be >= 0")
 }
+
+func TestValidate_VertexAI(t *testing.T) {
+	h := validHybridConfig()
+	h.EscalationTargets["default"] = &CloudConfig{Provider: "vertex-ai", Model: "gemini-2.5-flash"}
+	wantErrContaining(t, h.Validate(), `escalation_targets.default.provider is "vertex-ai" but escalation_targets.default.project/model is missing`)
+
+	h.EscalationTargets["default"] = &CloudConfig{Provider: "vertex-ai", Project: "my-proj", Model: "gemini-2.5-flash"}
+	if err := h.ValidateForServe(); err != nil {
+		t.Errorf("vertex-ai without api_key: ValidateForServe = %v, want nil", err)
+	}
+
+	h.EscalationTargets["default"].Location = "us-central1.evil.com/"
+	wantErrContaining(t, h.Validate(), `escalation_targets.default.location "us-central1.evil.com/" is not a valid location`)
+	h.EscalationTargets["default"].Location = "global"
+	h.EscalationTargets["default"].Project = "p/../x"
+	wantErrContaining(t, h.Validate(), `escalation_targets.default.project "p/../x" is not a valid GCP project ID`)
+
+	// The legacy cloud block and cloud_fallbacks get the same format checks.
+	c := validConfig()
+	c.Cloud = &CloudConfig{Provider: "vertex-ai", Project: "my-proj", Model: "m", Location: "bad host"}
+	wantErrContaining(t, c.Validate(), `cloud.location "bad host"`)
+	c.Cloud = &CloudConfig{Provider: "gemini", APIKey: "k"}
+	c.CloudFallbacks = []*CloudConfig{{Provider: "vertex-ai", Model: "m"}}
+	wantErrContaining(t, c.Validate(), `cloud_fallbacks[0].provider is "vertex-ai" but cloud_fallbacks[0].project/model is missing`)
+	c.CloudFallbacks[0].Project = "my-proj"
+	if err := c.ValidateForServe(); err != nil {
+		t.Errorf("vertex-ai cloud_fallbacks: ValidateForServe = %v, want nil", err)
+	}
+}
+
+// vertex-ai never sends an api_key, so ValidateForServe rejects one on
+// every kind of block — but plain Validate (note/sync) doesn't look at
+// keys at all, same as for the gemini/anthropic rule.
+func TestValidateForServe_ADCProviderRejectsAPIKey(t *testing.T) {
+	c := validConfig()
+	c.Cloud = &CloudConfig{Provider: "vertex-ai", Project: "p", Model: "m", APIKey: "leftover"}
+	wantErrContaining(t, c.ValidateForServe(), `cloud.provider is "vertex-ai" but cloud.api_key is set`)
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate = %v, want nil (api_key rules are serve-only)", err)
+	}
+
+	h := validHybridConfig()
+	h.EscalationTargets["default"] = &CloudConfig{Provider: "vertex-ai", Project: "p", Model: "m", APIKey: "leftover"}
+	wantErrContaining(t, h.ValidateForServe(), `escalation_targets.default.provider is "vertex-ai" but escalation_targets.default.api_key is set`)
+
+	f := validConfig()
+	f.Cloud = &CloudConfig{Provider: "gemini", APIKey: "k"}
+	f.CloudFallbacks = []*CloudConfig{{Provider: "vertex-ai", Project: "p", Model: "m", APIKey: "leftover"}}
+	wantErrContaining(t, f.ValidateForServe(), `cloud_fallbacks[0].provider is "vertex-ai" but cloud_fallbacks[0].api_key is set`)
+}
+
+// An env var left over from a gemini setup lands in api_key via Load and
+// must be caught, not silently ignored.
+func TestLoad_VertexAIWithLeftoverEnvKeyRejectedForServe(t *testing.T) {
+	t.Setenv("VICTORIA_GATEWAY_ESCALATION_GCP_API_KEY", "leftover")
+	c := loadYAML(t, `
+loki: {endpoint: "http://loki:3100"}
+summarizer: {endpoint: "http://llm:1234", model: m}
+log_sources: {onprem: {type: loki}}
+escalation_targets:
+  gcp: {provider: vertex-ai, project: my-proj, location: us-central1, model: gemini-2.5-flash, timeout_sec: 90}
+hybrid_routes:
+  - default: true
+    log_source: onprem
+    escalation: gcp
+`)
+	if got := c.EscalationTargets["gcp"]; got.Project != "my-proj" || got.Location != "us-central1" || got.TimeoutSec != 90 {
+		t.Errorf("parsed target = %+v", got)
+	}
+	wantErrContaining(t, c.ValidateForServe(), "escalation_targets.gcp.api_key is set")
+}

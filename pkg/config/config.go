@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -425,15 +426,27 @@ func (c LLMConfig) validateHealth(label string) error {
 // trigger, or the local model's own structured reply asks for escalation
 // — see pkg/aiops.ShouldEscalate.
 type CloudConfig struct {
-	Provider string `yaml:"provider"` // "gemini" (default), "anthropic", "bedrock", "azure-openai", "aws-devops-agent", or "openai-compatible"
-	Endpoint string `yaml:"endpoint"` // optional; each provider has its own default. Ignored by "bedrock" (region-based, see Region) and by "azure-openai"/"openai-compatible" (required there instead, as the server's base URL)
-	APIKey   string `yaml:"api_key"`  // ignored by "bedrock", which uses the AWS SDK's own credential chain instead — see model.BedrockClient. Optional for "openai-compatible" (no Authorization header when empty)
+	Provider string `yaml:"provider"` // "gemini" (default), "anthropic", "bedrock", "azure-openai", "aws-devops-agent", "openai-compatible", or "vertex-ai"
+	Endpoint string `yaml:"endpoint"` // optional; each provider has its own default. Ignored by "bedrock" (region-based, see Region) and by "azure-openai"/"openai-compatible" (required there instead, as the server's base URL). For "vertex-ai" it overrides the host derived from Location
+	APIKey   string `yaml:"api_key"`  // ignored by "bedrock", which uses the AWS SDK's own credential chain instead — see model.BedrockClient. Optional for "openai-compatible" (no Authorization header when empty). Must be empty for "vertex-ai", which authenticates with Application Default Credentials
 	Model    string `yaml:"model"`    // e.g. "gemini-2.5-flash", "claude-haiku-4-5", or a Bedrock model ID. Ignored by "azure-openai" — see Deployment
 
-	// TimeoutSec bounds one request to an "openai-compatible" endpoint;
-	// 0 means 60s. The older providers keep their own fixed timeouts and
-	// ignore this field, so adding it changed nothing for them.
+	// TimeoutSec bounds one request to an "openai-compatible" or
+	// "vertex-ai" endpoint; 0 means 60s. The older providers keep their
+	// own fixed timeouts and ignore this field, so adding it changed
+	// nothing for them.
 	TimeoutSec int `yaml:"timeout_sec"`
+
+	// Project is the GCP project ID "vertex-ai" bills and authorizes the
+	// call against. Ignored by every other provider.
+	Project string `yaml:"project"`
+
+	// Location is where "vertex-ai" sends the request: "global" (the
+	// default), a region such as "us-central1", or the "us"/"eu"
+	// multi-region — see model.VertexAIClient for the endpoint each one
+	// maps to and the data-residency trade-off of "global". Ignored by
+	// every other provider.
+	Location string `yaml:"location"`
 
 	// Region is the AWS region "bedrock" calls Bedrock in, e.g.
 	// "us-east-1". Bedrock model availability varies by region. Ignored
@@ -698,7 +711,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	if c.Cloud != nil {
-		if err := validateCloudTimeouts("cloud", c.Cloud); err != nil {
+		if err := validateCloudCommon("cloud", c.Cloud); err != nil {
 			return err
 		}
 	}
@@ -768,7 +781,8 @@ func (c *Config) Validate() error {
 
 // ValidateForServe is Validate plus the checks only the server needs:
 // every gemini/anthropic escalation target (cloud, cloud_fallbacks,
-// escalation_targets) must have an api_key. note and sync call plain
+// escalation_targets) must have an api_key, and an ADC-authenticated one
+// (vertex-ai) must not have one. note and sync call plain
 // Validate, so running them from a shell without the
 // VICTORIA_GATEWAY_*_API_KEY env vars doesn't fail on a key they never
 // use.
@@ -977,24 +991,43 @@ func validateCloudEntry(label string, c *CloudConfig) error {
 		if c.Endpoint == "" || c.Model == "" {
 			return fmt.Errorf("%s.provider is \"openai-compatible\" but %s.endpoint/model is missing", label, label)
 		}
+	case "vertex-ai":
+		if c.Project == "" || c.Model == "" {
+			return fmt.Errorf("%s.provider is \"vertex-ai\" but %s.project/model is missing", label, label)
+		}
 	default:
 		return fmt.Errorf("%s.provider is %q, want %s", label, c.Provider, cloudProviderList)
 	}
-	return validateCloudTimeouts(label, c)
+	return validateCloudCommon(label, c)
 }
 
 // cloudProviderList is every accepted provider value, as quoted in the
 // "unknown provider" errors.
-const cloudProviderList = `"gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", or "openai-compatible"`
+const cloudProviderList = `"gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", "openai-compatible", or "vertex-ai"`
 
-// validateCloudTimeouts rejects negative timeout settings on one cloud
-// block. Unlike the per-provider required fields (checked for the legacy
-// cloud block in buildCloud), this runs for every block including the
-// legacy one: the timeout fields are new, so there is no pre-existing
-// error text to preserve.
-func validateCloudTimeouts(label string, c *CloudConfig) error {
+// gcpProjectPattern and gcpLocationPattern are deliberately loose — they
+// don't try to be GCP's exact naming rules, only to stop a value that
+// would change the request URL's host or path (a "/", "?", "@", space).
+var (
+	gcpProjectPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9.:-]*$`)
+	gcpLocationPattern = regexp.MustCompile(`^[a-z0-9-]+$`)
+)
+
+// validateCloudCommon checks the fields added alongside the
+// openai-compatible/vertex-ai providers: timeouts that can't be negative,
+// and a GCP project/location that can't reshape the request URL. Unlike
+// the per-provider required fields (checked for the legacy cloud block
+// in buildCloud), this runs for every block including the legacy one:
+// the fields are new, so there is no pre-existing error text to preserve.
+func validateCloudCommon(label string, c *CloudConfig) error {
 	if c.TimeoutSec < 0 {
 		return fmt.Errorf("%s.timeout_sec must be >= 0 (0 means the provider's default)", label)
+	}
+	if c.Project != "" && !gcpProjectPattern.MatchString(c.Project) {
+		return fmt.Errorf("%s.project %q is not a valid GCP project ID", label, c.Project)
+	}
+	if c.Location != "" && !gcpLocationPattern.MatchString(c.Location) {
+		return fmt.Errorf("%s.location %q is not a valid location (want e.g. \"global\", \"us-central1\", \"us\")", label, c.Location)
 	}
 	return nil
 }
@@ -1006,6 +1039,13 @@ func validateCloudTimeouts(label string, c *CloudConfig) error {
 // checks stay in buildCloud, unchanged); api_key may also arrive via the
 // VICTORIA_GATEWAY_*_API_KEY env vars, which Load applies before
 // validation. Only ValidateForServe calls this.
+//
+// The opposite also lives here: "vertex-ai" authenticates with
+// Application Default Credentials and never sends an api_key, so one set
+// on such a block — typically a VICTORIA_GATEWAY_*_API_KEY left over from
+// when the block was provider: gemini — is rejected rather than silently
+// ignored, since an operator who sees it set would reasonably assume it's
+// in use.
 func validateCloudAPIKey(label string, c *CloudConfig) error {
 	switch c.Provider {
 	case "", "gemini", "anthropic":
@@ -1015,6 +1055,10 @@ func validateCloudAPIKey(label string, c *CloudConfig) error {
 				p = "gemini"
 			}
 			return fmt.Errorf("%s.provider is %q but %s.api_key is empty", label, p, label)
+		}
+	case "vertex-ai":
+		if c.APIKey != "" {
+			return fmt.Errorf("%s.provider is %q but %s.api_key is set — this provider authenticates with Application Default Credentials (GOOGLE_APPLICATION_CREDENTIALS or the metadata server), not an API key; remove api_key (and any VICTORIA_GATEWAY_*_API_KEY env var for this block)", label, c.Provider, label)
 		}
 	}
 	return nil
