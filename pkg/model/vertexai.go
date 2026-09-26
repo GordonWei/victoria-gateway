@@ -2,7 +2,6 @@ package model
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +10,8 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
+
+	"github.com/gordonwei/victoria-gateway/pkg/gcpauth"
 )
 
 // VertexAIClient calls Gemini through Vertex AI's generateContent API
@@ -86,7 +86,7 @@ func vertexAIBaseURL(location string) string {
 
 func NewVertexAIClient(cfg VertexAIClientConfig) *VertexAIClient {
 	c := newVertexAIClient(cfg)
-	creds, err := google.FindDefaultCredentials(context.Background(), cloudPlatformScope)
+	creds, err := gcpauth.FindDefaultCredentials(cloudPlatformScope)
 	if err != nil {
 		c.loadErr = err
 	} else {

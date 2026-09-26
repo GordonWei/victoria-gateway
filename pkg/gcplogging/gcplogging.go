@@ -32,9 +32,9 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
+	"github.com/gordonwei/victoria-gateway/pkg/gcpauth"
 )
 
 // loggingScope is the OAuth2 scope entries.list requires read access for.
@@ -115,7 +115,7 @@ func NewClient(cfg ClientConfig) *Client {
 		endpoint = "https://logging.googleapis.com"
 	}
 
-	creds, err := google.FindDefaultCredentials(context.Background(), loggingScope)
+	creds, err := gcpauth.FindDefaultCredentials(loggingScope)
 
 	c := &Client{
 		projectID:      cfg.ProjectID,

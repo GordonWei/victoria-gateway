@@ -13,7 +13,8 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
+
+	"github.com/gordonwei/victoria-gateway/pkg/gcpauth"
 )
 
 // CloudAssistClient escalates to a Gemini Cloud Assist investigation
@@ -98,7 +99,7 @@ const (
 
 func NewCloudAssistClient(cfg CloudAssistClientConfig) *CloudAssistClient {
 	c := newCloudAssistClient(cfg)
-	creds, err := google.FindDefaultCredentials(context.Background(), cloudPlatformScope)
+	creds, err := gcpauth.FindDefaultCredentials(cloudPlatformScope)
 	if err != nil {
 		c.loadErr = err
 	} else {
