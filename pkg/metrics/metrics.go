@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -296,6 +297,16 @@ func (c *Counters) ObserveRAGSearchDuration(d time.Duration) {
 	}
 }
 
+// labelValueEscaper applies the Prometheus text exposition format's
+// label-value escaping: backslash, double quote and line feed, nothing
+// else. Go's %q is not a substitute — it also turns a tab into \t and
+// other non-printable characters into \x../\u.... sequences, which the
+// format doesn't define, so a scraper would read back a different value
+// (or reject the line) instead of the label that was recorded.
+var labelValueEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+
+func escapeLabelValue(v string) string { return labelValueEscaper.Replace(v) }
+
 // counterDef pairs a counter's exposition name/help with a snapshot of its
 // current value, taken at Handler-call time. A labeled family sets label
 // and lc instead of val.
@@ -376,7 +387,7 @@ func (c *Counters) Handler() http.Handler {
 				continue
 			}
 			for _, l := range labels {
-				_, _ = fmt.Fprintf(w, "%s{%s=%q} %d\n", d.name, d.label, l, vals[l])
+				_, _ = fmt.Fprintf(w, "%s{%s=\"%s\"} %d\n", d.name, d.label, escapeLabelValue(l), vals[l])
 			}
 		}
 		if c == nil {
@@ -396,7 +407,7 @@ func (c *Counters) Handler() http.Handler {
 			}
 			_, _ = fmt.Fprintf(w, "# TYPE %s counter\n", name)
 			for _, label := range labels {
-				_, _ = fmt.Fprintf(w, "%s{channel=%q} %d\n", name, label, vals[label])
+				_, _ = fmt.Fprintf(w, "%s{channel=\"%s\"} %d\n", name, escapeLabelValue(label), vals[label])
 			}
 		}
 		for _, d := range c.durations() {
@@ -413,14 +424,14 @@ func (c *Counters) Handler() http.Handler {
 				_, _ = fmt.Fprintf(w, "%s_sum %.6f\n", d.name, 0.0)
 			}
 			for _, l := range labels {
-				_, _ = fmt.Fprintf(w, "%s_sum{%s=%q} %.6f\n", d.name, d.label, l, sums[l])
+				_, _ = fmt.Fprintf(w, "%s_sum{%s=\"%s\"} %.6f\n", d.name, d.label, escapeLabelValue(l), sums[l])
 			}
 			_, _ = fmt.Fprintf(w, "# TYPE %s_count counter\n", d.name)
 			if len(labels) == 0 {
 				_, _ = fmt.Fprintf(w, "%s_count 0\n", d.name)
 			}
 			for _, l := range labels {
-				_, _ = fmt.Fprintf(w, "%s_count{%s=%q} %d\n", d.name, d.label, l, counts[l])
+				_, _ = fmt.Fprintf(w, "%s_count{%s=\"%s\"} %d\n", d.name, d.label, escapeLabelValue(l), counts[l])
 			}
 		}
 	})

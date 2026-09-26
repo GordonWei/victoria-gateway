@@ -179,3 +179,46 @@ func sumFamily(body, name string) int64 {
 	}
 	return total
 }
+
+func TestEscapeLabelValue(t *testing.T) {
+	cases := map[string]string{
+		`plain`:       `plain`,
+		`a\b`:         `a\\b`,
+		`say "hi"`:    `say \"hi\"`,
+		"line\nbreak": `line\nbreak`,
+		"tab\there":   "tab\there", // not escaped by the format; %q would write \t
+		"地端-告警":       "地端-告警",
+		"\x01ctl":     "\x01ctl", // %q would write \x01
+	}
+	for in, want := range cases {
+		if got := escapeLabelValue(in); got != want {
+			t.Errorf("escapeLabelValue(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCounters_LabelValuesUsePrometheusEscaping(t *testing.T) {
+	c := &Counters{}
+	odd := "route \"x\"\\\ttab\nnl"
+	wantLabel := `"route \"x\"\\` + "\t" + `tab\nnl"`
+	c.IncAlertsTotal(odd)
+	c.IncNotifyPush(odd, false)
+	c.ObserveCloudLLMDuration(odd, time.Second)
+
+	rec := httptest.NewRecorder()
+	c.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+	for _, want := range []string{
+		`victoria_gateway_alerts_total{route=` + wantLabel + `} 1`,
+		`victoria_gateway_notify_push_total{channel=` + wantLabel + `} 1`,
+		`victoria_gateway_cloud_llm_duration_seconds_sum{target=` + wantLabel + `} 1.000000`,
+		`victoria_gateway_cloud_llm_duration_seconds_count{target=` + wantLabel + `} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("exposition missing %q; got:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `\t`) {
+		t.Error("exposition contains a Go-style \\t escape, which the text format doesn't define")
+	}
+}
