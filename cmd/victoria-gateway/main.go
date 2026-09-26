@@ -686,12 +686,19 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	// An Alertmanager payload is a few KB even for a large group; the cap
+	// only exists so a misbehaving or hostile client can't make the
+	// process buffer an arbitrarily large body in memory.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBodyBytes+1))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("read body: %v", err), http.StatusBadRequest)
 		return
 	}
 	defer func() { _ = r.Body.Close() }()
+	if len(body) > maxWebhookBodyBytes {
+		http.Error(w, fmt.Sprintf("request body exceeds %d bytes", maxWebhookBodyBytes), http.StatusRequestEntityTooLarge)
+		return
+	}
 
 	payload, err := aiops.ParseWebhook(body)
 	if err != nil {
@@ -790,6 +797,11 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 		log.Printf("aiops: encode response: %v", err)
 	}
 }
+
+// maxWebhookBodyBytes caps POST /webhook/alertmanager's body; larger
+// requests get 413. 4 MiB is roughly a thousand times a typical grouped
+// Alertmanager payload.
+const maxWebhookBodyBytes = 4 << 20
 
 // processAlert analyzes one alert and pushes the result. A failed
 // analysis is logged here in both sync and async mode: in async mode
