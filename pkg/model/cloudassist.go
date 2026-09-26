@@ -79,7 +79,7 @@ type CloudAssistClient struct {
 type CloudAssistClientConfig struct {
 	Project      string        // GCP project ID the investigation runs in and looks at
 	PollInterval time.Duration // defaults to 15s
-	PollTimeout  time.Duration // defaults to 10 minutes: create + run + waiting for the result
+	PollTimeout  time.Duration // defaults to 10 minutes: one budget for create + run + waiting for the result
 	Timeout      time.Duration // one HTTP call; defaults to 30s
 	// Endpoint overrides "https://geminicloudassist.googleapis.com".
 	// Leave empty for real use; it exists for tests.
@@ -175,13 +175,17 @@ type caOperation struct {
 }
 
 // Chat runs one investigation end to end and returns its hypotheses as
-// Markdown. The whole call, polling included, is bounded by pollTimeout
-// plus one HTTP timeout.
+// Markdown. pollTimeout is one budget for the whole flow, measured from
+// the start of Chat: time spent creating and starting the investigation
+// comes out of the time left for polling, rather than the poll wait
+// starting fresh after them. Only the final read of a completed
+// investigation may run past it, by at most one HTTP timeout.
 func (c *CloudAssistClient) Chat(messages []Message, _ *ChatOptions) (string, error) {
 	issue := lastUserMessage(messages)
 	if issue == "" {
 		return "", fmt.Errorf("%s: no user message to investigate", cloudAssistBackend)
 	}
+	deadline := c.now().Add(c.pollTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), c.pollTimeout+c.client.Timeout)
 	defer cancel()
 
@@ -196,7 +200,7 @@ func (c *CloudAssistClient) Chat(messages []Message, _ *ChatOptions) (string, er
 	if err := c.do(ctx, http.MethodPost, "/v1alpha/"+inv.Revision+":run", struct{}{}, &op); err != nil {
 		return "", fmt.Errorf("%s: run investigation %s: %w", cloudAssistBackend, inv.Name, err)
 	}
-	if err := c.waitForOperation(ctx, op, inv.Name); err != nil {
+	if err := c.waitForOperation(ctx, op, inv.Name, deadline); err != nil {
 		return "", err
 	}
 	var done caInvestigation
@@ -243,11 +247,13 @@ func (c *CloudAssistClient) create(ctx context.Context, issue string) (caInvesti
 }
 
 // waitForOperation polls the run operation every pollInterval until it
-// is done or pollTimeout has passed since the first poll. The
-// investigation itself keeps running on GCP after a timeout; its name is
-// in the error so it can be opened in the console.
-func (c *CloudAssistClient) waitForOperation(ctx context.Context, op caOperation, invName string) error {
-	deadline := c.now().Add(c.pollTimeout)
+// is done or Chat's deadline has passed. The investigation itself keeps
+// running on GCP after a timeout; its name is in the error so it can be
+// opened in the console.
+func (c *CloudAssistClient) waitForOperation(ctx context.Context, op caOperation, invName string, deadline time.Time) error {
+	timedOut := func() error {
+		return fmt.Errorf("%s: investigation %s did not complete within %s", cloudAssistBackend, invName, c.pollTimeout)
+	}
 	for {
 		if op.Done {
 			if op.Error != nil {
@@ -265,17 +271,25 @@ func (c *CloudAssistClient) waitForOperation(ctx context.Context, op caOperation
 		if op.Name == "" {
 			return fmt.Errorf("%s: run of %s returned no operation name", cloudAssistBackend, invName)
 		}
-		if !c.now().Before(deadline) {
-			return fmt.Errorf("%s: investigation %s did not complete within %s", cloudAssistBackend, invName, c.pollTimeout)
+		left := deadline.Sub(c.now())
+		if left <= 0 {
+			return timedOut()
 		}
+		// Don't sleep past the deadline: the last poll happens at it.
+		wait := min(c.pollInterval, left)
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("%s: investigation %s: %w", cloudAssistBackend, invName, ctx.Err())
-		case <-time.After(c.pollInterval):
+			return timedOut()
+		case <-time.After(wait):
 		}
 		name := op.Name
 		op = caOperation{}
 		if err := c.do(ctx, http.MethodGet, "/v1alpha/"+name, nil, &op); err != nil {
+			if ctx.Err() != nil || !c.now().Before(deadline) {
+				// The poll itself ran out the clock; that is the same
+				// timeout, not a failure of the operation.
+				return timedOut()
+			}
 			return fmt.Errorf("%s: poll %s: %w", cloudAssistBackend, name, err)
 		}
 		if op.Name == "" {
