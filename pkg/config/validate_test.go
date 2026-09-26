@@ -190,3 +190,37 @@ hybrid_routes:
 	}
 	wantErrContaining(t, c.ValidateForServe(), "escalation_targets.gcp.api_key is set")
 }
+
+func TestValidate_GCPCloudAssist(t *testing.T) {
+	h := validHybridConfig()
+	h.EscalationTargets["aws"] = &CloudConfig{Provider: "gcp-cloud-assist"}
+	wantErrContaining(t, h.Validate(), `escalation_targets.aws.provider is "gcp-cloud-assist" but escalation_targets.aws.project is missing`)
+
+	h.EscalationTargets["aws"] = &CloudConfig{Provider: "gcp-cloud-assist", Project: "my-proj", PollIntervalSec: 20, PollTimeoutSec: 900}
+	if err := h.ValidateForServe(); err != nil {
+		t.Errorf("gcp-cloud-assist: ValidateForServe = %v, want nil", err)
+	}
+	h.EscalationTargets["aws"].Location = "global"
+	if err := h.Validate(); err != nil {
+		t.Errorf("location global: Validate = %v, want nil", err)
+	}
+	h.EscalationTargets["aws"].Location = "us-central1"
+	wantErrContaining(t, h.Validate(), `escalation_targets.aws.location is "us-central1", but the Gemini Cloud Assist investigations API only serves "global"`)
+	h.EscalationTargets["aws"].Location = ""
+	h.EscalationTargets["aws"].PollTimeoutSec = -1
+	wantErrContaining(t, h.Validate(), "escalation_targets.aws.poll_interval_sec/poll_timeout_sec must be >= 0")
+	h.EscalationTargets["aws"].PollTimeoutSec = 0
+
+	h.EscalationTargets["aws"].APIKey = "leftover"
+	wantErrContaining(t, h.ValidateForServe(), `escalation_targets.aws.provider is "gcp-cloud-assist" but escalation_targets.aws.api_key is set`)
+
+	// Legacy cloud and cloud_fallbacks accept it too.
+	c := validConfig()
+	c.Cloud = &CloudConfig{Provider: "gcp-cloud-assist", Project: "my-proj"}
+	c.CloudFallbacks = []*CloudConfig{{Provider: "vertex-ai", Project: "my-proj", Model: "gemini-2.5-flash"}}
+	if err := c.ValidateForServe(); err != nil {
+		t.Errorf("legacy gcp-cloud-assist + vertex-ai fallback: ValidateForServe = %v, want nil", err)
+	}
+	c.CloudFallbacks = []*CloudConfig{{Provider: "gcp-cloud-assist"}}
+	wantErrContaining(t, c.Validate(), `cloud_fallbacks[0].provider is "gcp-cloud-assist" but cloud_fallbacks[0].project is missing`)
+}

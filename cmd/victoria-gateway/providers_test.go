@@ -225,3 +225,87 @@ func TestSummarizeOne_HybridVertexAIQuotaFallsBack(t *testing.T) {
 		`victoria_gateway_escalations_total{target="default"} 1`,
 		`victoria_gateway_cloud_llm_duration_seconds_count{target="gcp"} 1`)
 }
+
+// cloudAssistServer is a minimal Cloud Assist API whose investigation
+// either finishes with one hypothesis or, with failRun, whose run
+// operation ends in INTERNAL.
+func cloudAssistServer(t *testing.T, failRun bool, calls *int, auth *string) *httptest.Server {
+	t.Helper()
+	const inv = "projects/p1/locations/global/investigations/i1"
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		*calls++
+		*auth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1alpha/projects/p1/locations/global/investigations":
+			_, _ = fmt.Fprintf(w, `{"name":%q,"revision":%q}`, inv, inv+"/revisions/r1")
+		case r.Method == http.MethodPost && r.URL.Path == "/v1alpha/"+inv+"/revisions/r1:run":
+			if failRun {
+				_, _ = w.Write([]byte(`{"name":"projects/1/locations/global/operations/o1","done":true,"error":{"code":13,"message":"An internal error has occurred"}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"name":"projects/1/locations/global/operations/o1","done":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1alpha/"+inv:
+			_, _ = w.Write([]byte(`{"name":"` + inv + `","executionState":"INVESTIGATION_EXECUTION_STATE_COMPLETED","observations":{
+				"h1":{"id":"h1","title":"Bad deploy","text":"Revision 42 crashes.","observationType":"OBSERVATION_TYPE_HYPOTHESIS","observerType":"OBSERVER_TYPE_AI","systemRelevanceScore":0.9}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A gcp-cloud-assist escalation target returns its hypotheses as the
+// summary (the raw-Markdown path, like aws-devops-agent), and a failed
+// run falls back to the route's next target.
+func TestSummarizeOne_HybridCloudAssist(t *testing.T) {
+	fakeADC(t)
+	for _, failRun := range []bool{false, true} {
+		var caCalls, defCalls int
+		var caAuth, defAuth string
+		ca := cloudAssistServer(t, failRun, &caCalls, &caAuth)
+		def := openAICompatServer(t, `{"summary":"fallback answer","confidence":"high","escalate":false,"reason":"r"}`, http.StatusOK, &defCalls, &defAuth)
+		cfg := &config.Config{
+			EscalationTargets: map[string]*config.CloudConfig{
+				"gcp":     {Provider: "gcp-cloud-assist", Project: "p1", Endpoint: ca.URL, PollIntervalSec: 1},
+				"default": {Provider: "openai-compatible", Endpoint: def.URL, Model: "m"},
+			},
+			HybridRoutes: []config.HybridRouteConfig{{Default: true, LogSource: "onprem", Escalation: config.EscalationList{"gcp", "default"}}},
+			LogSources:   map[string]*config.LogSourceConfig{"onprem": {Type: "loki"}},
+			Loki:         config.LokiConfig{Endpoint: "http://loki:3100"},
+		}
+		router, err := buildHybridRouter(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		onprem := &recordingLogSource{name: "onprem"}
+		h := newHybridTestHandler(t, onprem, &recordingLogSource{name: "aws"}, nil, nil)
+		h.router.routes = []hybridRoute{{isDefault: true, target: alertRoute{name: "default", logs: onprem, logSourceName: "onprem", escalations: router.routes[0].target.escalations}}}
+		h.metrics = &metrics.Counters{}
+
+		res := h.summarizeOne(testAlert())
+		if caAuth != "Bearer fake-adc-token" {
+			t.Errorf("failRun=%v: Authorization = %q, want the ADC token", failRun, caAuth)
+		}
+		if failRun {
+			if res.EscalatedTo != "default" || res.Summary != "fallback answer" || defCalls != 1 {
+				t.Errorf("failed run: res = %+v, default calls = %d; want the fallback", res, defCalls)
+			}
+			wantContains(t, "metrics", scrape(t, h.metrics),
+				`victoria_gateway_escalation_failures_total{target="gcp"} 1`,
+				`victoria_gateway_escalations_total{target="default"} 1`)
+			continue
+		}
+		if res.AnalyzedBy != "cloud" || res.EscalatedTo != "gcp" || defCalls != 0 {
+			t.Fatalf("res = %+v, default calls = %d", res, defCalls)
+		}
+		wantContains(t, "summary", res.Summary, "Hypothesis 1: Bad deploy", "Revision 42 crashes.", "investigations/i1")
+		wantContains(t, "metrics", scrape(t, h.metrics),
+			`victoria_gateway_escalations_total{target="gcp"} 1`,
+			`victoria_gateway_cloud_llm_duration_seconds_count{target="gcp"} 1`)
+	}
+}
