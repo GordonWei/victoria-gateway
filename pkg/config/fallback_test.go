@@ -102,7 +102,7 @@ func TestValidate_CloudFallbacks(t *testing.T) {
 		t.Fatalf("valid cloud_fallbacks: %v", err)
 	}
 	c.CloudFallbacks = []*CloudConfig{{Provider: "anthropic"}}
-	wantErrContaining(t, c.Validate(), "cloud_fallbacks[0].api_key is empty")
+	wantErrContaining(t, c.ValidateForServe(), "cloud_fallbacks[0].api_key is empty")
 	c.CloudFallbacks = []*CloudConfig{{Provider: "bedrock"}}
 	wantErrContaining(t, c.Validate(), "cloud_fallbacks[0].provider is \"bedrock\"")
 	c.CloudFallbacks = []*CloudConfig{nil}
