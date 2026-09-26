@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 func TestValidateHybrid_EnvNameCollision(t *testing.T) {
 	c := validHybridConfig()
@@ -223,4 +226,36 @@ func TestValidate_GCPCloudAssist(t *testing.T) {
 	}
 	c.CloudFallbacks = []*CloudConfig{{Provider: "gcp-cloud-assist"}}
 	wantErrContaining(t, c.Validate(), `cloud_fallbacks[0].provider is "gcp-cloud-assist" but cloud_fallbacks[0].project is missing`)
+}
+
+// The vertex-ai model is a URL path segment, so anything that could
+// reshape the path is rejected on every kind of block, and the other
+// providers' model names (which aren't path segments) aren't held to it.
+func TestValidate_VertexAIModelID(t *testing.T) {
+	for _, ok := range []string{"gemini-2.5-flash", "gemini-3.5-flash", "claude-opus-4@20250514", "text_embedding.v2"} {
+		c := validConfig()
+		c.Cloud = &CloudConfig{Provider: "vertex-ai", Project: "p", Model: ok}
+		if err := c.Validate(); err != nil {
+			t.Errorf("model %q: Validate = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"../x", "gemini/2", "m?alt=1", "m#frag", "m m", "m%2F"} {
+		c := validConfig()
+		c.Cloud = &CloudConfig{Provider: "vertex-ai", Project: "p", Model: bad}
+		wantErrContaining(t, c.Validate(), "cloud.model "+strconv.Quote(bad)+" is not a valid Vertex AI model ID")
+
+		h := validHybridConfig()
+		h.EscalationTargets["default"] = &CloudConfig{Provider: "vertex-ai", Project: "p", Model: bad}
+		wantErrContaining(t, h.Validate(), "escalation_targets.default.model")
+
+		f := validConfig()
+		f.Cloud = &CloudConfig{Provider: "gemini", APIKey: "k"}
+		f.CloudFallbacks = []*CloudConfig{{Provider: "vertex-ai", Project: "p", Model: bad}}
+		wantErrContaining(t, f.Validate(), "cloud_fallbacks[0].model")
+	}
+	o := validConfig()
+	o.Cloud = &CloudConfig{Provider: "openai-compatible", Endpoint: "http://x", Model: "org/model:tag"}
+	if err := o.Validate(); err != nil {
+		t.Errorf("openai-compatible with a slash in model: Validate = %v, want nil", err)
+	}
 }

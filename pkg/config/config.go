@@ -1026,15 +1026,19 @@ const cloudProviderList = `"gemini", "anthropic", "bedrock", "azure-openai", "aw
 // gcpProjectPattern and gcpLocationPattern are deliberately loose — they
 // don't try to be GCP's exact naming rules, only to stop a value that
 // would change the request URL's host or path (a "/", "?", "@", space).
+// vertexModelPattern does the same for a "vertex-ai" model, which is a
+// path segment too: letters, digits, ".", "_", "@" (a pinned version,
+// e.g. "claude-opus-4@20250514") and "-".
 var (
 	gcpProjectPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9.:-]*$`)
 	gcpLocationPattern = regexp.MustCompile(`^[a-z0-9-]+$`)
+	vertexModelPattern = regexp.MustCompile(`^[A-Za-z0-9._@-]+$`)
 )
 
 // validateCloudCommon checks the fields added alongside the
 // openai-compatible/vertex-ai/gcp-cloud-assist providers: timeouts that
-// can't be negative, and a GCP project/location that can't reshape the
-// request URL. Unlike
+// can't be negative, and a GCP project/location (and vertex-ai model)
+// that can't reshape the request URL. Unlike
 // the per-provider required fields (checked for the legacy cloud block
 // in buildCloud), this runs for every block including the legacy one:
 // the fields are new, so there is no pre-existing error text to preserve.
@@ -1053,6 +1057,9 @@ func validateCloudCommon(label string, c *CloudConfig) error {
 	}
 	if c.Location != "" && !gcpLocationPattern.MatchString(c.Location) {
 		return fmt.Errorf("%s.location %q is not a valid location (want e.g. \"global\", \"us-central1\", \"us\")", label, c.Location)
+	}
+	if c.Provider == "vertex-ai" && c.Model != "" && !vertexModelPattern.MatchString(c.Model) {
+		return fmt.Errorf("%s.model %q is not a valid Vertex AI model ID (letters, digits, \".\", \"_\", \"@\" and \"-\" only, e.g. \"gemini-2.5-flash\")", label, c.Model)
 	}
 	return nil
 }
