@@ -194,8 +194,10 @@ set):
 | Field | Env var |
 |---|---|
 | `summarizer.api_key` | `VICTORIA_GATEWAY_SUMMARIZER_API_KEY` |
+| `summarizer.fallbacks[N].api_key` | `VICTORIA_GATEWAY_SUMMARIZER_FALLBACK_<N>_API_KEY` (by position, e.g. `…_FALLBACK_0_API_KEY`) |
 | `cloud.api_key` | `VICTORIA_GATEWAY_CLOUD_API_KEY` |
-| `escalation_targets.<name>.api_key` | `VICTORIA_GATEWAY_ESCALATION_<NAME>_API_KEY` (name upper-cased, non-alphanumerics → `_`, e.g. `aws-prod` → `…_AWS_PROD_API_KEY`) |
+| `cloud_fallbacks[N].api_key` | `VICTORIA_GATEWAY_CLOUD_FALLBACK_<N>_API_KEY` |
+| `escalation_targets.<name>.api_key` | `VICTORIA_GATEWAY_ESCALATION_<NAME>_API_KEY` (name upper-cased, non-alphanumerics → `_`, e.g. `aws-prod` → `…_AWS_PROD_API_KEY`; two names that map to the same variable, like `aws-prod` and `aws_prod`, are a startup error) |
 | `judge.api_key` | `VICTORIA_GATEWAY_JUDGE_API_KEY` |
 | `telegram.bot_token` | `VICTORIA_GATEWAY_TELEGRAM_BOT_TOKEN` |
 | `rag.postgres_dsn` | `VICTORIA_GATEWAY_RAG_POSTGRES_DSN` |
@@ -267,10 +269,26 @@ better with a template that filters on that field directly, e.g.
 string replace, not a format verb, so it's safe even if your own query
 text contains `%` characters.
 
+The term comes from alert labels, so it's treated as untrusted: a term
+containing a quote, backslash, `/`, `|`, backtick, parenthesis,
+whitespace or a control character is refused (that alert's analysis
+fails with `refusing to search for ...`) rather than spliced into the
+query, since it could close the literal it sits in and append query
+syntax of its own. Real host/pod/instance names never contain these. The
+default CloudWatch template also regexp-escapes the term (a bare
+`192.0.2.6` inside `/.../` would match `192x0y2z6` too); a custom
+template gets it verbatim, because it may place it in a quoted string
+instead. On GCP the template is always wrapped in parentheses after the
+time-window clause, so an `OR` in your template can't widen the window.
+
 CloudWatch Logs Insights queries are asynchronous (StartQuery, then poll
 GetQueryResults) — `timeout_sec` bounds that whole poll loop, not just one
 HTTP call. GCP Cloud Logging's `entries.list` is a single synchronous
 call, so its `timeout_sec` is a plain HTTP timeout.
+
+A `loki:` block nested inside the top-level `log_source` is ignored —
+per-source Loki endpoints are a `log_sources` feature — and startup
+prints a warning if one is set; this mode always queries `loki.endpoint`.
 
 `log_source` picks exactly one backend for the whole deployment. To use
 several at once — on-prem Loki *and* CloudWatch *and* Cloud Logging, with
@@ -302,6 +320,11 @@ webhook_auth:
 Requests without valid credentials get `401`, before any Loki/LLM/cloud/RAG
 work happens. Configure the matching `basic_auth` on Alertmanager's side —
 see `deploy/alertmanager_receiver_example.md`.
+
+Request bodies are capped at 4 MiB regardless of auth (`413` above that).
+A real Alertmanager payload is a few KB even for a large group; the cap
+only keeps a misbehaving client from making the process buffer an
+arbitrarily large body.
 
 ## Maintenance windows
 
@@ -594,6 +617,18 @@ webui_auth:
   password: "change-me"
 ```
 
+**Basic Auth does not stop cross-site request forgery.** A browser that
+has the credentials cached attaches them to a form POST coming from any
+other site just as readily as to one from these pages, so on its own it
+would let a link elsewhere confirm a pending incident in your name. Every
+web UI route therefore also refuses writes (anything but GET/HEAD) that
+the browser marks as cross-site: `Sec-Fetch-Site` must be `same-origin` or
+`none`, or — for browsers that don't send it — `Origin`/`Referer` must
+name this same host. Refused requests get `403`. Requests carrying none of
+those headers (curl, scripts calling `PUT /maintenance-windows`) aren't a
+browser acting on someone's behalf and pass as before. This applies with
+or without `webui_auth`.
+
 This isn't multi-user or role-based — it's one shared credential, the
 same tier of protection `webhook_auth` already offers the webhook
 endpoint. If you need real SSO/OIDC, the auth check is a swappable
@@ -692,10 +727,18 @@ the push, and `analyzed_by: "cloud"` in the JSON response) so you get one
 answer, not a diff to reconcile yourself. If the cloud call itself fails
 (bad key, network issue), the local result is used as a fallback rather than
 failing the alert outright — check the process logs for
-`cloud escalation failed` if that happens.
+`cloud escalation failed` if that happens (or add `cloud_fallbacks`, see
+**Fallbacks** below). Notifications and the JSON response also say which
+target answered (`escalated_to`; in this single-`cloud` mode that's the
+provider name, e.g. `bedrock`), without changing `analyzed_by`'s values.
 
 Leaving `cloud` unset (the default) disables all of this — `escalation` with
-no `cloud` configured is a startup error rather than a silent no-op.
+no `cloud` configured is a startup error rather than a silent no-op. An
+alert that asks to escalate when there's no `cloud` is logged
+(`would escalate (...) but no cloud is configured`) and counted in
+`victoria_gateway_escalation_no_target_total`. `provider: gemini` and
+`anthropic` need an `api_key` (in the file or via the env var); without
+one, startup fails instead of every escalation failing with 401 later.
 
 ### AWS Bedrock
 
@@ -868,6 +911,77 @@ separate genuine model variance from ordinary record-to-record text
 differences) is the standard this threshold should be re-checked against
 if you significantly change your alert mix or summarizer prompt.
 
+## Fallbacks: when a model is down
+
+Both the local summarizer and escalation can name backups. Only an
+unreachable backend triggers the next one — connection refused, timeout,
+a non-2xx response, an unreadable response body. A model that answers,
+even with something that isn't valid JSON, has answered: its reply is
+used as-is, the same as without fallbacks. (A model that returns an
+empty reply twice in a row isn't treated as unreachable either; that
+alert fails as it always did.)
+
+### Local summarizer fallbacks
+
+```yaml
+summarizer:
+  endpoint: "http://llm-a:8091"     # primary, e.g. MLX
+  model: "primary-model"
+  timeout_sec: 180
+  fallbacks:                         # tried in order
+    - endpoint: "http://llm-b:1234"  # e.g. LM Studio on another box
+      model: "backup-model"
+      timeout_sec: 180
+      # api_key: "..."   # or VICTORIA_GATEWAY_SUMMARIZER_FALLBACK_0_API_KEY
+```
+
+Each switch is logged (`aiops: summarizer failed for alert "X": ...;
+trying summarizer.fallbacks[0]`, then `summarized by fallback
+summarizer.fallbacks[0]`). A fallback can't have `fallbacks` of its own.
+
+**If every local model is down**, the alert isn't failed straight away:
+when its route has an escalation target (the `cloud` block, or the
+hybrid route's `escalation`), it's handed to that target with reason
+`local LLM unavailable`. This still counts against
+`escalation.max_per_hour`, and skips Jev (Jev judges the local summary,
+and there isn't one). Only when there's no target, the hourly budget is
+spent, or the escalation fails too does the alert fail — and then the
+error names both halves, e.g. `summarize: all 2 local summarizers
+failed: ...; cloud escalation (local LLM unavailable) also failed: ...`.
+With no escalation target configured, the error text is exactly what it
+was before fallbacks existed.
+
+### Escalation target fallbacks
+
+Single-`cloud` configs add `cloud_fallbacks`, a list of blocks with the
+same shape as `cloud`:
+
+```yaml
+cloud:
+  provider: bedrock
+  region: us-east-1
+  model: us.anthropic.claude-haiku-4-5-20251001-v1:0
+cloud_fallbacks:
+  - provider: bedrock
+    region: us-west-2
+    model: us.anthropic.claude-haiku-4-5-20251001-v1:0
+  - provider: anthropic
+    model: claude-haiku-4-5
+    # api_key via VICTORIA_GATEWAY_CLOUD_FALLBACK_1_API_KEY
+```
+
+With `hybrid_routes`, list targets in the route instead
+(`escalation: [aws, default]`); `cloud_fallbacks` alongside
+`hybrid_routes` is rejected.
+
+Targets are tried in order until one answers. Each failure is logged
+(`cloud escalation to "aws" failed ...`, then `falling back to escalation
+target "default"`) and counted in
+`victoria_gateway_escalation_failures_total{target=...}`; if every target
+fails, the local result is used, as before. However many targets one
+alert tries, it uses **one** slot of `escalation.max_per_hour` — a failed
+call isn't the spend that budget exists to bound.
+
 ## Hybrid cloud routing: several log backends and escalation targets in one deployment
 
 `log_source` and `cloud` each pick exactly one thing for the whole
@@ -928,7 +1042,9 @@ How it's evaluated:
 - A `default: true` route is required and must be last — every alert needs
   somewhere to get its logs from.
 - `escalation` may be left out of a route: alerts on it never escalate,
-  and the local result is final.
+  and the local result is final. It may also be a list,
+  `escalation: [aws, default]` — later targets are tried only when an
+  earlier one fails (see **Fallbacks** below).
 - Routes that share a log source or escalation target name share one
   client.
 - Where the `cloud` label comes from is up to you — typically a static
@@ -936,12 +1052,30 @@ How it's evaluated:
   Alertmanager route that forwards those alerts.
 
 What stays global: `loki.lookback_sec`/`loki.limit`, `escalation.always_cloud`
-(an alert on a route without an escalation target still can't escalate),
-`escalation.max_per_hour` (one budget shared by every target), and the Jev
-judge. `analyzed_by` in results and RAG records is still `local`/`cloud`;
-which route, log source and escalation target an alert used is logged per
-alert (`routed via hybrid_routes[0] → log source "aws", escalation "aws"`),
-and the startup line lists every configured source and target.
+(an alert on a route without an escalation target still can't escalate —
+it's logged as `would escalate (...) but route "..." has no escalation
+target`, and startup prints a warning when `always_cloud` is set and some
+route has no target), `escalation.max_per_hour` (one budget shared by
+every target), and the Jev judge. `analyzed_by` in results and RAG
+records is still `local`/`cloud`; which target answered is in the
+separate `escalated_to` field of notifications, the webhook JSON and the
+tracker issue (not in RAG records — that would need a schema migration
+for a value the issue already carries). Which route, log source and
+escalation target an alert used is logged per alert (`routed via
+hybrid_routes[0] → log source "aws", escalation "aws"`), and the startup
+line lists every configured source and target.
+
+**Routing labels are an attack surface.** Whoever can put labels on an
+alert decides which log backend is queried and which escalation target
+is called — and anyone who can reach `/webhook/alertmanager` can send an
+alert with any labels they like. If a route sends alerts to a costly or
+powerful target (AWS DevOps Agent starts a real investigation in your
+AWS account), turn on `webhook_auth` so only Alertmanager can post, set
+`escalation.max_per_hour` so a flood of crafted alerts can't run up an
+unbounded bill, and prefer matching on labels your own scrape config or
+Alertmanager route sets over labels an application can emit itself.
+Matcher globs are checked at startup (an unterminated `[` class is an
+error, not a route that silently never matches).
 
 **Relationship to the single-backend config:** with `hybrid_routes` unset,
 `log_source`/`cloud` work exactly as before — existing configs need no
@@ -1284,6 +1418,20 @@ so a dashboard can graph average latencies ("is the local model slower
 today"). No external dependency for this (`pkg/metrics` is hand-rolled,
 not `prometheus/client_golang`) — point a Prometheus scrape config at this
 port's `/metrics` path if you want them collected.
+
+A few families carry a label saying where the work went. The names
+didn't change when the labels were added, so a query that sums over the
+family (`sum(rate(victoria_gateway_escalations_total[1h]))`) gives the
+same number it always did; until the first sample, each family shows one
+unlabeled `0`.
+
+| Metric | Label | Value in single-backend (non-hybrid) mode |
+|---|---|---|
+| `victoria_gateway_alerts_total`, `victoria_gateway_alerts_error_total` | `route` (`hybrid_routes[N]` or `default`) | `legacy` |
+| `victoria_gateway_escalations_total`, `victoria_gateway_escalation_failures_total`, `victoria_gateway_escalation_rate_limited_total` | `target` (escalation target name) | provider, e.g. `bedrock`; a fallback is `bedrock (cloud_fallbacks[0])` |
+| `victoria_gateway_escalation_no_target_total` | `route` | `legacy` |
+| `victoria_gateway_loki_query_duration_seconds_sum`/`_count` (every log backend, despite the name) | `log_source` (log source name) | the type: `loki`, `cloudwatch`, `gcp_logging` |
+| `victoria_gateway_cloud_llm_duration_seconds_sum`/`_count` | `target` | as for `escalations_total` |
 
 Or in a container — same image either way, two deployment shapes on top
 of it depending on where the rest of your monitoring stack already runs:

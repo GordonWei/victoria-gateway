@@ -75,6 +75,16 @@ summarizer:
   # idle can exceed 60s) so the first analysis after an idle period doesn't
   # die at the default limit.
   timeout_sec: 180
+  # Optional. Other local model servers to try, in order, when the one
+  # above can't be reached (connection refused, timeout, non-2xx). A reply
+  # that isn't valid JSON is still an answer and doesn't switch. If every
+  # local model is down, the alert goes to the escalation target instead
+  # (reason "local LLM unavailable"). README: "Fallbacks".
+  # fallbacks:
+  #   - endpoint: "http://REPLACE-second-llm-host:1234"
+  #     model: "REPLACE-model-name"
+  #     timeout_sec: 180
+  #     # api_key: "..."   # or VICTORIA_GATEWAY_SUMMARIZER_FALLBACK_0_API_KEY
 
 # Optional. Omit this whole section to run local-only, exactly as before —
 # nothing below changes behavior unless escalation.always_cloud is also set
@@ -85,6 +95,13 @@ summarizer:
 #   endpoint: ""   # optional; each provider has its own default
 #   api_key: "REPLACE-gemini-api-key"
 #   model: "gemini-2.5-flash"
+# Optional. Tried in order when the cloud block's own call fails; one
+# escalation uses one max_per_hour slot however many of these it tries.
+# Not allowed together with hybrid_routes (list targets per route there).
+# cloud_fallbacks:
+#   - provider: "anthropic"
+#     model: "claude-haiku-4-5"
+#     api_key: "REPLACE-anthropic-api-key"   # or VICTORIA_GATEWAY_CLOUD_FALLBACK_0_API_KEY
 
 # Optional, instead of log_source + cloud above: route each alert by its
 # labels to its own log backend and escalation target, so one deployment
@@ -103,7 +120,7 @@ summarizer:
 # hybrid_routes:
 #   - matchers: {cloud: "aws"}
 #     log_source: aws
-#     escalation: aws
+#     escalation: [aws, default]   # or a single name; later ones only if earlier fail
 #   - default: true
 #     log_source: onprem
 #     escalation: default
