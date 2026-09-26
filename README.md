@@ -723,10 +723,12 @@ host's logs don't cover the real cause. Add a `cloud` block and victoria-gateway
 can re-run the analysis against a stronger cloud model for alerts that need
 it, while everything else still stays local. Gemini is the default provider
 (`pkg/model.GeminiClient`); Anthropic (`pkg/model.AnthropicClient`), AWS
-Bedrock (`pkg/model.BedrockClient`), and Azure OpenAI
-(`pkg/model.AzureOpenAIClient`) are also supported, so the three major
-public clouds each have a native option — see the dedicated sections below
-for Bedrock and Azure OpenAI's extra setup:
+Bedrock (`pkg/model.BedrockClient`), Azure OpenAI
+(`pkg/model.AzureOpenAIClient`), and Gemini on Vertex AI
+(`pkg/model.VertexAIClient`) are also supported, so the three major
+public clouds each have a native option, and `openai-compatible` covers
+any self-hosted or proxied OpenAI-style server — see the dedicated
+sections below for their extra setup:
 
 ```yaml
 cloud:
@@ -770,7 +772,11 @@ alert that asks to escalate when there's no `cloud` is logged
 `victoria_gateway_escalation_no_target_total`. `provider: gemini` and
 `anthropic` need an `api_key` (in the file or via the env var); without
 one, the server refuses to start instead of every escalation failing
-with 401 later. Only the server checks this: `victoria-gateway sync` and
+with 401 later. The reverse holds for `vertex-ai` and `gcp-cloud-assist`,
+which authenticate with Application Default Credentials: an `api_key` on
+such a block (typically a `VICTORIA_GATEWAY_*_API_KEY` left over from when
+it was `provider: gemini`) is a startup error rather than silently
+ignored. `openai-compatible` takes one if the server wants it. Only the server checks this: `victoria-gateway sync` and
 `note` never call a cloud model, so they run fine from a shell that
 doesn't have the `VICTORIA_GATEWAY_*_API_KEY` variables set.
 
@@ -840,6 +846,63 @@ older per-deployment-path API — if Microsoft's documented default
 `api_version` ever looks stale, override it here rather than waiting on a
 code change.
 
+### Any OpenAI-compatible endpoint (vLLM, LiteLLM, OpenRouter, Ollama)
+
+`provider: "openai-compatible"` sends the escalation to any server that
+speaks `POST /v1/chat/completions` — a bigger model on a vLLM box, a
+LiteLLM proxy in front of several vendors, OpenRouter, an Ollama host:
+
+```yaml
+cloud:
+  provider: "openai-compatible"
+  endpoint: "http://litellm.internal:4000"   # base URL; /v1/chat/completions is appended
+  model: "gpt-4.1-mini"                      # whatever the server calls it
+  api_key: "sk-..."                          # optional; no Authorization header when empty
+  timeout_sec: 120                           # optional, default 60
+```
+
+`endpoint` is the part before `/v1`: `https://openrouter.ai/api` for
+OpenRouter, `http://host:11434` for Ollama, `http://host:8000` for vLLM.
+It's the same client the local summarizer uses (`pkg/model.OpenAIClient`),
+so a 5xx or 429 is reported as the server being unavailable, and a host
+that is switched off fails within the 5-second connect timeout instead
+of holding the alert for `timeout_sec`. `endpoint` and `model` are
+required. The key can also come from the usual env var
+(`VICTORIA_GATEWAY_CLOUD_API_KEY`, `…_ESCALATION_<NAME>_API_KEY`, ...).
+
+### Vertex AI (Gemini on GCP, no API key)
+
+`provider: "vertex-ai"` calls the same Gemini models through Vertex AI
+instead of the Gemini Developer API. The project is billed, and access is
+IAM, not an API key: credentials come from Application Default
+Credentials — `GOOGLE_APPLICATION_CREDENTIALS`, `gcloud auth
+application-default login`, or the GCE/GKE/Cloud Run metadata server (the
+same chain the `gcp_logging` log source uses).
+
+```yaml
+cloud:
+  provider: "vertex-ai"
+  project: "my-gcp-project"
+  model: "gemini-2.5-flash"
+  location: "global"     # optional, default global; or a region such as us-central1, or us / eu
+  timeout_sec: 60        # optional, default 60
+```
+
+`location` picks the endpoint, per Vertex AI's
+[Locations](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/locations)
+page: `global` → `aiplatform.googleapis.com`, a region →
+`{region}-aiplatform.googleapis.com`, `us`/`eu` →
+`aiplatform.{us|eu}.rep.googleapis.com`. The default is `global` because
+Google documents it as improving availability and reducing 429s. The
+trade-off is data location: with `global` you
+"can't control or know which region your ML processing requests are sent
+to", so set a region (or `us`/`eu`) if that matters to you. The identity
+needs `roles/aiplatform.user` on the project and the Vertex AI API
+(`aiplatform.googleapis.com`) enabled. 5xx and 429 (quota) count as the
+target being unavailable, so the next target in the chain gets the alert.
+Verified 2026-09-27 against a real project on `global` with
+`gemini-2.5-flash` and `gemini-3.5-flash`.
+
 ### Optional: escalating to AWS DevOps Agent instead of a chat completion
 
 A third `provider` option, `"aws-devops-agent"`, escalates to
@@ -902,6 +965,63 @@ on-prem hosts shouldn't send *those* alerts to it. **Hybrid cloud
 routing** (below) lets AWS alerts escalate to the DevOps Agent while
 everything else keeps escalating to Gemini/Anthropic/Bedrock, from one
 deployment.
+
+### Optional: escalating to a Gemini Cloud Assist investigation
+
+`provider: "gcp-cloud-assist"` is the GCP counterpart: it opens a
+[Gemini Cloud Assist investigation](https://docs.cloud.google.com/cloud-assist/create-investigation)
+in a GCP project, which reads that project's Cloud Logging, Cloud
+Monitoring and resource configuration itself and comes back with ranked
+hypotheses about the root cause.
+
+```yaml
+escalation_targets:
+  gcp:
+    provider: "gcp-cloud-assist"
+    project: "my-gcp-project"
+    poll_interval_sec: 15     # optional, default 15
+    poll_timeout_sec: 600     # optional, default 600; the gateway gives up (and tries the next target) after this
+    timeout_sec: 30           # optional, default 30; one HTTP call
+```
+
+It uses the REST API `geminicloudassist.googleapis.com/v1alpha` and the
+same steps `gcloud beta gemini cloud-assist investigations create` does:
+create an investigation in location `global` (the only one the API
+serves; `location` may be omitted or `global`), with the project and the
+whole escalation prompt — alert, RAG history, log excerpt — as the issue
+description; run its revision; poll the returned operation; then read the
+investigation. The hypotheses come back as Markdown, shown as-is like the
+AWS DevOps Agent's report. Authentication is Application Default
+Credentials, as for `vertex-ai`; there is no `api_key`.
+
+Before enabling it:
+
+- Enable the Gemini Cloud Assist API (`geminicloudassist.googleapis.com`)
+  on the project, and grant the identity
+  `roles/geminicloudassist.investigationCreator` (Google's own
+  recommendation is to also have `logging.googleapis.com`,
+  `monitoring.googleapis.com` and `cloudresourcemanager.googleapis.com`
+  enabled so the investigation has something to look at). A 403 from the
+  API comes back with a hint naming which of these is missing.
+- **Access is restricted.** Google's docs: "As of April 10, 2026,
+  creating, running, and editing investigations are only available to
+  users that have a Premium Support contract or who have requested access
+  through their account team." On a test project without either
+  (2026-09-27), creating an investigation worked but every run failed
+  within seconds with `an internal error has occurred (code 13)`; the
+  error returned by this provider says to check that access.
+- The v1alpha discovery document (revision 20260919) marks
+  `investigations.create` and `revisions.run` as deprecated ("should only
+  be created/run by the agent"). They're still what gcloud calls today,
+  but this provider depends on them staying available.
+
+Like the AWS DevOps Agent, an investigation takes minutes. The default
+`poll_timeout_sec` (600) is longer than the default `shutdown_grace_sec`
+(300), so a restart can cut a waiting escalation short; the investigation
+itself keeps running on GCP and can be opened in the console (its name is
+in the result and in any timeout error). Route only alerts about that GCP
+project to it, for example `escalation: [gcp, default]` on a
+`matchers: {cloud: gcp}` route.
 
 `escalation.max_per_hour` is an optional spend guardrail: at most this many
 alerts escalate to `cloud` within a rolling hour, 0 (default) meaning
