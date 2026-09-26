@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // validHybridConfig is a minimal valid hybrid setup: AWS alerts go to
@@ -234,5 +236,21 @@ func TestEnvName(t *testing.T) {
 		if got := EnvName(in); got != want {
 			t.Errorf("EnvName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestValidate_DevOpsAgentMitigationTimeoutNegative(t *testing.T) {
+	c := validHybridConfig()
+	c.EscalationTargets["aws"].DevOpsAgent.MitigationTimeoutSec = -1
+	wantErrContaining(t, c.Validate(), "escalation_targets.aws.aws_devops_agent.mitigation_timeout_sec must be >= 0")
+}
+
+func TestLoad_DevOpsAgentMitigationYAML(t *testing.T) {
+	var cc CloudConfig
+	if err := yaml.Unmarshal([]byte("provider: aws-devops-agent\naws_devops_agent: {space_id: s, mitigation_plan: true, mitigation_timeout_sec: 240}\n"), &cc); err != nil {
+		t.Fatal(err)
+	}
+	if da := cc.DevOpsAgent; da == nil || !da.MitigationPlan || da.MitigationTimeoutSec != 240 {
+		t.Errorf("DevOpsAgent = %+v", cc.DevOpsAgent)
 	}
 }
