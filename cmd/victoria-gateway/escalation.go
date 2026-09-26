@@ -145,9 +145,5 @@ func startupNotes(cfg *config.Config) []string {
 				strings.Join(missing, ", ")))
 		}
 	}
-	if len(cfg.HybridRoutes) == 0 && cfg.LogSource != nil && cfg.LogSource.Loki != nil && cfg.LogSource.Loki.Endpoint != "" {
-		notes = append(notes, fmt.Sprintf("⚠️  log_source.loki.endpoint (%s) is ignored — it only applies to entries under log_sources; this deployment queries loki.endpoint (%s)",
-			cfg.LogSource.Loki.Endpoint, cfg.Loki.Endpoint))
-	}
 	return notes
 }

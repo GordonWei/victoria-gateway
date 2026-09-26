@@ -28,11 +28,10 @@ func logSourceType(cfg *config.Config) string {
 // that do call Validate first (runServe does) can treat that path as
 // unreachable in practice.
 //
-// A loki block nested inside the legacy log_source is ignored, same as
-// before per-source endpoints existed: that override is a log_sources
-// feature, and honoring it here would make the startup banner (which
-// prints loki.endpoint) lie about where logs come from. startupNotes
-// warns when one is set.
+// A loki block nested inside the legacy log_source is a log_sources
+// feature that Validate rejects outright; it's still dropped here so a
+// caller that skipped Validate can't end up querying an endpoint the
+// startup banner (which prints loki.endpoint) doesn't mention.
 func buildLogSource(cfg *config.Config) (aiops.LogSource, error) {
 	ls := cfg.LogSource
 	if ls != nil && ls.Loki != nil {

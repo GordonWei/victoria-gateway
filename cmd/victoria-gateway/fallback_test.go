@@ -360,19 +360,17 @@ func TestStartupNotes(t *testing.T) {
 	h.Escalation.AlwaysCloud = []string{"cpu_high"}
 	wantContains(t, "notes", strings.Join(startupNotes(h), "\n"), "always_cloud is set, but route(s) default have no escalation target")
 
-	nested := &config.Config{
+	fallbacks := &config.Config{
 		Loki:           config.LokiConfig{Endpoint: "http://loki:3100"},
-		LogSource:      &config.LogSourceConfig{Loki: &config.LokiEndpointConfig{Endpoint: "http://other:3100"}},
 		Summarizer:     config.LLMConfig{Fallbacks: []config.LLMConfig{{Endpoint: "http://b", Model: "bm"}}},
 		Cloud:          &config.CloudConfig{Provider: "bedrock"},
 		CloudFallbacks: []*config.CloudConfig{{Provider: "anthropic"}},
 	}
-	wantContains(t, "notes", strings.Join(startupNotes(nested), "\n"),
-		"log_source.loki.endpoint (http://other:3100) is ignored", "queries loki.endpoint (http://loki:3100)",
+	wantContains(t, "notes", strings.Join(startupNotes(fallbacks), "\n"),
 		"summarizer fallbacks: http://b (bm)", "cloud fallbacks: anthropic")
 }
 
-// ── legacy log_source.loki is ignored ───────────────────────────────
+// ── legacy log_source.loki is dropped even if Validate was skipped ──
 
 func TestBuildLogSource_LegacyIgnoresNestedLokiEndpoint(t *testing.T) {
 	var topHits, nestedHits int
