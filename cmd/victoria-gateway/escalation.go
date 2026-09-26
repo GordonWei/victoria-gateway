@@ -95,25 +95,29 @@ func providerName(c *config.CloudConfig) string {
 	return c.Provider
 }
 
-// buildSummarizer wraps summarizer plus summarizer.fallbacks. With no
-// fallbacks this is exactly aiops.NewSummarizer, so a legacy config's
-// behavior (and error text) doesn't change.
+// buildSummarizer wraps summarizer plus summarizer.fallbacks. Each
+// backend gets its resolved health-check settings (defaults applied, a
+// fallback inheriting whatever the top-level block set); with the checks
+// turned off and no fallbacks, a legacy config's behavior (and error
+// text) is exactly aiops.NewSummarizer's.
 func buildSummarizer(c config.LLMConfig) *aiops.Summarizer {
-	newClient := func(lc config.LLMConfig) model.LLM {
-		return model.NewOpenAIClient(model.OpenAIClientConfig{
-			Endpoint: lc.Endpoint,
-			Model:    lc.Model,
-			Backend:  "aiops-summarizer",
-			APIKey:   lc.APIKey,
-			Timeout:  time.Duration(lc.TimeoutSec) * time.Second,
-		})
+	backend := func(name string, lc config.LLMConfig, h config.SummarizerHealth) aiops.SummarizerBackend {
+		return aiops.SummarizerBackend{
+			Name: name,
+			LLM: model.NewOpenAIClient(model.OpenAIClientConfig{
+				Endpoint: lc.Endpoint,
+				Model:    lc.Model,
+				Backend:  "aiops-summarizer",
+				APIKey:   lc.APIKey,
+				Timeout:  time.Duration(lc.TimeoutSec) * time.Second,
+			}),
+			ProbeTimeout: time.Duration(h.ProbeTimeoutSec) * time.Second,
+		}
 	}
-	if len(c.Fallbacks) == 0 {
-		return aiops.NewSummarizer(newClient(c))
-	}
-	backends := []aiops.SummarizerBackend{{Name: "summarizer", LLM: newClient(c)}}
+	top := c.Health(config.DefaultSummarizerHealth)
+	backends := []aiops.SummarizerBackend{backend("summarizer", c, top)}
 	for i, fb := range c.Fallbacks {
-		backends = append(backends, aiops.SummarizerBackend{Name: fmt.Sprintf("summarizer.fallbacks[%d]", i), LLM: newClient(fb)})
+		backends = append(backends, backend(fmt.Sprintf("summarizer.fallbacks[%d]", i), fb, fb.Health(top)))
 	}
 	return aiops.NewSummarizerWithFallbacks(backends)
 }

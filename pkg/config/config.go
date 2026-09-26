@@ -330,6 +330,57 @@ type LLMConfig struct {
 	// top-level summarizer block; a fallback may not have fallbacks of its
 	// own.
 	Fallbacks []LLMConfig `yaml:"fallbacks"`
+
+	// ProbeTimeoutSec bounds the GET /v1/models health check sent to this
+	// backend before every chat call. A host that is asleep or wedged
+	// accepts the TCP connection but never answers, so without the check
+	// each alert waits out the whole TimeoutSec before moving on to a
+	// fallback or the cloud; with it, the backend is skipped after this
+	// many seconds. Unset means DefaultSummarizerProbeTimeoutSec, 0 turns
+	// the check off. On a fallbacks entry, unset inherits the top-level
+	// summarizer's value. A pointer so an explicit 0 is distinguishable
+	// from "not written".
+	ProbeTimeoutSec *int `yaml:"probe_timeout_sec,omitempty"`
+}
+
+// DefaultSummarizerProbeTimeoutSec is summarizer.probe_timeout_sec's
+// default. /v1/models is a static list on every local server this has
+// been pointed at (LM Studio, Ollama, the MLX shim) and answers in
+// milliseconds even while a generation is running, so five seconds only
+// ever trips on a host that isn't really there.
+const DefaultSummarizerProbeTimeoutSec = 5
+
+// SummarizerHealth is one summarizer backend's resolved health-check
+// settings, with defaults and fallback inheritance already applied.
+type SummarizerHealth struct {
+	ProbeTimeoutSec int
+}
+
+// DefaultSummarizerHealth is what a summarizer block with none of the
+// health-check fields written resolves to.
+var DefaultSummarizerHealth = SummarizerHealth{
+	ProbeTimeoutSec: DefaultSummarizerProbeTimeoutSec,
+}
+
+// Health resolves c's health-check settings: every field c leaves unset
+// takes inherit's value. Pass DefaultSummarizerHealth for the top-level
+// summarizer block and the top-level block's own resolved Health for
+// each of its fallbacks.
+func (c LLMConfig) Health(inherit SummarizerHealth) SummarizerHealth {
+	h := inherit
+	if c.ProbeTimeoutSec != nil {
+		h.ProbeTimeoutSec = *c.ProbeTimeoutSec
+	}
+	return h
+}
+
+// validateHealth rejects negative health-check settings on one
+// summarizer block (label is its config path).
+func (c LLMConfig) validateHealth(label string) error {
+	if c.ProbeTimeoutSec != nil && *c.ProbeTimeoutSec < 0 {
+		return fmt.Errorf("%s.probe_timeout_sec must be >= 0 (0 turns the health check off)", label)
+	}
+	return nil
 }
 
 // CloudConfig is the cloud model endpoint escalated alerts get
@@ -586,6 +637,9 @@ func (c *Config) Validate() error {
 	if c.Summarizer.TimeoutSec < 0 {
 		return fmt.Errorf("summarizer.timeout_sec must be >= 0 (0 means the 60s default)")
 	}
+	if err := c.Summarizer.validateHealth("summarizer"); err != nil {
+		return err
+	}
 	for i, fb := range c.Summarizer.Fallbacks {
 		label := fmt.Sprintf("summarizer.fallbacks[%d]", i)
 		if fb.Endpoint == "" {
@@ -593,6 +647,9 @@ func (c *Config) Validate() error {
 		}
 		if fb.TimeoutSec < 0 {
 			return fmt.Errorf("%s.timeout_sec must be >= 0 (0 means the 60s default)", label)
+		}
+		if err := fb.validateHealth(label); err != nil {
+			return err
 		}
 		if len(fb.Fallbacks) > 0 {
 			return fmt.Errorf("%s has fallbacks of its own — list every fallback directly under summarizer.fallbacks instead", label)

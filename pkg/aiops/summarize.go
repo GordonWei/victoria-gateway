@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/model"
@@ -61,6 +62,7 @@ type SummarizeResult struct {
 // when the one before couldn't be reached — see Summarize.
 type Summarizer struct {
 	steps []SummarizerBackend
+	state []*backendState
 }
 
 // SummarizerBackend is one local model a Summarizer can call. Name only
@@ -69,18 +71,44 @@ type Summarizer struct {
 type SummarizerBackend struct {
 	Name string
 	LLM  model.LLM
+	// ProbeTimeout, when > 0 and LLM implements Prober, bounds a health
+	// check sent before every chat call; a check that finds the server
+	// unavailable skips this backend without calling chat at all. 0
+	// calls chat directly, as before the check existed.
+	ProbeTimeout time.Duration
+}
+
+// Prober is the optional health check a summarizer backend can offer —
+// model.OpenAIClient's Probe (GET /v1/models) is the one in use. It must
+// return promptly once ctx is done.
+type Prober interface {
+	Probe(ctx context.Context) error
+}
+
+// backendState is the mutable per-backend state a Summarizer keeps
+// across alerts. Summarize runs concurrently (async webhooks), so
+// everything here is safe for concurrent use.
+type backendState struct {
+	// probeInconclusive makes the "probe answered with a non-outage
+	// error, calling chat anyway" line print once per backend rather than
+	// once per alert.
+	probeInconclusive sync.Once
 }
 
 // NewSummarizer wraps a single LLM with no fallbacks — the original
 // behavior, byte for byte: no extra log lines, same error text.
 func NewSummarizer(llm model.LLM) *Summarizer {
-	return &Summarizer{steps: []SummarizerBackend{{Name: "summarizer", LLM: llm}}}
+	return NewSummarizerWithFallbacks([]SummarizerBackend{{Name: "summarizer", LLM: llm}})
 }
 
 // NewSummarizerWithFallbacks builds a Summarizer that tries backends in
 // order. backends[0] is the primary.
 func NewSummarizerWithFallbacks(backends []SummarizerBackend) *Summarizer {
-	return &Summarizer{steps: backends}
+	s := &Summarizer{steps: backends, state: make([]*backendState, len(backends))}
+	for i := range backends {
+		s.state[i] = &backendState{}
+	}
+	return s
 }
 
 // ErrLLMUnavailable marks a failure where the model server itself couldn't
@@ -138,24 +166,25 @@ func classifyChatError(err error) error {
 // is returned as-is, and a reply that merely fails to parse as JSON
 // (ParseFailed) is a successful answer, never a reason to switch. When
 // every backend is unavailable, the returned error names each failure and
-// still satisfies IsLLMUnavailable.
+// still satisfies IsLLMUnavailable. A backend whose health check (see
+// SummarizerBackend.ProbeTimeout) finds it unavailable counts as an
+// unavailable failure without its chat being called.
 func (s *Summarizer) Summarize(alert Alert, logs []LogEntry, ragContext string) (SummarizeResult, error) {
 	if len(s.steps) == 0 || s.steps[0].LLM == nil {
 		return SummarizeResult{}, fmt.Errorf("summarize: no LLM configured")
 	}
-	if len(s.steps) == 1 {
-		return SummarizeWithLLM(s.steps[0].LLM, alert, logs, ragContext)
-	}
 	var failures []string
 	for i, step := range s.steps {
-		res, err := SummarizeWithLLM(step.LLM, alert, logs, ragContext)
+		res, err := s.try(i, alert, logs, ragContext)
 		if err == nil {
 			if i > 0 {
 				log.Printf("aiops: alert %q summarized by fallback %s after %d failure(s)", alert.Labels["alertname"], step.Name, i)
 			}
 			return res, nil
 		}
-		if !IsLLMUnavailable(err) {
+		if len(s.steps) == 1 || !IsLLMUnavailable(err) {
+			// A lone backend's error is returned exactly as it was
+			// before fallbacks existed; the caller logs it.
 			return SummarizeResult{}, err
 		}
 		failures = append(failures, fmt.Sprintf("%s: %v", step.Name, err))
@@ -166,6 +195,46 @@ func (s *Summarizer) Summarize(alert Alert, logs []LogEntry, ragContext string) 
 		}
 	}
 	return SummarizeResult{}, markUnavailable(fmt.Errorf("all %d local summarizers failed: %s", len(s.steps), strings.Join(failures, "; ")))
+}
+
+// try runs one backend: the health check when configured, then the chat.
+func (s *Summarizer) try(i int, alert Alert, logs []LogEntry, ragContext string) (SummarizeResult, error) {
+	step := s.steps[i]
+	if err := s.probe(i); err != nil {
+		return SummarizeResult{}, err
+	}
+	return SummarizeWithLLM(step.LLM, alert, logs, ragContext)
+}
+
+// probe runs backend i's health check and returns a non-nil error only
+// when the check says the server is unavailable (the same outage/5xx/429
+// rule classifyChatError applies to chat). Any other failure — typically
+// a 404 from a server that doesn't implement /v1/models, or a 401 — says
+// nothing about whether chat would work, so it is logged once and chat
+// goes ahead; chat will report a real misconfiguration itself.
+func (s *Summarizer) probe(i int) error {
+	step := s.steps[i]
+	p, ok := step.LLM.(Prober)
+	if step.ProbeTimeout <= 0 || !ok {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), step.ProbeTimeout)
+	defer cancel()
+	err := p.Probe(ctx)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		err = fmt.Errorf("no answer within %s: %w", step.ProbeTimeout, err)
+	}
+	classified := classifyChatError(fmt.Errorf("summarize: %s health check failed, chat not attempted: %w", step.LLM.Backend(), err))
+	if IsLLMUnavailable(classified) {
+		return classified
+	}
+	s.state[i].probeInconclusive.Do(func() {
+		log.Printf("aiops: %s health check (GET /v1/models) returned %v; not treating that as an outage, calling chat anyway (logged once)", step.Name, err)
+	})
+	return nil
 }
 
 // SummarizeWithLLM runs the same prompt against an arbitrary LLM backend.
