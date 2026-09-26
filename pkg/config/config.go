@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -564,7 +565,9 @@ type TelegramConfig struct {
 // so this checks the fields the server needs even when called from note
 // or sync — a real deployment's config.yaml already has them set, since
 // the server has to be running for note/sync's captured/synced records to
-// exist in the first place.
+// exist in the first place. The one exception is the cloud API keys (see
+// ValidateForServe): they usually arrive via env vars that only the
+// server's unit sets, and note/sync never call a cloud model.
 func (c *Config) Validate() error {
 	if len(c.HybridRoutes) > 0 {
 		if err := c.validateHybrid(); err != nil {
@@ -594,11 +597,6 @@ func (c *Config) Validate() error {
 		}
 		if len(fb.Fallbacks) > 0 {
 			return fmt.Errorf("%s has fallbacks of its own — list every fallback directly under summarizer.fallbacks instead", label)
-		}
-	}
-	if c.Cloud != nil {
-		if err := validateCloudAPIKey("cloud", c.Cloud); err != nil {
-			return err
 		}
 	}
 	if len(c.CloudFallbacks) > 0 {
@@ -661,6 +659,39 @@ func (c *Config) Validate() error {
 	}
 	if err := ValidateMaintenanceWindows(c.MaintenanceWindows); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ValidateForServe is Validate plus the checks only the server needs:
+// every gemini/anthropic escalation target (cloud, cloud_fallbacks,
+// escalation_targets) must have an api_key. note and sync call plain
+// Validate, so running them from a shell without the
+// VICTORIA_GATEWAY_*_API_KEY env vars doesn't fail on a key they never
+// use.
+func (c *Config) ValidateForServe() error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if c.Cloud != nil {
+		if err := validateCloudAPIKey("cloud", c.Cloud); err != nil {
+			return err
+		}
+	}
+	for i, fb := range c.CloudFallbacks {
+		if err := validateCloudAPIKey(fmt.Sprintf("cloud_fallbacks[%d]", i), fb); err != nil {
+			return err
+		}
+	}
+	names := make([]string, 0, len(c.EscalationTargets))
+	for name := range c.EscalationTargets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := validateCloudAPIKey("escalation_targets."+name, c.EscalationTargets[name]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -820,7 +851,7 @@ func (c *Config) validateHybrid() error {
 func validateCloudEntry(label string, c *CloudConfig) error {
 	switch c.Provider {
 	case "", "gemini", "anthropic":
-		return validateCloudAPIKey(label, c)
+		// api_key is checked by ValidateForServe only — see there.
 	case "bedrock":
 		if c.Region == "" || c.Model == "" {
 			return fmt.Errorf("%s.provider is \"bedrock\" but %s.region/model is missing", label, label)
@@ -844,7 +875,8 @@ func validateCloudEntry(label string, c *CloudConfig) error {
 // otherwise only surface as "every escalation fails" on the first alert.
 // The legacy cloud block only gets this check (its other per-provider
 // checks stay in buildCloud, unchanged); api_key may also arrive via the
-// VICTORIA_GATEWAY_*_API_KEY env vars, which Load applies before Validate.
+// VICTORIA_GATEWAY_*_API_KEY env vars, which Load applies before
+// validation. Only ValidateForServe calls this.
 func validateCloudAPIKey(label string, c *CloudConfig) error {
 	switch c.Provider {
 	case "", "gemini", "anthropic":
