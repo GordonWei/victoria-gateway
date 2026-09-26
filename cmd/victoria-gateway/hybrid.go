@@ -38,6 +38,15 @@ type escalationStep struct {
 	llm     model.LLM
 }
 
+// metricLabel is the route label on per-route metrics: the route's name
+// in hybrid mode, "legacy" otherwise.
+func (r alertRoute) metricLabel() string {
+	if r.name == "" {
+		return "legacy"
+	}
+	return r.name
+}
+
 // escalationNames renders a route's chain for the routing log line, e.g.
 // "aws → default", or "none".
 func (r alertRoute) escalationNames() string {

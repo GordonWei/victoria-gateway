@@ -2,21 +2,26 @@ package metrics
 
 import (
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCounters_NilSafe(t *testing.T) {
 	var c *Counters
 	// None of these should panic on a nil receiver.
-	c.IncAlertsTotal()
-	c.IncAlertsErrorTotal()
+	c.IncAlertsTotal("legacy")
+	c.IncAlertsErrorTotal("legacy")
 	c.IncDedupSkippedTotal()
 	c.IncResolvedSkippedTotal()
 	c.IncWebhookAuthRejectedTotal()
-	c.IncEscalationsTotal()
-	c.IncEscalationFailuresTotal()
-	c.IncEscalationRateLimitedTotal()
+	c.IncEscalationsTotal("bedrock")
+	c.IncEscalationFailuresTotal("bedrock")
+	c.IncEscalationRateLimitedTotal("bedrock")
+	c.IncEscalationNoTargetTotal("legacy")
+	c.ObserveLokiQueryDuration("loki", time.Second)
+	c.ObserveCloudLLMDuration("bedrock", time.Second)
 	c.IncRAGCaptureTotal()
 	c.IncRAGCaptureFailuresTotal()
 	c.IncRAGSearchFailuresTotal()
@@ -35,19 +40,19 @@ func TestCounters_NilSafe(t *testing.T) {
 
 func TestCounters_HandlerReflectsIncrements(t *testing.T) {
 	c := &Counters{}
-	c.IncAlertsTotal()
-	c.IncAlertsTotal()
-	c.IncAlertsErrorTotal()
-	c.IncEscalationsTotal()
+	c.IncAlertsTotal("legacy")
+	c.IncAlertsTotal("legacy")
+	c.IncAlertsErrorTotal("legacy")
+	c.IncEscalationsTotal("bedrock")
 
 	rec := httptest.NewRecorder()
 	c.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	body := rec.Body.String()
 
 	for _, want := range []string{
-		"victoria_gateway_alerts_total 2",
-		"victoria_gateway_alerts_error_total 1",
-		"victoria_gateway_escalations_total 1",
+		`victoria_gateway_alerts_total{route="legacy"} 2`,
+		`victoria_gateway_alerts_error_total{route="legacy"} 1`,
+		`victoria_gateway_escalations_total{target="bedrock"} 1`,
 		"victoria_gateway_escalation_failures_total 0",
 	} {
 		if !strings.Contains(body, want) {
@@ -66,14 +71,111 @@ func TestCounters_HandlerContentType(t *testing.T) {
 }
 
 func TestCounters_EscalationNoTarget(t *testing.T) {
-	var nilC *Counters
-	nilC.IncEscalationNoTargetTotal() // nil-safe
-
 	c := &Counters{}
-	c.IncEscalationNoTargetTotal()
+	c.IncEscalationNoTargetTotal("default")
 	rec := httptest.NewRecorder()
 	c.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
-	if !strings.Contains(rec.Body.String(), "victoria_gateway_escalation_no_target_total 1") {
+	if !strings.Contains(rec.Body.String(), `victoria_gateway_escalation_no_target_total{route="default"} 1`) {
 		t.Errorf("metrics output missing the no-target counter, got:\n%s", rec.Body.String())
 	}
+}
+
+// TestCounters_LabeledFamilies checks the per-route/target/log-source
+// labels: one HELP/TYPE per family, one series per label value, and the
+// per-label values summing to what the unlabeled series used to show.
+func TestCounters_LabeledFamilies(t *testing.T) {
+	c := &Counters{}
+	c.IncAlertsTotal("hybrid_routes[0]")
+	c.IncAlertsTotal("default")
+	c.IncAlertsTotal("default")
+	c.IncEscalationsTotal("aws")
+	c.IncEscalationFailuresTotal("aws")
+	c.IncEscalationFailuresTotal("default")
+	c.IncEscalationRateLimitedTotal("aws")
+	c.ObserveLokiQueryDuration("onprem", 2*time.Second)
+	c.ObserveLokiQueryDuration("aws", time.Second)
+	c.ObserveLokiQueryDuration("aws", time.Second)
+	c.ObserveCloudLLMDuration("aws", 3*time.Second)
+
+	rec := httptest.NewRecorder()
+	c.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+
+	for _, want := range []string{
+		`victoria_gateway_alerts_total{route="default"} 2`,
+		`victoria_gateway_alerts_total{route="hybrid_routes[0]"} 1`,
+		`victoria_gateway_escalations_total{target="aws"} 1`,
+		`victoria_gateway_escalation_failures_total{target="aws"} 1`,
+		`victoria_gateway_escalation_failures_total{target="default"} 1`,
+		`victoria_gateway_escalation_rate_limited_total{target="aws"} 1`,
+		"victoria_gateway_escalation_no_target_total 0",
+		`victoria_gateway_loki_query_duration_seconds_sum{log_source="aws"} 2.000000`,
+		`victoria_gateway_loki_query_duration_seconds_count{log_source="aws"} 2`,
+		`victoria_gateway_loki_query_duration_seconds_count{log_source="onprem"} 1`,
+		`victoria_gateway_cloud_llm_duration_seconds_count{target="aws"} 1`,
+		"victoria_gateway_local_llm_duration_seconds_count 0",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics output missing %q", want)
+		}
+	}
+	// The unlabeled series must be gone once labeled ones exist, or
+	// sum() would double count.
+	for _, notWant := range []string{"victoria_gateway_alerts_total 0\n", "victoria_gateway_loki_query_duration_seconds_count 0\n"} {
+		if strings.Contains(body, notWant) {
+			t.Errorf("metrics output still has unlabeled %q next to labeled series", notWant)
+		}
+	}
+	// Prometheus text format allows one HELP and one TYPE per metric name.
+	seen := map[string]int{}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "# TYPE ") || strings.HasPrefix(line, "# HELP ") {
+			seen[line[:6]+" "+strings.Fields(line)[2]]++
+		}
+	}
+	for k, n := range seen {
+		if n != 1 {
+			t.Errorf("%s appears %d times", k, n)
+		}
+	}
+	if got := sumFamily(body, "victoria_gateway_alerts_total"); got != 3 {
+		t.Errorf("sum(alerts_total) = %d, want 3", got)
+	}
+}
+
+// TestCounters_LegacyLabelsSumToOldValue: a legacy deployment only ever
+// produces route="legacy" and target=<provider>, so sum() equals the old
+// unlabeled number exactly.
+func TestCounters_LegacyLabelsSumToOldValue(t *testing.T) {
+	c := &Counters{}
+	for i := 0; i < 5; i++ {
+		c.IncAlertsTotal("legacy")
+	}
+	c.IncEscalationsTotal("bedrock")
+	c.IncEscalationsTotal("bedrock")
+	rec := httptest.NewRecorder()
+	c.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+	if got := sumFamily(body, "victoria_gateway_alerts_total"); got != 5 {
+		t.Errorf("sum(alerts_total) = %d, want 5", got)
+	}
+	if got := sumFamily(body, "victoria_gateway_escalations_total"); got != 2 {
+		t.Errorf("sum(escalations_total) = %d, want 2", got)
+	}
+}
+
+// sumFamily adds every sample of one counter family (labeled or not).
+func sumFamily(body, name string) int64 {
+	var total int64
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, name+" ") && !strings.HasPrefix(line, name+"{") {
+			continue
+		}
+		f := strings.Fields(line)
+		n, err := strconv.ParseInt(f[len(f)-1], 10, 64)
+		if err == nil {
+			total += n
+		}
+	}
+	return total
 }

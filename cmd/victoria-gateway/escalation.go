@@ -34,17 +34,17 @@ func (h *handler) runEscalation(steps []escalationStep, alert aiops.Alert, logs 
 	for i, step := range steps {
 		start := time.Now()
 		result, err := aiops.SummarizeWithLLM(step.llm, alert, logs, ragContext)
-		h.metrics.ObserveCloudLLMDuration(time.Since(start))
+		h.metrics.ObserveCloudLLMDuration(step.display, time.Since(start))
 		if err == nil {
 			if step.name != "" {
 				log.Printf("aiops: alert %q escalated to cloud target %q (%s)", alertName, step.name, reason)
 			} else {
 				log.Printf("aiops: alert %q escalated to cloud (%s)", alertName, reason)
 			}
-			h.metrics.IncEscalationsTotal()
+			h.metrics.IncEscalationsTotal(step.display)
 			return result, step, nil
 		}
-		h.metrics.IncEscalationFailuresTotal()
+		h.metrics.IncEscalationFailuresTotal(step.display)
 		if step.name != "" {
 			log.Printf("aiops: cloud escalation to %q failed for alert %q (%s): %v", step.name, alertName, reason, err)
 		} else {

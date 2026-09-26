@@ -135,6 +135,7 @@ func runServe(args []string) {
 		summarizer:        summarizer,
 		cloud:             cloud,
 		legacyEscalations: legacyEscalations,
+		legacyLogSource:   logSourceType(cfg),
 		escalation:        cfg.Escalation,
 		lookback:          lookback,
 		limit:             limit,
@@ -446,10 +447,13 @@ type handler struct {
 	// at startup. Nil means "derive a one-step chain from cloud", which
 	// is what the many test-constructed handlers that only set cloud get.
 	legacyEscalations []escalationStep
-	escalation        config.EscalationConfig
-	lookback          time.Duration
-	limit             int
-	webhookAuth       *config.WebhookAuthConfig // nil if the webhook endpoint requires no auth
+	// legacyLogSource labels the legacy log source in metrics: its type
+	// ("loki", "cloudwatch", "gcp_logging").
+	legacyLogSource string
+	escalation      config.EscalationConfig
+	lookback        time.Duration
+	limit           int
+	webhookAuth     *config.WebhookAuthConfig // nil if the webhook endpoint requires no auth
 	// webUIAuth is non-nil exactly when webUIAuthMiddleware actually
 	// verifies Basic Auth on the web routes — see actorFromRequest's doc
 	// comment for why this has to be checked before trusting an
@@ -807,12 +811,12 @@ func (h *handler) processAlert(alert aiops.Alert) alertResult {
 // multiple alerts, and one bad one shouldn't blank out the rest.
 func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	route := h.route(alert.Labels)
-	h.metrics.IncAlertsTotal()
+	h.metrics.IncAlertsTotal(route.metricLabel())
 	analysisStart := time.Now()
 	defer func() {
 		h.metrics.ObserveAnalysisDuration(time.Since(analysisStart))
 		if res.Error != "" {
-			h.metrics.IncAlertsErrorTotal()
+			h.metrics.IncAlertsErrorTotal(route.metricLabel())
 		}
 	}()
 
@@ -863,7 +867,7 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 
 	logQueryStart := time.Now()
 	logs, err := route.logs.QueryRange(context.Background(), identity, start.Add(-h.lookback), time.Now(), h.limit)
-	h.metrics.ObserveLokiQueryDuration(time.Since(logQueryStart))
+	h.metrics.ObserveLokiQueryDuration(route.logSourceName, time.Since(logQueryStart))
 	if err != nil {
 		res.Error = fmt.Sprintf("log query: %v", err)
 		return
@@ -886,7 +890,7 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		log.Printf("aiops: local summarizer unavailable for alert %q, escalating instead: %v", res.AlertName, err)
 		if !h.allowEscalation() {
 			log.Printf("aiops: alert %q would escalate (%s) but escalation.max_per_hour is already reached this hour", res.AlertName, reasonLocalUnavailable)
-			h.metrics.IncEscalationRateLimitedTotal()
+			h.metrics.IncEscalationRateLimitedTotal(route.escalations[0].display)
 			res.Error = fmt.Sprintf("summarize: %v; cloud escalation skipped: escalation.max_per_hour reached", err)
 			return
 		}
@@ -917,12 +921,12 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		} else {
 			log.Printf("aiops: alert %q would escalate (%s) but no cloud is configured", res.AlertName, reason)
 		}
-		h.metrics.IncEscalationNoTargetTotal()
+		h.metrics.IncEscalationNoTargetTotal(route.metricLabel())
 		escalate = false
 	}
 	if escalate && !h.allowEscalation() {
 		log.Printf("aiops: alert %q would escalate (%s) but escalation.max_per_hour is already reached this hour; staying on the local result", res.AlertName, reason)
-		h.metrics.IncEscalationRateLimitedTotal()
+		h.metrics.IncEscalationRateLimitedTotal(route.escalations[0].display)
 		escalate = false
 	}
 	if escalate {
@@ -950,7 +954,7 @@ func (h *handler) route(labels map[string]string) alertRoute {
 	if h.router != nil {
 		return h.router.pick(labels)
 	}
-	r := alertRoute{logs: h.logs, escalations: h.legacyEscalations}
+	r := alertRoute{logs: h.logs, logSourceName: h.legacyLogSource, escalations: h.legacyEscalations}
 	if r.escalations == nil && h.cloud != nil {
 		r.escalations = []escalationStep{{display: h.cloud.Backend(), llm: h.cloud}}
 	}
