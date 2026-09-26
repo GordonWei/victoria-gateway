@@ -154,6 +154,7 @@ func TestSummarizeOne_LocalDown_EscalatesToCloud(t *testing.T) {
 		t.Errorf("Jev called %d times; it judges a local summary and there isn't one", judgeCalls)
 	}
 	wantContains(t, "log", logs(), "local summarizer unavailable", "escalated to cloud (local LLM unavailable)")
+	wantContains(t, "metrics", scrape(t, h.metrics), `victoria_gateway_escalations_total{target="anthropic"} 1`)
 }
 
 func TestSummarizeOne_LocalDown_NoCloud_ErrorUnchanged(t *testing.T) {
@@ -207,6 +208,7 @@ func TestSummarizeOne_LocalDown_RateLimited(t *testing.T) {
 	if calls != 1 {
 		t.Errorf("cloud calls = %d, want 1 (the cap applies to this path too)", calls)
 	}
+	wantContains(t, "metrics", scrape(t, h.metrics), `victoria_gateway_escalation_rate_limited_total{target="anthropic"} 1`)
 }
 
 // ── escalation fallbacks ────────────────────────────────────────────
@@ -251,6 +253,10 @@ func TestSummarizeOne_LegacyCloudFallback(t *testing.T) {
 		t.Errorf("escalationCount = %d, want 1", h.escalationCount)
 	}
 	wantContains(t, "log", logs(), "cloud escalation failed for alert \"cpu_high\" (local model requested escalation: unsure)", `falling back to escalation target "cloud_fallbacks[0]"`, `escalated to cloud target "cloud_fallbacks[0]"`)
+	wantContains(t, "metrics", scrape(t, h.metrics),
+		`victoria_gateway_escalation_failures_total{target="anthropic"} 1`,
+		`victoria_gateway_escalations_total{target="anthropic (cloud_fallbacks[0])"} 1`,
+		`victoria_gateway_alerts_total{route="legacy"} 1`)
 }
 
 func TestSummarizeOne_HybridEscalationList(t *testing.T) {
@@ -277,6 +283,11 @@ func TestSummarizeOne_HybridEscalationList(t *testing.T) {
 		t.Errorf("calls aws=%d default=%d, want 1/1", awsCalls, defCalls)
 	}
 	wantContains(t, "log", logs(), `escalation "aws → default"`, `cloud escalation to "aws" failed`, `escalated to cloud target "default"`)
+	wantContains(t, "metrics", scrape(t, h.metrics),
+		`victoria_gateway_alerts_total{route="hybrid_routes[0]"} 1`,
+		`victoria_gateway_loki_query_duration_seconds_count{log_source="aws"} 1`,
+		`victoria_gateway_cloud_llm_duration_seconds_count{target="aws"} 1`,
+		`victoria_gateway_cloud_llm_duration_seconds_count{target="default"} 1`)
 }
 
 func TestSummarizeOne_AllEscalationsFail_StaysLocal(t *testing.T) {
@@ -310,6 +321,7 @@ func TestSummarizeOne_EscalateWithoutTarget_LogsAndCounts(t *testing.T) {
 		t.Fatalf("res = %+v", res)
 	}
 	wantContains(t, "log", logs(), `would escalate (local model requested escalation`, `but route "default" has no escalation target`)
+	wantContains(t, "metrics", scrape(t, h.metrics), `victoria_gateway_escalation_no_target_total{route="default"} 1`)
 }
 
 func TestStartupNotes(t *testing.T) {
