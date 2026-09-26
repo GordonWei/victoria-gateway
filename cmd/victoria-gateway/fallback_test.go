@@ -188,6 +188,31 @@ func TestSummarizeOne_LocalDown_CloudAlsoFails_ErrorNamesBoth(t *testing.T) {
 	}
 }
 
+// A local 401 is a wrong API key, not an outage: it must fail the alert
+// with the original error and never reach the cloud, even with a cloud
+// target configured.
+func TestSummarizeOne_LocalAuthError_DoesNotEscalate(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+	unauthorized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "invalid api key", http.StatusUnauthorized)
+	}))
+	defer unauthorized.Close()
+	var calls int
+	cloud := countingCloud(t, "should not be used", http.StatusOK, &calls)
+	h := newTestHandler(t, lokiSrv.URL, unauthorized.URL)
+	h.cloud = anthropicAt(cloud.URL)
+	h.legacyEscalations = []escalationStep{{display: "anthropic", llm: h.cloud}}
+
+	res := h.summarizeOne(testAlert())
+	if !strings.HasPrefix(res.Error, "summarize: summarize: test chat failed: test returned 401: invalid api key") {
+		t.Fatalf("Error = %q, want the local 401 reported as-is", res.Error)
+	}
+	if calls != 0 || res.AnalyzedBy == "cloud" {
+		t.Errorf("cloud calls = %d, AnalyzedBy = %q; a 401 must not escalate", calls, res.AnalyzedBy)
+	}
+}
+
 func TestSummarizeOne_LocalDown_RateLimited(t *testing.T) {
 	lokiSrv := newFakeLoki(t)
 	defer lokiSrv.Close()
