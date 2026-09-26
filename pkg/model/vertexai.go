@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -119,8 +120,14 @@ func newVertexAIClient(cfg VertexAIClientConfig) *VertexAIClient {
 	}
 }
 
+// modelPath escapes each segment. config already restricts project,
+// location and model to characters that can't change the URL's shape;
+// this is the second line of defence for a client built some other way,
+// so a "/" or "?" in a model name can't point the request (and its
+// bearer token) at a different resource.
 func (c *VertexAIClient) modelPath() string {
-	return fmt.Sprintf("/v1/projects/%s/locations/%s/publishers/google/models/%s", c.project, c.location, c.model)
+	return fmt.Sprintf("/v1/projects/%s/locations/%s/publishers/google/models/%s",
+		url.PathEscape(c.project), url.PathEscape(c.location), url.PathEscape(c.model))
 }
 
 // authorize adds the ADC bearer token to req.
@@ -232,7 +239,7 @@ func (c *VertexAIClient) Chat(messages []Message, opts *ChatOptions) (string, er
 // (GET v1/publishers/google/models/{model}): no tokens are spent, and a
 // 200 confirms the credentials work and the model name exists.
 func (c *VertexAIClient) Available() bool {
-	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/v1/publishers/google/models/"+c.model, nil)
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/v1/publishers/google/models/"+url.PathEscape(c.model), nil)
 	if err != nil {
 		return false
 	}

@@ -186,3 +186,30 @@ func TestVertexAIClient_Available(t *testing.T) {
 		t.Errorf("Backend/ModelName = %q/%q", c.Backend(), c.ModelName())
 	}
 }
+
+// A model name that would reshape the URL stays one escaped path
+// segment, both for generateContent and for Available's metadata GET.
+func TestVertexAIClient_ModelPathIsEscaped(t *testing.T) {
+	var uris []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uris = append(uris, r.RequestURI)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	c := newTestVertexAIClient(srv.URL)
+	c.model = "../../other/models/x?alt=1"
+	_, _ = c.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	_ = c.Available()
+	want := []string{
+		"/v1/projects/p1/locations/us-central1/publishers/google/models/..%2F..%2Fother%2Fmodels%2Fx%3Falt=1:generateContent",
+		"/v1/publishers/google/models/..%2F..%2Fother%2Fmodels%2Fx%3Falt=1",
+	}
+	if strings.Join(uris, "\n") != strings.Join(want, "\n") {
+		t.Errorf("request URIs =\n%s\nwant\n%s", strings.Join(uris, "\n"), strings.Join(want, "\n"))
+	}
+	// The characters a real model ID uses pass through unchanged.
+	c.model = "claude-opus-4@20250514"
+	if got := c.modelPath(); !strings.HasSuffix(got, "/models/claude-opus-4@20250514") {
+		t.Errorf("modelPath = %q", got)
+	}
+}
