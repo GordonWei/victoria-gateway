@@ -13,6 +13,8 @@ import (
 	"crypto/subtle"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/gordonwei/victoria-gateway/pkg/config"
 )
@@ -92,4 +94,55 @@ func actorFromRequest(r *http.Request, authenticated bool) string {
 		return "unknown"
 	}
 	return "ip:" + host
+}
+
+// sameOriginOnly rejects state-changing requests (anything but GET, HEAD,
+// OPTIONS) that a browser marks as coming from another site. Basic Auth
+// alone doesn't stop that: a browser that has cached the credentials
+// attaches them to a cross-site form POST as readily as to one from our
+// own page, so a link on any other site could confirm a pending incident
+// or replace maintenance windows in the operator's name.
+//
+// The check uses what browsers already send rather than a CSRF token:
+// Sec-Fetch-Site (every current browser) must be "same-origin" or "none"
+// (typed into the address bar / a bookmark); failing that, Origin, then
+// Referer, must name this same host. A request with none of the three —
+// curl, scripts, the maintenance-window API's usual callers — is not a
+// browser acting on someone's behalf and passes through unchanged.
+func sameOriginOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !crossSiteWrite(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "cross-site request refused", http.StatusForbidden)
+	})
+}
+
+func crossSiteWrite(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" {
+		return site != "same-origin" && site != "none"
+	}
+	for _, h := range []string{"Origin", "Referer"} {
+		v := r.Header.Get(h)
+		if v == "" {
+			continue
+		}
+		u, err := url.Parse(v)
+		if err != nil || u.Host == "" {
+			return true // includes Origin: null
+		}
+		return !strings.EqualFold(u.Host, r.Host)
+	}
+	return false
+}
+
+// webUIChain wraps a web page handler with the CSRF check and then the
+// configured auth. Every web UI route goes through this (see runServe).
+func webUIChain(auth AuthMiddleware) func(http.Handler) http.Handler {
+	return func(h http.Handler) http.Handler { return auth(sameOriginOnly(h)) }
 }
