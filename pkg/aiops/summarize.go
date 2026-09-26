@@ -53,6 +53,12 @@ type SummarizeResult struct {
 	// Exposed so callers can log it without treating it as a hard error —
 	// a malformed-but-non-empty reply is still useful to a human.
 	ParseFailed bool
+	// Mitigation is the remediation plan the backend produced alongside
+	// its analysis (see model.DetailedLLM) — nil unless the backend was
+	// asked for one, which today means an aws-devops-agent target with
+	// mitigation_plan enabled. Not stored in RAG; the tracker issue
+	// carries it.
+	Mitigation *model.Mitigation
 }
 
 // Summarizer turns an alert + its surrounding logs into a plain-language
@@ -376,7 +382,9 @@ func SummarizeWithLLM(llm model.LLM, alert Alert, logs []LogEntry, ragContext st
 		return SummarizeResult{}, err
 	}
 
-	return parseSummarizeReply(reply), nil
+	res := parseSummarizeReply(reply.Reply)
+	res.Mitigation = reply.Mitigation
+	return res, nil
 }
 
 // summarizeMaxTokens bounds one Chat call's reply, shared by both the
@@ -398,26 +406,37 @@ var emptyReplyRetrySleep = time.Sleep
 // as this alert's analysis failing, not retried further: unlike a Loki
 // blip, nothing suggests a third attempt is more likely to land than the
 // second.
-func chatWithEmptyReplyRetry(llm model.LLM, messages []model.Message) (string, error) {
-	reply, err := llm.Chat(messages, &model.ChatOptions{MaxTokens: summarizeMaxTokens, Temperature: 0.2})
+func chatWithEmptyReplyRetry(llm model.LLM, messages []model.Message) (model.ChatResult, error) {
+	reply, err := chatDetailed(llm, messages)
 	if err != nil {
-		return "", classifyChatError(fmt.Errorf("summarize: %s chat failed: %w", llm.Backend(), err))
+		return model.ChatResult{}, classifyChatError(fmt.Errorf("summarize: %s chat failed: %w", llm.Backend(), err))
 	}
-	if strings.TrimSpace(reply) != "" {
+	if strings.TrimSpace(reply.Reply) != "" {
 		return reply, nil
 	}
 
 	log.Printf("aiops: %s returned an empty reply (likely hidden reasoning content exhausted the token budget), retrying once", llm.Backend())
 	emptyReplyRetrySleep(500 * time.Millisecond)
 
-	reply, err = llm.Chat(messages, &model.ChatOptions{MaxTokens: summarizeMaxTokens, Temperature: 0.2})
+	reply, err = chatDetailed(llm, messages)
 	if err != nil {
-		return "", classifyChatError(fmt.Errorf("summarize: %s chat failed on retry: %w", llm.Backend(), err))
+		return model.ChatResult{}, classifyChatError(fmt.Errorf("summarize: %s chat failed on retry: %w", llm.Backend(), err))
 	}
-	if strings.TrimSpace(reply) == "" {
-		return "", fmt.Errorf("summarize: %s returned an empty reply twice in a row", llm.Backend())
+	if strings.TrimSpace(reply.Reply) == "" {
+		return model.ChatResult{}, fmt.Errorf("summarize: %s returned an empty reply twice in a row", llm.Backend())
 	}
 	return reply, nil
+}
+
+// chatDetailed is one summarize-sized Chat call, through ChatDetailed
+// when the backend has it so extras like a mitigation plan come along.
+func chatDetailed(llm model.LLM, messages []model.Message) (model.ChatResult, error) {
+	opts := &model.ChatOptions{MaxTokens: summarizeMaxTokens, Temperature: 0.2}
+	if d, ok := llm.(model.DetailedLLM); ok {
+		return d.ChatDetailed(messages, opts)
+	}
+	reply, err := llm.Chat(messages, opts)
+	return model.ChatResult{Reply: reply}, err
 }
 
 // parseSummarizeReply decodes the model's JSON reply into a

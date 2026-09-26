@@ -49,6 +49,12 @@ type DevOpsAgentClient struct {
 	pollInterval time.Duration
 	pollTimeout  time.Duration
 
+	// mitigationPlan, when true, follows a completed investigation with
+	// a mitigation plan request (see mitigation); mitigationTimeout bounds
+	// that whole second phase.
+	mitigationPlan    bool
+	mitigationTimeout time.Duration
+
 	// transport builds the MCP transport to connect over. Defaults to a
 	// real "aws-devops-agent mcp" subprocess (see newCommandTransport);
 	// tests swap this for an in-memory transport pair so the polling/
@@ -83,12 +89,25 @@ type DevOpsAgentClientConfig struct {
 	Priority     string        // defaults to "HIGH"
 	PollInterval time.Duration // defaults to 30s, per the tool's own documented cadence
 	PollTimeout  time.Duration // defaults to DevOpsAgentDefaultPollTimeout; investigations are documented as taking 5-8 min
+	// MitigationPlan asks for a mitigation plan once the investigation
+	// completes, returned as ChatResult.Mitigation. Off by default: it's
+	// a second agent run billed per agent-second like the investigation.
+	MitigationPlan bool
+	// MitigationTimeout bounds the mitigation phase; defaults to
+	// DevOpsAgentDefaultMitigationTimeout.
+	MitigationTimeout time.Duration
 }
 
 // DevOpsAgentDefaultPollTimeout is how long DevOpsAgentClient waits for
 // an investigation when DevOpsAgentClientConfig.PollTimeout is unset,
 // which is always the case from config.yaml.
 const DevOpsAgentDefaultPollTimeout = 10 * time.Minute
+
+// DevOpsAgentDefaultMitigationTimeout is how long DevOpsAgentClient waits
+// for a mitigation plan when DevOpsAgentClientConfig.MitigationTimeout is
+// unset. The sample MCP server documents mitigation plans as taking 2-5
+// minutes; past this the investigation result is used without a plan.
+const DevOpsAgentDefaultMitigationTimeout = 5 * time.Minute
 
 func NewDevOpsAgentClient(cfg DevOpsAgentClientConfig) *DevOpsAgentClient {
 	binaryPath := cfg.BinaryPath
@@ -111,14 +130,20 @@ func NewDevOpsAgentClient(cfg DevOpsAgentClientConfig) *DevOpsAgentClient {
 	if pollTimeout <= 0 {
 		pollTimeout = DevOpsAgentDefaultPollTimeout
 	}
+	mitigationTimeout := cfg.MitigationTimeout
+	if mitigationTimeout <= 0 {
+		mitigationTimeout = DevOpsAgentDefaultMitigationTimeout
+	}
 	c := &DevOpsAgentClient{
-		binaryPath:   binaryPath,
-		userID:       cfg.UserID,
-		region:       region,
-		spaceID:      cfg.SpaceID,
-		priority:     priority,
-		pollInterval: pollInterval,
-		pollTimeout:  pollTimeout,
+		binaryPath:        binaryPath,
+		userID:            cfg.UserID,
+		region:            region,
+		spaceID:           cfg.SpaceID,
+		priority:          priority,
+		pollInterval:      pollInterval,
+		pollTimeout:       pollTimeout,
+		mitigationPlan:    cfg.MitigationPlan,
+		mitigationTimeout: mitigationTimeout,
 	}
 	c.transport = c.newCommandTransport
 	return c
@@ -249,9 +274,19 @@ type taskEnvelope struct {
 // source of truth the agent is asked to trust blindly — same as every
 // other RAG context use in this codebase.
 func (c *DevOpsAgentClient) Chat(messages []Message, opts *ChatOptions) (string, error) {
+	res, err := c.ChatDetailed(messages, opts)
+	return res.Reply, err
+}
+
+// ChatDetailed is Chat plus, when MitigationPlan is set, the mitigation
+// plan AWS DevOps Agent produces for the completed investigation (see
+// mitigation). The plan is best-effort: failing to get one never fails
+// the call — the investigation's summary is still the answer, and
+// ChatResult.Mitigation records what happened to the plan.
+func (c *DevOpsAgentClient) ChatDetailed(messages []Message, opts *ChatOptions) (ChatResult, error) {
 	fullContext := lastUserMessage(messages)
 	if fullContext == "" {
-		return "", fmt.Errorf("aws-devops-agent: no user message to investigate")
+		return ChatResult{}, fmt.Errorf("aws-devops-agent: no user message to investigate")
 	}
 	title := fullContext
 	if len(title) > 200 {
@@ -262,12 +297,16 @@ func (c *DevOpsAgentClient) Chat(messages []Message, opts *ChatOptions) (string,
 		description = description[:2000]
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), c.pollTimeout+time.Minute)
+	budget := c.pollTimeout + time.Minute
+	if c.mitigationPlan {
+		budget += c.mitigationTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
 	session, err := c.connect(ctx)
 	if err != nil {
-		return "", err
+		return ChatResult{}, err
 	}
 	defer func() { _ = session.Close() }()
 
@@ -277,22 +316,30 @@ func (c *DevOpsAgentClient) Chat(messages []Message, opts *ChatOptions) (string,
 		"description": description,
 	})
 	if err != nil {
-		return "", fmt.Errorf("aws-devops-agent: %w", err)
+		return ChatResult{}, fmt.Errorf("aws-devops-agent: %w", err)
 	}
 	var started taskEnvelope
 	if err := json.Unmarshal([]byte(startText), &started); err != nil {
-		return "", fmt.Errorf("aws-devops-agent: parse create_investigation response: %w", err)
+		return ChatResult{}, fmt.Errorf("aws-devops-agent: parse create_investigation response: %w", err)
 	}
 	if started.Task.TaskID == "" {
-		return "", fmt.Errorf("aws-devops-agent: create_investigation response had no taskId: %s", startText)
+		return ChatResult{}, fmt.Errorf("aws-devops-agent: create_investigation response had no taskId: %s", startText)
 	}
 
 	executionID, err := c.pollUntilComplete(ctx, session, started.Task.TaskID, started.Task.ExecutionID)
 	if err != nil {
-		return "", err
+		return ChatResult{}, err
 	}
 
-	return c.finalSummary(ctx, session, executionID)
+	summary, err := c.finalSummary(ctx, session, executionID)
+	if err != nil {
+		return ChatResult{}, err
+	}
+	res := ChatResult{Reply: summary}
+	if c.mitigationPlan {
+		res.Mitigation = c.fetchMitigation(ctx, session, started.Task.TaskID, executionID)
+	}
+	return res, nil
 }
 
 // pollUntilComplete polls get_task every pollInterval — the cadence the

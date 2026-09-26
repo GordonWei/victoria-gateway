@@ -500,6 +500,15 @@ type DevOpsAgentConfig struct {
 	Region     string `yaml:"region"`      // defaults to "us-east-1"
 	SpaceID    string `yaml:"space_id"`    // DEVOPS_AGENT_SPACE_ID
 	Priority   string `yaml:"priority"`    // CRITICAL/HIGH/MEDIUM/LOW/MINIMAL, defaults to HIGH
+	// MitigationPlan asks AWS DevOps Agent for a mitigation plan once an
+	// investigation completes and attaches it to the tracker issue.
+	// Off by default: the plan is a second agent run, billed per
+	// agent-second like the investigation, and adds minutes to the
+	// escalation.
+	MitigationPlan bool `yaml:"mitigation_plan"`
+	// MitigationTimeoutSec bounds that second run; 0 means 300s. When it
+	// runs out, the investigation's result is used without a plan.
+	MitigationTimeoutSec int `yaml:"mitigation_timeout_sec"`
 }
 
 // EscalationConfig lists alerts that must always be re-analyzed by Cloud
@@ -1001,6 +1010,9 @@ func validateCloudEntry(label string, c *CloudConfig) error {
 	case "aws-devops-agent":
 		if c.DevOpsAgent == nil {
 			return fmt.Errorf("%s.provider is \"aws-devops-agent\" but %s.aws_devops_agent is not set", label, label)
+		}
+		if c.DevOpsAgent.MitigationTimeoutSec < 0 {
+			return fmt.Errorf("%s.aws_devops_agent.mitigation_timeout_sec must be >= 0 (0 means the 300s default)", label)
 		}
 	case "openai-compatible":
 		if c.Endpoint == "" || c.Model == "" {
