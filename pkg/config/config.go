@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gordonwei/victoria-gateway/pkg/glob"
 	"gopkg.in/yaml.v3"
 )
 
@@ -669,6 +670,9 @@ func (c *Config) validateHybrid() error {
 		} else if len(r.Matchers) == 0 {
 			return fmt.Errorf("%s: matchers must not be empty (use default: true for the catch-all route)", label)
 		}
+		if err := glob.ValidateMatchers(r.Matchers); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
 		if r.LogSource == "" {
 			return fmt.Errorf("%s: log_source is required", label)
 		}
@@ -755,6 +759,9 @@ func ValidateMaintenanceWindows(defs []MaintenanceWindow) error {
 		if len(mw.Matchers) == 0 {
 			return fmt.Errorf("%s: matchers must not be empty (refusing to match all alerts)", label)
 		}
+		if err := glob.ValidateMatchers(mw.Matchers); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
 		if mw.Action != "suppress" && mw.Action != "mute" {
 			return fmt.Errorf("%s: action must be \"suppress\" or \"mute\", got %q", label, mw.Action)
 		}
@@ -822,6 +829,9 @@ func (c *Config) validateNotifications() error {
 			sawDefault = true
 		} else if len(rt.Matchers) == 0 {
 			return fmt.Errorf("%s: matchers must not be empty (or mark the route default: true)", label)
+		}
+		if err := glob.ValidateMatchers(rt.Matchers); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
 		}
 		if len(rt.Channels) == 0 {
 			return fmt.Errorf("%s: channels must not be empty", label)
