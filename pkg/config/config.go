@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -64,6 +65,22 @@ type Config struct {
 	// convenient for curl-driven testing — and deployments fronted by a
 	// real Alertmanager should turn this on.
 	WebhookAsync bool `yaml:"webhook_async"`
+
+	// LogSources, EscalationTargets and HybridRoutes together let one
+	// deployment treat cloud accounts as an extension of the on-prem
+	// machine room instead of a separate world: each alert is routed by
+	// its labels to the log backend it actually lives in (Loki for
+	// on-prem hosts, CloudWatch for AWS, Cloud Logging for GCP) and to
+	// the escalation target that can actually see it (e.g. AWS DevOps
+	// Agent only for AWS alerts — it has no visibility into on-prem
+	// hosts). All three are optional and only take effect together:
+	// with HybridRoutes unset, LogSource/Cloud above behave exactly as
+	// before. Setting HybridRoutes alongside the legacy LogSource or
+	// Cloud block is rejected by Validate rather than silently picking
+	// one — see HybridRouteConfig.
+	LogSources        map[string]*LogSourceConfig `yaml:"log_sources"`
+	EscalationTargets map[string]*CloudConfig     `yaml:"escalation_targets"`
+	HybridRoutes      []HybridRouteConfig         `yaml:"hybrid_routes"`
 
 	// ShutdownGraceSec bounds how long a SIGTERM'd process waits for
 	// in-flight analyses to finish before exiting anyway. Defaults to 300
@@ -168,6 +185,35 @@ type LogSourceConfig struct {
 	Type       string            `yaml:"type"`
 	CloudWatch *CloudWatchConfig `yaml:"cloudwatch"`
 	GCPLogging *GCPLoggingConfig `yaml:"gcp_logging"`
+	// Loki optionally points a type-"loki" entry at its own Loki
+	// instance. Only meaningful inside log_sources (a hybrid deployment
+	// may have more than one Loki, e.g. one per site); unset falls back
+	// to the top-level loki.endpoint. Ignored by the other types.
+	Loki *LokiEndpointConfig `yaml:"loki"`
+}
+
+// LokiEndpointConfig is the per-source override for a type-"loki" entry
+// in log_sources. Only the endpoint is per-source — loki.lookback_sec and
+// loki.limit stay global knobs, same as they already are for CloudWatch
+// and GCP.
+type LokiEndpointConfig struct {
+	Endpoint string `yaml:"endpoint"`
+}
+
+// HybridRouteConfig is one hybrid routing rule: the first route whose
+// matchers all match the alert's labels decides which named log source
+// the alert's logs are fetched from and which named escalation target it
+// escalates to. Same evaluation model as notifications.routes: config
+// order, glob matchers (pkg/maintenance.MatchLabels), and a `default:
+// true` route that matches everything and must be last.
+type HybridRouteConfig struct {
+	Matchers  map[string]string `yaml:"matchers"`
+	LogSource string            `yaml:"log_source"` // name of an entry in log_sources; required
+	// Escalation names an entry in escalation_targets. Empty means
+	// alerts on this route never escalate — the local result is final,
+	// as if no cloud were configured at all for them.
+	Escalation string `yaml:"escalation"`
+	Default    bool   `yaml:"default"`
 }
 
 // CloudWatchConfig configures pkg/cloudwatch as the log source. AWS
@@ -468,8 +514,17 @@ type TelegramConfig struct {
 // the server has to be running for note/sync's captured/synced records to
 // exist in the first place.
 func (c *Config) Validate() error {
-	if err := c.validateLogSource(); err != nil {
-		return err
+	if len(c.HybridRoutes) > 0 {
+		if err := c.validateHybrid(); err != nil {
+			return err
+		}
+	} else {
+		if len(c.LogSources) > 0 || len(c.EscalationTargets) > 0 {
+			return fmt.Errorf("log_sources/escalation_targets are set but hybrid_routes is empty — they only take effect through hybrid_routes, so either add routes or remove them")
+		}
+		if err := c.validateLogSource(); err != nil {
+			return err
+		}
 	}
 	if c.Summarizer.Endpoint == "" {
 		return fmt.Errorf("summarizer.endpoint is not set in config.yaml")
@@ -480,7 +535,7 @@ func (c *Config) Validate() error {
 	// An escalation rule that can never fire (no Cloud configured) is a
 	// silent no-op the operator almost certainly didn't intend — fail
 	// loudly rather than have alerts quietly never escalate.
-	if len(c.Escalation.AlwaysCloud) > 0 && c.Cloud == nil {
+	if len(c.Escalation.AlwaysCloud) > 0 && c.Cloud == nil && len(c.EscalationTargets) == 0 {
 		return fmt.Errorf("escalation.always_cloud is set but cloud is not configured in config.yaml")
 	}
 	if c.Escalation.MaxPerHour < 0 {
@@ -530,28 +585,145 @@ func (c *Config) Validate() error {
 // startup instead of surfacing as "logs are always empty" on the first
 // alert.
 func (c *Config) validateLogSource() error {
+	if (c.LogSource == nil || c.LogSource.Type == "" || c.LogSource.Type == "loki") && c.Loki.Endpoint == "" {
+		return fmt.Errorf("loki.endpoint is not set in config.yaml")
+	}
+	return validateLogSourceEntry("log_source", c.LogSource, c.Loki.Endpoint)
+}
+
+// validateLogSourceEntry checks one log source block — the legacy
+// top-level log_source (label "log_source") or one named entry of
+// log_sources (label "log_sources.<name>") — against the same rules, so
+// the two paths can't drift apart. defaultLokiEndpoint is what a
+// type-"loki" entry falls back to when it has no loki.endpoint of its
+// own; ls may be nil, which means type "loki".
+func validateLogSourceEntry(label string, ls *LogSourceConfig, defaultLokiEndpoint string) error {
 	logSourceType := "loki"
-	if c.LogSource != nil && c.LogSource.Type != "" {
-		logSourceType = c.LogSource.Type
+	if ls != nil && ls.Type != "" {
+		logSourceType = ls.Type
 	}
 
 	switch logSourceType {
 	case "loki":
-		if c.Loki.Endpoint == "" {
-			return fmt.Errorf("loki.endpoint is not set in config.yaml")
+		if (ls == nil || ls.Loki == nil || ls.Loki.Endpoint == "") && defaultLokiEndpoint == "" {
+			return fmt.Errorf("%s is type \"loki\" but neither %s.loki.endpoint nor the top-level loki.endpoint is set in config.yaml", label, label)
 		}
 	case "cloudwatch":
-		cw := c.LogSource.CloudWatch
+		cw := ls.CloudWatch
 		if cw == nil || cw.Region == "" || len(cw.LogGroupNames) == 0 {
-			return fmt.Errorf("log_source.type is \"cloudwatch\" but log_source.cloudwatch.region/log_group_names is missing in config.yaml")
+			return fmt.Errorf("%s.type is \"cloudwatch\" but %s.cloudwatch.region/log_group_names is missing in config.yaml", label, label)
 		}
 	case "gcp_logging":
-		gl := c.LogSource.GCPLogging
+		gl := ls.GCPLogging
 		if gl == nil || gl.ProjectID == "" {
-			return fmt.Errorf("log_source.type is \"gcp_logging\" but log_source.gcp_logging.project_id is missing in config.yaml")
+			return fmt.Errorf("%s.type is \"gcp_logging\" but %s.gcp_logging.project_id is missing in config.yaml", label, label)
 		}
 	default:
-		return fmt.Errorf("log_source.type is %q, want \"loki\", \"cloudwatch\", or \"gcp_logging\"", logSourceType)
+		return fmt.Errorf("%s.type is %q, want \"loki\", \"cloudwatch\", or \"gcp_logging\"", label, logSourceType)
+	}
+	return nil
+}
+
+// validateHybrid checks log_sources/escalation_targets/hybrid_routes as
+// one unit. Mixing hybrid_routes with the legacy single log_source or
+// cloud block is rejected outright: silently preferring one would leave
+// an operator believing the other is in effect, and "which one wins"
+// isn't something anyone should have to remember.
+func (c *Config) validateHybrid() error {
+	if c.LogSource != nil {
+		return fmt.Errorf("hybrid_routes and log_source are both set — with hybrid_routes, define every log backend under log_sources and remove the log_source block")
+	}
+	if c.Cloud != nil {
+		return fmt.Errorf("hybrid_routes and cloud are both set — with hybrid_routes, define every escalation model under escalation_targets and remove the cloud block")
+	}
+	if len(c.LogSources) == 0 {
+		return fmt.Errorf("hybrid_routes is set but log_sources is empty")
+	}
+	for name, ls := range c.LogSources {
+		if name == "" {
+			return fmt.Errorf("log_sources has an entry with an empty name")
+		}
+		if err := validateLogSourceEntry("log_sources."+name, ls, c.Loki.Endpoint); err != nil {
+			return err
+		}
+	}
+	for name, t := range c.EscalationTargets {
+		if t == nil {
+			return fmt.Errorf("escalation_targets.%s is empty", name)
+		}
+		if err := validateCloudEntry("escalation_targets."+name, t); err != nil {
+			return err
+		}
+	}
+	usedSources := map[string]bool{}
+	usedTargets := map[string]bool{}
+	for i, r := range c.HybridRoutes {
+		label := fmt.Sprintf("hybrid_routes[%d]", i)
+		if r.Default {
+			if i != len(c.HybridRoutes)-1 {
+				return fmt.Errorf("%s: the default route must be the last route (routes are evaluated in order, so nothing after it could ever match)", label)
+			}
+			if len(r.Matchers) > 0 {
+				return fmt.Errorf("%s: a default route must not have matchers", label)
+			}
+		} else if len(r.Matchers) == 0 {
+			return fmt.Errorf("%s: matchers must not be empty (use default: true for the catch-all route)", label)
+		}
+		if r.LogSource == "" {
+			return fmt.Errorf("%s: log_source is required", label)
+		}
+		if _, ok := c.LogSources[r.LogSource]; !ok {
+			return fmt.Errorf("%s: log_source %q is not defined under log_sources", label, r.LogSource)
+		}
+		usedSources[r.LogSource] = true
+		if r.Escalation != "" {
+			if _, ok := c.EscalationTargets[r.Escalation]; !ok {
+				return fmt.Errorf("%s: escalation %q is not defined under escalation_targets", label, r.Escalation)
+			}
+			usedTargets[r.Escalation] = true
+		}
+	}
+	if !c.HybridRoutes[len(c.HybridRoutes)-1].Default {
+		return fmt.Errorf("hybrid_routes has no default route — add a last route with default: true so every alert has a log source")
+	}
+	// Defined-but-unreferenced entries are almost always a typo'd route
+	// name (the route then silently falls through to default), so they
+	// fail loudly the same way an undefined reference does.
+	for name := range c.LogSources {
+		if !usedSources[name] {
+			return fmt.Errorf("log_sources.%s is defined but no hybrid_routes entry uses it", name)
+		}
+	}
+	for name := range c.EscalationTargets {
+		if !usedTargets[name] {
+			return fmt.Errorf("escalation_targets.%s is defined but no hybrid_routes entry uses it", name)
+		}
+	}
+	return nil
+}
+
+// validateCloudEntry checks the per-provider required fields of one
+// escalation target. The legacy top-level cloud block has always had
+// these checked at client construction time in runServe instead; hybrid
+// targets are checked here so a half-filled target fails at config load
+// rather than only when a route first escalates to it.
+func validateCloudEntry(label string, c *CloudConfig) error {
+	switch c.Provider {
+	case "", "gemini", "anthropic":
+	case "bedrock":
+		if c.Region == "" || c.Model == "" {
+			return fmt.Errorf("%s.provider is \"bedrock\" but %s.region/model is missing", label, label)
+		}
+	case "azure-openai":
+		if c.Endpoint == "" || c.Deployment == "" {
+			return fmt.Errorf("%s.provider is \"azure-openai\" but %s.endpoint/deployment is missing", label, label)
+		}
+	case "aws-devops-agent":
+		if c.DevOpsAgent == nil {
+			return fmt.Errorf("%s.provider is \"aws-devops-agent\" but %s.aws_devops_agent is not set", label, label)
+		}
+	default:
+		return fmt.Errorf("%s.provider is %q, want \"gemini\", \"anthropic\", \"bedrock\", \"azure-openai\", or \"aws-devops-agent\"", label, c.Provider)
 	}
 	return nil
 }
@@ -711,6 +883,18 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Cloud.APIKey = v
 		}
 	}
+	// One var per named escalation target, e.g. escalation_targets.default
+	// → VICTORIA_GATEWAY_ESCALATION_DEFAULT_API_KEY. Non-alphanumeric
+	// characters in the name become "_" so a name like "aws-prod" still
+	// maps to a valid env var name (…_AWS_PROD_API_KEY).
+	for name, t := range cfg.EscalationTargets {
+		if t == nil {
+			continue
+		}
+		if v := os.Getenv("VICTORIA_GATEWAY_ESCALATION_" + EnvName(name) + "_API_KEY"); v != "" {
+			t.APIKey = v
+		}
+	}
 	if cfg.Judge != nil {
 		if v := os.Getenv("VICTORIA_GATEWAY_JUDGE_API_KEY"); v != "" {
 			cfg.Judge.APIKey = v
@@ -746,4 +930,17 @@ func applyEnvOverrides(cfg *Config) {
 			}
 		}
 	}
+}
+
+// EnvName upper-cases a config entry name and replaces every character
+// that isn't a letter or digit with "_", producing the name segment used
+// in per-entry VICTORIA_GATEWAY_* variables.
+func EnvName(name string) string {
+	b := []byte(strings.ToUpper(name))
+	for i, ch := range b {
+		if !(ch >= 'A' && ch <= 'Z') && !(ch >= '0' && ch <= '9') {
+			b[i] = '_'
+		}
+	}
+	return string(b)
 }

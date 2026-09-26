@@ -100,7 +100,15 @@ func runServe(args []string) {
 	// required fields, so an error here would mean Validate itself has a
 	// gap — worth failing loudly on rather than silently, but not a path
 	// a correctly-validated config can reach.
-	logs, err := buildLogSource(cfg)
+	var (
+		logs   aiops.LogSource
+		router *hybridRouter
+	)
+	if len(cfg.HybridRoutes) > 0 {
+		router, err = buildHybridRouter(cfg)
+	} else {
+		logs, err = buildLogSource(cfg)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 		os.Exit(1)
@@ -116,69 +124,16 @@ func runServe(args []string) {
 
 	var cloud model.LLM
 	if cfg.Cloud != nil {
-		switch cfg.Cloud.Provider {
-		case "", "gemini":
-			cloud = model.NewGeminiClient(model.GeminiClientConfig{
-				Endpoint: cfg.Cloud.Endpoint,
-				APIKey:   cfg.Cloud.APIKey,
-				Model:    cfg.Cloud.Model,
-			})
-		case "anthropic":
-			cloud = model.NewAnthropicClient(model.AnthropicClientConfig{
-				Endpoint: cfg.Cloud.Endpoint,
-				APIKey:   cfg.Cloud.APIKey,
-				Model:    cfg.Cloud.Model,
-			})
-		case "bedrock":
-			if cfg.Cloud.Region == "" {
-				fmt.Fprintln(os.Stderr, "❌ cloud.provider is \"bedrock\" but cloud.region is not set")
-				os.Exit(1)
-			}
-			if cfg.Cloud.Model == "" {
-				fmt.Fprintln(os.Stderr, "❌ cloud.provider is \"bedrock\" but cloud.model is not set")
-				os.Exit(1)
-			}
-			cloud = model.NewBedrockClient(model.BedrockClientConfig{
-				Region:   cfg.Cloud.Region,
-				Model:    cfg.Cloud.Model,
-				Endpoint: cfg.Cloud.Endpoint,
-			})
-		case "azure-openai":
-			if cfg.Cloud.Endpoint == "" {
-				fmt.Fprintln(os.Stderr, "❌ cloud.provider is \"azure-openai\" but cloud.endpoint is not set")
-				os.Exit(1)
-			}
-			if cfg.Cloud.Deployment == "" {
-				fmt.Fprintln(os.Stderr, "❌ cloud.provider is \"azure-openai\" but cloud.deployment is not set")
-				os.Exit(1)
-			}
-			cloud = model.NewAzureOpenAIClient(model.AzureOpenAIClientConfig{
-				Endpoint:   cfg.Cloud.Endpoint,
-				Deployment: cfg.Cloud.Deployment,
-				APIKey:     cfg.Cloud.APIKey,
-				APIVersion: cfg.Cloud.APIVersion,
-			})
-		case "aws-devops-agent":
-			da := cfg.Cloud.DevOpsAgent
-			if da == nil {
-				fmt.Fprintln(os.Stderr, "❌ cloud.provider is \"aws-devops-agent\" but cloud.aws_devops_agent is not set")
-				os.Exit(1)
-			}
-			cloud = model.NewDevOpsAgentClient(model.DevOpsAgentClientConfig{
-				BinaryPath: da.BinaryPath,
-				UserID:     da.UserID,
-				Region:     da.Region,
-				SpaceID:    da.SpaceID,
-				Priority:   da.Priority,
-			})
-		default:
-			fmt.Fprintf(os.Stderr, "❌ unknown cloud.provider %q (must be \"gemini\", \"anthropic\", \"bedrock\", \"azure-openai\", or \"aws-devops-agent\")\n", cfg.Cloud.Provider)
+		cloud, err = buildCloud("cloud", cfg.Cloud)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 			os.Exit(1)
 		}
 	}
 
 	h := &handler{
 		logs:        logs,
+		router:      router,
 		summarizer:  summarizer,
 		cloud:       cloud,
 		escalation:  cfg.Escalation,
@@ -336,14 +291,19 @@ func runServe(args []string) {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	srcType := logSourceType(cfg)
-	logSourceDesc := cfg.Loki.Endpoint
-	if srcType != "loki" {
-		logSourceDesc = srcType
-	}
 	fmt.Printf("🚀 victoria-gateway listening on %s (POST /webhook/alertmanager, async=%v)\n", addr, cfg.WebhookAsync)
-	fmt.Printf("   log source (%s): %s | summarizer: %s (%s) | notify: %v | cloud: %v | rag: %v\n",
-		srcType, logSourceDesc, cfg.Summarizer.Endpoint, cfg.Summarizer.Model, h.notifier.Enabled(), cloud != nil, ragEnabled)
+	if router != nil {
+		fmt.Printf("   %s | summarizer: %s (%s) | notify: %v | rag: %v\n",
+			hybridSummary(cfg), cfg.Summarizer.Endpoint, cfg.Summarizer.Model, h.notifier.Enabled(), ragEnabled)
+	} else {
+		srcType := logSourceType(cfg)
+		logSourceDesc := cfg.Loki.Endpoint
+		if srcType != "loki" {
+			logSourceDesc = srcType
+		}
+		fmt.Printf("   log source (%s): %s | summarizer: %s (%s) | notify: %v | cloud: %v | rag: %v\n",
+			srcType, logSourceDesc, cfg.Summarizer.Endpoint, cfg.Summarizer.Model, h.notifier.Enabled(), cloud != nil, ragEnabled)
+	}
 
 	// Graceful shutdown: SIGTERM/SIGINT stops accepting new requests,
 	// then waits (bounded) for in-flight analyses — which may be running
@@ -471,7 +431,12 @@ func issueURLBuilder(ragCfg *config.RAGConfig) func(int64) string {
 }
 
 type handler struct {
+	// logs/cloud are the single log source and escalation target of a
+	// legacy (non-hybrid) config. router is non-nil exactly when
+	// hybrid_routes is configured, in which case logs/cloud are unused
+	// and every alert is routed by its labels instead — see route().
 	logs        aiops.LogSource
+	router      *hybridRouter
 	summarizer  *aiops.Summarizer
 	notifier    *notify.Router // nil-safe; nil or channel-less means "no pushes"
 	cloud       model.LLM      // nil if no cloud escalation target configured
@@ -863,8 +828,23 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		return
 	}
 
+	route := h.route(alert.Labels)
+	if route.logs == nil {
+		// Unreachable for a validated config (hybrid_routes must end in a
+		// default route); reported per-alert rather than panicking.
+		res.Error = "no log source matched this alert (hybrid_routes has no default route?)"
+		return
+	}
+	if route.name != "" {
+		esc := route.escalationName
+		if esc == "" {
+			esc = "none"
+		}
+		log.Printf("aiops: alert %q routed via %s → log source %q, escalation %q", res.AlertName, route.name, route.logSourceName, esc)
+	}
+
 	logQueryStart := time.Now()
-	logs, err := h.logs.QueryRange(context.Background(), identity, start.Add(-h.lookback), time.Now(), h.limit)
+	logs, err := route.logs.QueryRange(context.Background(), identity, start.Add(-h.lookback), time.Now(), h.limit)
 	h.metrics.ObserveLokiQueryDuration(time.Since(logQueryStart))
 	if err != nil {
 		res.Error = fmt.Sprintf("log query: %v", err)
@@ -891,14 +871,14 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	escalate, reason := aiops.ShouldEscalate(res.AlertName, local, h.escalation.AlwaysCloud)
 	escalate, reason = h.applyJudge(res.AlertName, local, escalate, reason)
 
-	if escalate && h.cloud != nil && !h.allowEscalation() {
+	if escalate && route.cloud != nil && !h.allowEscalation() {
 		log.Printf("aiops: alert %q would escalate (%s) but escalation.max_per_hour is already reached this hour; staying on the local result", res.AlertName, reason)
 		h.metrics.IncEscalationRateLimitedTotal()
 		escalate = false
 	}
-	if escalate && h.cloud != nil {
+	if escalate && route.cloud != nil {
 		cloudStart := time.Now()
-		cloudResult, cloudErr := aiops.SummarizeWithLLM(h.cloud, alert, logs, ragContext)
+		cloudResult, cloudErr := aiops.SummarizeWithLLM(route.cloud, alert, logs, ragContext)
 		h.metrics.ObserveCloudLLMDuration(time.Since(cloudStart))
 		if cloudErr != nil {
 			// Escalation failing isn't fatal to the alert — the local
@@ -908,7 +888,11 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 			log.Printf("aiops: cloud escalation failed for alert %q (%s): %v", res.AlertName, reason, cloudErr)
 			h.metrics.IncEscalationFailuresTotal()
 		} else {
-			log.Printf("aiops: alert %q escalated to cloud (%s)", res.AlertName, reason)
+			if route.escalationName != "" {
+				log.Printf("aiops: alert %q escalated to cloud target %q (%s)", res.AlertName, route.escalationName, reason)
+			} else {
+				log.Printf("aiops: alert %q escalated to cloud (%s)", res.AlertName, reason)
+			}
 			result = cloudResult
 			res.AnalyzedBy = "cloud"
 			h.metrics.IncEscalationsTotal()
@@ -918,6 +902,17 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	res.Summary = result.Summary
 	res.pendingID = h.captureIncident(alert, logs, result, res.AnalyzedBy)
 	return
+}
+
+// route resolves which log source and escalation target an alert uses:
+// the hybrid router's pick when hybrid_routes is configured, otherwise the
+// single legacy logs/cloud pair (with an empty name, so summarizeOne logs
+// nothing extra and legacy deployments' output is unchanged).
+func (h *handler) route(labels map[string]string) alertRoute {
+	if h.router != nil {
+		return h.router.pick(labels)
+	}
+	return alertRoute{logs: h.logs, cloud: h.cloud}
 }
 
 // applyJudge asks Jev (pkg/judge) for an independent escalation read and

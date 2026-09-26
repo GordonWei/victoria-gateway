@@ -19,7 +19,8 @@ func logSourceType(cfg *config.Config) string {
 	return "loki"
 }
 
-// buildLogSource constructs whichever backend cfg.LogSource.Type selects.
+// buildLogSource constructs whichever backend cfg.LogSource.Type selects
+// (the legacy single-source path, used when hybrid_routes is unset).
 // cfg.Validate is assumed to have already rejected any type other than
 // "loki"/"cloudwatch"/"gcp_logging" and confirmed the matching block's
 // required fields are present — this only returns an error for the
@@ -27,13 +28,31 @@ func logSourceType(cfg *config.Config) string {
 // that do call Validate first (runServe does) can treat that path as
 // unreachable in practice.
 func buildLogSource(cfg *config.Config) (aiops.LogSource, error) {
-	switch logSourceType(cfg) {
+	return buildLogSourceEntry("log_source", cfg.LogSource, cfg.Loki.Endpoint)
+}
+
+// buildLogSourceEntry constructs one log backend from a single log source
+// block — the legacy top-level log_source (label "log_source") or one
+// named entry of log_sources (label "log_sources.<name>"). ls may be nil,
+// which means type "loki". A type-"loki" entry uses its own
+// loki.endpoint if set, otherwise defaultLokiEndpoint (the top-level
+// loki.endpoint).
+func buildLogSourceEntry(label string, ls *config.LogSourceConfig, defaultLokiEndpoint string) (aiops.LogSource, error) {
+	typ := "loki"
+	if ls != nil && ls.Type != "" {
+		typ = ls.Type
+	}
+	switch typ {
 	case "loki":
-		return aiops.NewLokiLogSource(aiops.NewClient(cfg.Loki.Endpoint)), nil
+		endpoint := defaultLokiEndpoint
+		if ls != nil && ls.Loki != nil && ls.Loki.Endpoint != "" {
+			endpoint = ls.Loki.Endpoint
+		}
+		return aiops.NewLokiLogSource(aiops.NewClient(endpoint)), nil
 	case "cloudwatch":
-		cw := cfg.LogSource.CloudWatch
+		cw := ls.CloudWatch
 		if cw == nil {
-			return nil, fmt.Errorf("log_source.type is \"cloudwatch\" but log_source.cloudwatch is not set")
+			return nil, fmt.Errorf("%s.type is \"cloudwatch\" but %s.cloudwatch is not set", label, label)
 		}
 		return cloudwatch.NewClient(cloudwatch.ClientConfig{
 			Region:        cw.Region,
@@ -42,9 +61,9 @@ func buildLogSource(cfg *config.Config) (aiops.LogSource, error) {
 			Timeout:       time.Duration(cw.TimeoutSec) * time.Second,
 		}), nil
 	case "gcp_logging":
-		gl := cfg.LogSource.GCPLogging
+		gl := ls.GCPLogging
 		if gl == nil {
-			return nil, fmt.Errorf("log_source.type is \"gcp_logging\" but log_source.gcp_logging is not set")
+			return nil, fmt.Errorf("%s.type is \"gcp_logging\" but %s.gcp_logging is not set", label, label)
 		}
 		return gcplogging.NewClient(gcplogging.ClientConfig{
 			ProjectID:      gl.ProjectID,
@@ -52,6 +71,6 @@ func buildLogSource(cfg *config.Config) (aiops.LogSource, error) {
 			Timeout:        time.Duration(gl.TimeoutSec) * time.Second,
 		}), nil
 	default:
-		return nil, fmt.Errorf("log_source.type %q is not one of \"loki\", \"cloudwatch\", \"gcp_logging\"", logSourceType(cfg))
+		return nil, fmt.Errorf("%s.type %q is not one of \"loki\", \"cloudwatch\", \"gcp_logging\"", label, typ)
 	}
 }
