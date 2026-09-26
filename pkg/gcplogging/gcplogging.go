@@ -187,8 +187,15 @@ func (c *Client) QueryRange(ctx context.Context, id aiops.LogIdentity, start, en
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	filterBody := strings.ReplaceAll(c.filterTemplate, termPlaceholder, id.Term())
-	filter := fmt.Sprintf(`timestamp >= %q AND timestamp <= %q AND %s`,
+	term, err := id.SafeTerm()
+	if err != nil {
+		return nil, fmt.Errorf("gcp_logging: %w", err)
+	}
+	filterBody := strings.ReplaceAll(c.filterTemplate, termPlaceholder, term)
+	// Parenthesized so a template containing OR can't turn the time
+	// window into one alternative among several: Cloud Logging binds OR
+	// tighter than AND, but spelling it out doesn't depend on that.
+	filter := fmt.Sprintf(`timestamp >= %q AND timestamp <= %q AND (%s)`,
 		start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339), filterBody)
 
 	reqBody := entriesListRequest{

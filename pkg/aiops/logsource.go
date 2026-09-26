@@ -3,7 +3,9 @@ package aiops
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // LogSource fetches recent logs for whatever an alert is about, in
@@ -59,6 +61,27 @@ func (id LogIdentity) LokiSelector() string {
 // Cloud Logging whose native query language has no concept of Loki's
 // multi-label stream selector and instead filters on a single search term
 // against the log line/payload.
+// SafeTerm returns Term() for splicing into a CloudWatch Logs Insights
+// query or a Cloud Logging filter, or an error if the term contains a
+// character that could step outside the literal it's placed in. Neither
+// query language has a documented escaping rule this code can rely on for
+// every operator-written template (the term may land in a regex, a quoted
+// string, or bare), so instead of escaping, anything that isn't plausibly
+// part of a host/pod/instance name is refused: quotes, backslash, '/',
+// '|', backtick, parentheses, whitespace and control characters. A real
+// identifier never contains these; an alert label that does is either
+// malformed or an injection attempt, and failing that one alert's log
+// query is the safe outcome either way.
+func (id LogIdentity) SafeTerm() (string, error) {
+	term := id.Term()
+	for _, r := range term {
+		if strings.ContainsRune("\"'\\/|`()", r) || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return "", fmt.Errorf("refusing to search for %q: it contains %q, which could change the query's meaning", term, r)
+		}
+	}
+	return term, nil
+}
+
 func (id LogIdentity) Term() string {
 	switch {
 	case id.Pod != "":

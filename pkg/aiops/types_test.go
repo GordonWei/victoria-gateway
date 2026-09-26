@@ -128,3 +128,20 @@ func TestAffectedIdentity_NoUsableLabels(t *testing.T) {
 		t.Error("AffectedIdentity() ok=true, want false when no host/instance/namespace+pod labels exist")
 	}
 }
+
+func TestLogIdentity_SafeTerm(t *testing.T) {
+	for _, ok := range []string{"192.0.2.6", "web-01.example.com:9100", "checkout-7d9f-abcde", "[::1]:9100", "db_01@site"} {
+		if got, err := (LogIdentity{Host: ok}).SafeTerm(); err != nil || got != ok {
+			t.Errorf("SafeTerm(%q) = %q, %v; want it accepted unchanged", ok, got, err)
+		}
+	}
+	for _, bad := range []string{`a"b`, "a'b", `a\b`, "a/b", "a|b", "a`b", "a(b", "a)b", "a b", "a\tb", "a\nb", "a\x00b"} {
+		if _, err := (LogIdentity{Host: bad}).SafeTerm(); err == nil {
+			t.Errorf("SafeTerm(%q) = nil error, want a refusal", bad)
+		}
+	}
+	// Pod wins over host, same precedence as Term().
+	if got, _ := (LogIdentity{Namespace: "ns", Pod: "p-1", Host: "h"}).SafeTerm(); got != "p-1" {
+		t.Errorf("SafeTerm picked %q, want the pod", got)
+	}
+}
