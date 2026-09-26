@@ -425,10 +425,15 @@ func (c LLMConfig) validateHealth(label string) error {
 // trigger, or the local model's own structured reply asks for escalation
 // — see pkg/aiops.ShouldEscalate.
 type CloudConfig struct {
-	Provider string `yaml:"provider"` // "gemini" (default), "anthropic", "bedrock", "azure-openai", or "aws-devops-agent"
-	Endpoint string `yaml:"endpoint"` // optional; each provider has its own default. Ignored by "bedrock" (region-based, see Region) and by "azure-openai" (required there instead, as the resource base URL)
-	APIKey   string `yaml:"api_key"`  // ignored by "bedrock", which uses the AWS SDK's own credential chain instead — see model.BedrockClient
+	Provider string `yaml:"provider"` // "gemini" (default), "anthropic", "bedrock", "azure-openai", "aws-devops-agent", or "openai-compatible"
+	Endpoint string `yaml:"endpoint"` // optional; each provider has its own default. Ignored by "bedrock" (region-based, see Region) and by "azure-openai"/"openai-compatible" (required there instead, as the server's base URL)
+	APIKey   string `yaml:"api_key"`  // ignored by "bedrock", which uses the AWS SDK's own credential chain instead — see model.BedrockClient. Optional for "openai-compatible" (no Authorization header when empty)
 	Model    string `yaml:"model"`    // e.g. "gemini-2.5-flash", "claude-haiku-4-5", or a Bedrock model ID. Ignored by "azure-openai" — see Deployment
+
+	// TimeoutSec bounds one request to an "openai-compatible" endpoint;
+	// 0 means 60s. The older providers keep their own fixed timeouts and
+	// ignore this field, so adding it changed nothing for them.
+	TimeoutSec int `yaml:"timeout_sec"`
 
 	// Region is the AWS region "bedrock" calls Bedrock in, e.g.
 	// "us-east-1". Bedrock model availability varies by region. Ignored
@@ -690,6 +695,11 @@ func (c *Config) Validate() error {
 		}
 		if len(fb.Fallbacks) > 0 {
 			return fmt.Errorf("%s has fallbacks of its own — list every fallback directly under summarizer.fallbacks instead", label)
+		}
+	}
+	if c.Cloud != nil {
+		if err := validateCloudTimeouts("cloud", c.Cloud); err != nil {
+			return err
 		}
 	}
 	if len(c.CloudFallbacks) > 0 {
@@ -963,8 +973,28 @@ func validateCloudEntry(label string, c *CloudConfig) error {
 		if c.DevOpsAgent == nil {
 			return fmt.Errorf("%s.provider is \"aws-devops-agent\" but %s.aws_devops_agent is not set", label, label)
 		}
+	case "openai-compatible":
+		if c.Endpoint == "" || c.Model == "" {
+			return fmt.Errorf("%s.provider is \"openai-compatible\" but %s.endpoint/model is missing", label, label)
+		}
 	default:
-		return fmt.Errorf("%s.provider is %q, want \"gemini\", \"anthropic\", \"bedrock\", \"azure-openai\", or \"aws-devops-agent\"", label, c.Provider)
+		return fmt.Errorf("%s.provider is %q, want %s", label, c.Provider, cloudProviderList)
+	}
+	return validateCloudTimeouts(label, c)
+}
+
+// cloudProviderList is every accepted provider value, as quoted in the
+// "unknown provider" errors.
+const cloudProviderList = `"gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", or "openai-compatible"`
+
+// validateCloudTimeouts rejects negative timeout settings on one cloud
+// block. Unlike the per-provider required fields (checked for the legacy
+// cloud block in buildCloud), this runs for every block including the
+// legacy one: the timeout fields are new, so there is no pre-existing
+// error text to preserve.
+func validateCloudTimeouts(label string, c *CloudConfig) error {
+	if c.TimeoutSec < 0 {
+		return fmt.Errorf("%s.timeout_sec must be >= 0 (0 means the provider's default)", label)
 	}
 	return nil
 }
