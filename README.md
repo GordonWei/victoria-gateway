@@ -165,7 +165,9 @@ summarizer:
   model: "your-model-name"
   # api_key: ""      # optional; only for a real cloud endpoint requiring auth, see below
   # timeout_sec: 180 # optional; per-call timeout, default 60 — raise above your
-                     # model server's cold-load time (LM Studio JIT reload after idle)
+                     # model server's cold-load time (LM Studio JIT reload after idle).
+                     # Connecting is capped separately at 5s, so a host that's
+                     # powered off fails over in seconds, not after timeout_sec.
 
 telegram:
   bot_token: ""   # leave empty to disable the push
@@ -271,10 +273,16 @@ text contains `%` characters.
 
 The term comes from alert labels, so it's treated as untrusted: a term
 containing a quote, backslash, `/`, `|`, backtick, parenthesis,
-whitespace or a control character is refused (that alert's analysis
-fails with `refusing to search for ...`) rather than spliced into the
-query, since it could close the literal it sits in and append query
-syntax of its own. Real host/pod/instance names never contain these. The
+whitespace or a control character is refused rather than spliced into
+the query, since it could close the literal it sits in and append query
+syntax of its own. Real host/pod names never contain these; the common
+case that does is a blackbox probe whose `instance` is a URL
+(`https://x/health`). A refused term doesn't fail the alert: the query is
+skipped, the alert is summarized without logs (the same as a query that
+found nothing), and the skip is logged (`log query skipped on log source
+"..."`, with the `refusing to search for ...` reason) and counted in
+`victoria_gateway_log_query_refused_total{log_source=...}`. Any other log
+query error still fails the alert as before. The
 default CloudWatch template also regexp-escapes the term (a bare
 `172.16.100.6` inside `/.../` would match `172x16y100z6` too); a custom
 template gets it verbatim, because it may place it in a quoted string
@@ -286,9 +294,11 @@ GetQueryResults) — `timeout_sec` bounds that whole poll loop, not just one
 HTTP call. GCP Cloud Logging's `entries.list` is a single synchronous
 call, so its `timeout_sec` is a plain HTTP timeout.
 
-A `loki:` block nested inside the top-level `log_source` is ignored —
-per-source Loki endpoints are a `log_sources` feature — and startup
-prints a warning if one is set; this mode always queries `loki.endpoint`.
+Setting `log_source.loki.endpoint` (a `loki:` block nested inside the
+top-level `log_source`) is a startup error: per-source Loki endpoints are
+a `log_sources` feature, and this mode always queries the top-level
+`loki.endpoint`. Put the address there, or switch to `log_sources` with
+**Hybrid cloud routing**.
 
 `log_source` picks exactly one backend for the whole deployment. To use
 several at once — on-prem Loki *and* CloudWatch *and* Cloud Logging, with
@@ -624,7 +634,13 @@ would let a link elsewhere confirm a pending incident in your name. Every
 web UI route therefore also refuses writes (anything but GET/HEAD) that
 the browser marks as cross-site: `Sec-Fetch-Site` must be `same-origin` or
 `none`, or — for browsers that don't send it — `Origin`/`Referer` must
-name this same host. Refused requests get `403`. Requests carrying none of
+name this same host: the `Host` the request arrived with, or the scheme
+and host of `rag.public_base_url`. The latter is what makes the pages
+work behind a reverse proxy that rewrites `Host` (the browser's `Origin`
+then names the public address, which victoria-gateway never sees as
+`Host`), so set `public_base_url` to exactly the address people open
+the pages at. `Origin: null` and any other host are still refused.
+Refused requests get `403`. Requests carrying none of
 those headers (curl, scripts calling `PUT /maintenance-windows`) aren't a
 browser acting on someone's behalf and pass as before. This applies with
 or without `webui_auth`.
@@ -738,7 +754,10 @@ alert that asks to escalate when there's no `cloud` is logged
 (`would escalate (...) but no cloud is configured`) and counted in
 `victoria_gateway_escalation_no_target_total`. `provider: gemini` and
 `anthropic` need an `api_key` (in the file or via the env var); without
-one, startup fails instead of every escalation failing with 401 later.
+one, the server refuses to start instead of every escalation failing
+with 401 later. Only the server checks this: `victoria-gateway sync` and
+`note` never call a cloud model, so they run fine from a shell that
+doesn't have the `VICTORIA_GATEWAY_*_API_KEY` variables set.
 
 ### AWS Bedrock
 
@@ -913,13 +932,17 @@ if you significantly change your alert mix or summarizer prompt.
 
 ## Fallbacks: when a model is down
 
-Both the local summarizer and escalation can name backups. Only an
-unreachable backend triggers the next one — connection refused, timeout,
-a non-2xx response, an unreadable response body. A model that answers,
-even with something that isn't valid JSON, has answered: its reply is
-used as-is, the same as without fallbacks. (A model that returns an
-empty reply twice in a row isn't treated as unreachable either; that
-alert fails as it always did.)
+Both the local summarizer and escalation can name backups. For the
+local summarizer, only an unavailable backend triggers the next one —
+connection refused or reset, timeout, a 5xx, or a 429. Any other 4xx
+(401, 400, 404, ...) means the request itself is wrong — a bad
+`api_key`, model name or endpoint path — so the alert fails right there
+with that error: no fallback, no cloud, since either would only hide a
+configuration mistake behind extra load or cloud spend. A model that
+answers, even with something that isn't valid JSON, has answered: its
+reply is used as-is, the same as without fallbacks. (A model that
+returns an empty reply twice in a row isn't treated as unavailable
+either; that alert fails as it always did.)
 
 ### Local summarizer fallbacks
 
@@ -950,6 +973,10 @@ error names both halves, e.g. `summarize: all 2 local summarizers
 failed: ...; cloud escalation (local LLM unavailable) also failed: ...`.
 With no escalation target configured, the error text is exactly what it
 was before fallbacks existed.
+
+If an escalation target is configured, also set `escalation.max_per_hour`:
+while the local model is down every alert becomes a cloud call, and
+this is what caps that bill during an outage or an alert storm.
 
 ### Escalation target fallbacks
 
@@ -1431,6 +1458,11 @@ unlabeled `0`.
 | `victoria_gateway_escalations_total`, `victoria_gateway_escalation_failures_total`, `victoria_gateway_escalation_rate_limited_total` | `target` (escalation target name) | provider, e.g. `bedrock`; a fallback is `bedrock (cloud_fallbacks[0])` |
 | `victoria_gateway_escalation_no_target_total` | `route` | `legacy` |
 | `victoria_gateway_loki_query_duration_seconds_sum`/`_count` (every log backend, despite the name) | `log_source` (log source name) | the type: `loki`, `cloudwatch`, `gcp_logging` |
+| `victoria_gateway_log_query_refused_total` (alert summarized without logs because its search term was refused) | `log_source` | as above |
+
+Label values are written with the text format's own escaping (only `\`,
+`"` and newline), so a route, target or channel name comes back from a
+scrape exactly as configured.
 | `victoria_gateway_cloud_llm_duration_seconds_sum`/`_count` | `target` | as for `escalations_total` |
 
 Or in a container — same image either way, two deployment shapes on top
