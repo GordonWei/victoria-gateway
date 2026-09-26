@@ -316,10 +316,8 @@ func (c *DevOpsAgentClient) pollUntilComplete(ctx context.Context, session *mcp.
 		if time.Now().After(deadline) {
 			return "", fmt.Errorf("aws-devops-agent: investigation %s did not complete within %s", taskID, c.pollTimeout)
 		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(c.pollInterval):
+		if err := sleepCtx(ctx, c.pollInterval); err != nil {
+			return "", err
 		}
 	}
 }

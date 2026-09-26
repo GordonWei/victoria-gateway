@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -613,5 +614,20 @@ func TestOpenAIClient_DialTimeoutFailsFast(t *testing.T) {
 	}
 	if elapsed > 3*time.Second {
 		t.Errorf("Chat took %v, want it bounded by the 200ms dial timeout, not the 30s request timeout", elapsed)
+	}
+}
+
+func TestSleepCtx(t *testing.T) {
+	if err := sleepCtx(context.Background(), time.Millisecond); err != nil {
+		t.Errorf("sleepCtx after the full wait = %v, want nil", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	if err := sleepCtx(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Errorf("sleepCtx on a cancelled ctx = %v, want context.Canceled", err)
+	}
+	if el := time.Since(start); el > time.Second {
+		t.Errorf("sleepCtx on a cancelled ctx took %s, want it to return at once", el)
 	}
 }
