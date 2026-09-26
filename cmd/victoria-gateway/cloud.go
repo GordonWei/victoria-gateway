@@ -10,7 +10,7 @@ import (
 
 // cloudProviderNames is every provider buildCloud accepts, as quoted in
 // its "unknown provider" error.
-const cloudProviderNames = `"gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", "openai-compatible", or "vertex-ai"`
+const cloudProviderNames = `"gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", "openai-compatible", "vertex-ai", or "gcp-cloud-assist"`
 
 // buildCloud constructs the escalation client one cloud block describes —
 // the legacy top-level cloud (label "cloud") or one named entry of
@@ -97,6 +97,17 @@ func buildCloud(label string, c *config.CloudConfig) (model.LLM, error) {
 			Model:    c.Model,
 			Endpoint: c.Endpoint,
 			Timeout:  time.Duration(c.TimeoutSec) * time.Second,
+		}), nil
+	case "gcp-cloud-assist":
+		if c.Project == "" {
+			return nil, fmt.Errorf("%s.provider is \"gcp-cloud-assist\" but %s.project is not set", label, label)
+		}
+		return model.NewCloudAssistClient(model.CloudAssistClientConfig{
+			Project:      c.Project,
+			Endpoint:     c.Endpoint,
+			Timeout:      time.Duration(c.TimeoutSec) * time.Second,
+			PollInterval: time.Duration(c.PollIntervalSec) * time.Second,
+			PollTimeout:  time.Duration(c.PollTimeoutSec) * time.Second,
 		}), nil
 	default:
 		return nil, fmt.Errorf("unknown %s.provider %q (must be %s)", label, c.Provider, cloudProviderNames)
