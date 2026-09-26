@@ -1,6 +1,8 @@
 package main
 
 import (
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/gordonwei/victoria-gateway/pkg/config"
@@ -84,4 +86,20 @@ func typeName(v model.LLM) string {
 		return "*model.CloudAssistClient"
 	}
 	return "unknown"
+}
+
+// Every provider named in config.CloudProviderList (the one list both
+// packages quote) is one buildCloud actually handles: none of them falls
+// through to the "unknown provider" error.
+func TestBuildCloud_HandlesEveryListedProvider(t *testing.T) {
+	names := regexp.MustCompile(`"([^"]+)"`).FindAllStringSubmatch(config.CloudProviderList, -1)
+	if len(names) < 8 {
+		t.Fatalf("parsed %d providers from %q", len(names), config.CloudProviderList)
+	}
+	for _, m := range names {
+		_, err := buildCloud("cloud", &config.CloudConfig{Provider: m[1]})
+		if err != nil && strings.Contains(err.Error(), "unknown cloud.provider") {
+			t.Errorf("provider %q is listed but buildCloud doesn't handle it: %v", m[1], err)
+		}
+	}
 }
