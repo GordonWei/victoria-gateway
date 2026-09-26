@@ -570,3 +570,48 @@ func TestOpenAIClient_NonOKReturnsTypedStatusError(t *testing.T) {
 		t.Errorf("err text = %q, want the pre-typed-error text", err.Error())
 	}
 }
+
+func TestNewOpenAIClient_TransportKeepsDefaultsAndBoundsDial(t *testing.T) {
+	c := NewOpenAIClient(OpenAIClientConfig{Endpoint: "http://x", Timeout: 180 * time.Second})
+	if c.dialTimeout != 5*time.Second || DefaultOpenAIDialTimeout != 5*time.Second {
+		t.Errorf("dial timeout = %v, want the 5s default", c.dialTimeout)
+	}
+	if c.client.Timeout != 180*time.Second {
+		t.Errorf("client Timeout = %v, want timeout_sec to still bound the whole request", c.client.Timeout)
+	}
+	tr, ok := c.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", c.client.Transport)
+	}
+	def := http.DefaultTransport.(*http.Transport)
+	if tr == def {
+		t.Fatal("Transport is http.DefaultTransport itself; it must be a clone")
+	}
+	if tr.Proxy == nil || tr.DialContext == nil {
+		t.Error("clone lost Proxy or DialContext")
+	}
+	if tr.TLSHandshakeTimeout != def.TLSHandshakeTimeout || tr.ForceAttemptHTTP2 != def.ForceAttemptHTTP2 || tr.MaxIdleConns != def.MaxIdleConns {
+		t.Error("clone lost DefaultTransport's TLS/HTTP2/idle settings")
+	}
+}
+
+// A host that never answers the SYN (TEST-NET-1, reserved and never
+// routed) must fail within the dial timeout, not the request timeout. If
+// this machine has no route at all the dial fails immediately instead,
+// which satisfies the same bound.
+func TestOpenAIClient_DialTimeoutFailsFast(t *testing.T) {
+	c := NewOpenAIClient(OpenAIClientConfig{
+		Endpoint:    "http://192.0.2.1:8091",
+		Timeout:     30 * time.Second,
+		DialTimeout: 200 * time.Millisecond,
+	})
+	start := time.Now()
+	_, err := c.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("Chat to an unroutable address succeeded")
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("Chat took %v, want it bounded by the 200ms dial timeout, not the 30s request timeout", elapsed)
+	}
+}

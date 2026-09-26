@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -43,6 +44,9 @@ type OpenAIClient struct {
 	backend  string
 	apiKey   string // empty for unauthenticated local servers (LM Studio, Ollama, ...)
 	client   *http.Client
+	// dialTimeout is what newOpenAITransport was built with, kept so
+	// tests can check the default without dialing anything.
+	dialTimeout time.Duration
 }
 
 type OpenAIClientConfig struct {
@@ -54,14 +58,40 @@ type OpenAIClientConfig struct {
 	// typically don't need one; a real cloud OpenAI-compatible endpoint
 	// (OpenAI itself, a LiteLLM proxy, Gemini's OpenAI-compatibility
 	// layer at generativelanguage.googleapis.com/v1beta/openai) does.
-	APIKey  string
+	APIKey string
+	// Timeout bounds a whole request, reply included (a local reasoning
+	// model can legitimately take minutes).
 	Timeout time.Duration
+	// DialTimeout bounds only the TCP connect; 0 means
+	// DefaultOpenAIDialTimeout. It's what makes a powered-off local model
+	// host fail in seconds — and the summarizer move on to a fallback or
+	// the cloud — instead of waiting out the whole Timeout.
+	DialTimeout time.Duration
+}
+
+// DefaultOpenAIDialTimeout is OpenAIClientConfig.DialTimeout's default.
+// Connecting to a server on the local network takes milliseconds; five
+// seconds is generous for a slow ARP/SYN retry without holding an alert
+// for the full request timeout when the host is simply gone.
+const DefaultOpenAIDialTimeout = 5 * time.Second
+
+// newOpenAITransport is http.DefaultTransport (so proxy-from-environment,
+// TLS handshake timeout, HTTP/2 and idle-connection settings stay as they
+// were) with the connect step bounded by dialTimeout.
+func newOpenAITransport(dialTimeout time.Duration) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	return t
 }
 
 func NewOpenAIClient(cfg OpenAIClientConfig) *OpenAIClient {
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = 60 * time.Second
+	}
+	dialTimeout := cfg.DialTimeout
+	if dialTimeout == 0 {
+		dialTimeout = DefaultOpenAIDialTimeout
 	}
 
 	backend := cfg.Backend
@@ -74,7 +104,9 @@ func NewOpenAIClient(cfg OpenAIClientConfig) *OpenAIClient {
 		model:    cfg.Model,
 		backend:  backend,
 		apiKey:   cfg.APIKey,
-		client:   &http.Client{Timeout: timeout},
+		client:   &http.Client{Timeout: timeout, Transport: newOpenAITransport(dialTimeout)},
+
+		dialTimeout: dialTimeout,
 	}
 }
 
