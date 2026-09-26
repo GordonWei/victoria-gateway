@@ -84,3 +84,38 @@ func TestValidate_LegacyNestedLokiEndpointRejected(t *testing.T) {
 		t.Errorf("hybrid log_sources loki.endpoint: Validate = %v, want nil", err)
 	}
 }
+
+func TestValidate_OpenAICompatible(t *testing.T) {
+	h := validHybridConfig()
+	h.EscalationTargets["default"] = &CloudConfig{Provider: "openai-compatible", Endpoint: "http://vllm:8000"}
+	wantErrContaining(t, h.Validate(), `escalation_targets.default.provider is "openai-compatible" but escalation_targets.default.endpoint/model is missing`)
+
+	h.EscalationTargets["default"] = &CloudConfig{Provider: "openai-compatible", Model: "m"}
+	wantErrContaining(t, h.Validate(), "endpoint/model is missing")
+
+	// api_key is optional: an unauthenticated vLLM/Ollama passes both
+	// Validate and ValidateForServe.
+	h.EscalationTargets["default"] = &CloudConfig{Provider: "openai-compatible", Endpoint: "http://vllm:8000", Model: "m"}
+	if err := h.ValidateForServe(); err != nil {
+		t.Errorf("openai-compatible without api_key: ValidateForServe = %v, want nil", err)
+	}
+
+	f := validConfig()
+	f.Cloud = &CloudConfig{Provider: "gemini", APIKey: "k"}
+	f.CloudFallbacks = []*CloudConfig{{Provider: "openai-compatible", Endpoint: "https://openrouter.ai/api", Model: "m", APIKey: "k"}}
+	if err := f.ValidateForServe(); err != nil {
+		t.Errorf("openai-compatible cloud_fallbacks: ValidateForServe = %v, want nil", err)
+	}
+	f.CloudFallbacks[0].Model = ""
+	wantErrContaining(t, f.Validate(), "cloud_fallbacks[0].provider is \"openai-compatible\"")
+}
+
+func TestValidate_NegativeCloudTimeout(t *testing.T) {
+	c := validConfig()
+	c.Cloud = &CloudConfig{Provider: "openai-compatible", Endpoint: "http://x", Model: "m", TimeoutSec: -1}
+	wantErrContaining(t, c.Validate(), "cloud.timeout_sec must be >= 0")
+
+	h := validHybridConfig()
+	h.EscalationTargets["default"] = &CloudConfig{Provider: "openai-compatible", Endpoint: "http://x", Model: "m", TimeoutSec: -5}
+	wantErrContaining(t, h.Validate(), "escalation_targets.default.timeout_sec must be >= 0")
+}

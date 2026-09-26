@@ -2,10 +2,15 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/config"
 	"github.com/gordonwei/victoria-gateway/pkg/model"
 )
+
+// cloudProviderNames is every provider buildCloud accepts, as quoted in
+// its "unknown provider" error.
+const cloudProviderNames = `"gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", or "openai-compatible"`
 
 // buildCloud constructs the escalation client one cloud block describes —
 // the legacy top-level cloud (label "cloud") or one named entry of
@@ -62,7 +67,24 @@ func buildCloud(label string, c *config.CloudConfig) (model.LLM, error) {
 			SpaceID:    da.SpaceID,
 			Priority:   da.Priority,
 		}), nil
+	case "openai-compatible":
+		if c.Endpoint == "" {
+			return nil, fmt.Errorf("%s.provider is \"openai-compatible\" but %s.endpoint is not set", label, label)
+		}
+		if c.Model == "" {
+			return nil, fmt.Errorf("%s.provider is \"openai-compatible\" but %s.model is not set", label, label)
+		}
+		// The same client the local summarizer uses, so a cloud-side
+		// vLLM/LiteLLM/OpenRouter/Ollama gets the same HTTPStatusError
+		// (5xx/429 read as "unavailable") and the short dial timeout.
+		return model.NewOpenAIClient(model.OpenAIClientConfig{
+			Endpoint: c.Endpoint,
+			Model:    c.Model,
+			Backend:  "openai-compatible",
+			APIKey:   c.APIKey,
+			Timeout:  time.Duration(c.TimeoutSec) * time.Second,
+		}), nil
 	default:
-		return nil, fmt.Errorf("unknown %s.provider %q (must be \"gemini\", \"anthropic\", \"bedrock\", \"azure-openai\", or \"aws-devops-agent\")", label, c.Provider)
+		return nil, fmt.Errorf("unknown %s.provider %q (must be %s)", label, c.Provider, cloudProviderNames)
 	}
 }

@@ -18,6 +18,7 @@ func TestBuildCloud_Providers(t *testing.T) {
 		{config.CloudConfig{Provider: "bedrock", Region: "us-east-1", Model: "m"}, "*model.BedrockClient"},
 		{config.CloudConfig{Provider: "azure-openai", Endpoint: "https://x", Deployment: "d"}, "*model.AzureOpenAIClient"},
 		{config.CloudConfig{Provider: "aws-devops-agent", DevOpsAgent: &config.DevOpsAgentConfig{SpaceID: "s"}}, "*model.DevOpsAgentClient"},
+		{config.CloudConfig{Provider: "openai-compatible", Endpoint: "http://x", Model: "m"}, "*model.OpenAIClient"},
 	}
 	for _, tc := range cases {
 		c := tc.cfg
@@ -44,7 +45,9 @@ func TestBuildCloud_LegacyErrorMessagesUnchanged(t *testing.T) {
 		{config.CloudConfig{Provider: "azure-openai", Deployment: "d"}, `cloud.provider is "azure-openai" but cloud.endpoint is not set`},
 		{config.CloudConfig{Provider: "azure-openai", Endpoint: "e"}, `cloud.provider is "azure-openai" but cloud.deployment is not set`},
 		{config.CloudConfig{Provider: "aws-devops-agent"}, `cloud.provider is "aws-devops-agent" but cloud.aws_devops_agent is not set`},
-		{config.CloudConfig{Provider: "nope"}, `unknown cloud.provider "nope" (must be "gemini", "anthropic", "bedrock", "azure-openai", or "aws-devops-agent")`},
+		{config.CloudConfig{Provider: "openai-compatible", Model: "m"}, `cloud.provider is "openai-compatible" but cloud.endpoint is not set`},
+		{config.CloudConfig{Provider: "openai-compatible", Endpoint: "http://x"}, `cloud.provider is "openai-compatible" but cloud.model is not set`},
+		{config.CloudConfig{Provider: "nope"}, `unknown cloud.provider "nope" (must be "gemini", "anthropic", "bedrock", "azure-openai", "aws-devops-agent", or "openai-compatible")`},
 	}
 	for _, tc := range cases {
 		c := tc.cfg
@@ -67,6 +70,8 @@ func typeName(v model.LLM) string {
 		return "*model.AzureOpenAIClient"
 	case *model.DevOpsAgentClient:
 		return "*model.DevOpsAgentClient"
+	case *model.OpenAIClient:
+		return "*model.OpenAIClient"
 	}
 	return "unknown"
 }
