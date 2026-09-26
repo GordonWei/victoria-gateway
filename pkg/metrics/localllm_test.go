@@ -111,3 +111,28 @@ func TestCounters_LocalLLMLabelsEscaped(t *testing.T) {
 		}
 	}
 }
+
+func TestCounters_MitigationPlanTotal(t *testing.T) {
+	if body := scrapeBody(nil); !strings.Contains(body, "# TYPE victoria_gateway_mitigation_plan_total counter\nvictoria_gateway_mitigation_plan_total 0\n") {
+		t.Errorf("nil counters should expose an unlabeled 0; got:\n%s", body)
+	}
+	c := &Counters{}
+	c.IncMitigationPlanTotal("aws", "ok")
+	c.IncMitigationPlanTotal("aws", "ok")
+	c.IncMitigationPlanTotal("aws", "error")
+	body := scrapeBody(c)
+	for _, want := range []string{
+		`victoria_gateway_mitigation_plan_total{target="aws",result="error"} 1`,
+		`victoria_gateway_mitigation_plan_total{target="aws",result="ok"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("exposition missing %q; got:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "victoria_gateway_mitigation_plan_total 0") {
+		t.Error("unlabeled 0 sample kept alongside labeled ones")
+	}
+	if n := strings.Count(body, "# TYPE victoria_gateway_mitigation_plan_total"); n != 1 {
+		t.Errorf("TYPE declared %d times", n)
+	}
+}

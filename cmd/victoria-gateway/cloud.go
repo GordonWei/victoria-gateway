@@ -57,11 +57,13 @@ func buildCloud(label string, c *config.CloudConfig) (model.LLM, error) {
 			return nil, fmt.Errorf("%s.provider is \"aws-devops-agent\" but %s.aws_devops_agent is not set", label, label)
 		}
 		return model.NewDevOpsAgentClient(model.DevOpsAgentClientConfig{
-			BinaryPath: da.BinaryPath,
-			UserID:     da.UserID,
-			Region:     da.Region,
-			SpaceID:    da.SpaceID,
-			Priority:   da.Priority,
+			BinaryPath:        da.BinaryPath,
+			UserID:            da.UserID,
+			Region:            da.Region,
+			SpaceID:           da.SpaceID,
+			Priority:          da.Priority,
+			MitigationPlan:    da.MitigationPlan,
+			MitigationTimeout: time.Duration(da.MitigationTimeoutSec) * time.Second,
 		}), nil
 	case "openai-compatible":
 		if c.Endpoint == "" {

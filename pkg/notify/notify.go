@@ -49,6 +49,12 @@ type Message struct {
 	// failed, or no public base URL is configured to build an absolute
 	// link from.
 	PendingURL string
+
+	// MitigationNote, if non-empty, is one line saying a mitigation plan
+	// came with the escalation and where to read it (the tracker issue).
+	// The plan itself stays out of the notification: it's long, and
+	// Telegram caps a message at 4096 characters.
+	MitigationNote string
 }
 
 // SimilarIncident is one past confirmed incident reference attached to a

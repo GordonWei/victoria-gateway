@@ -127,6 +127,10 @@ func FormatTelegramText(msg Message) string {
 			html.EscapeString(msg.AlertName), html.EscapeString(msg.Host), html.EscapeString(msg.Summary))
 	}
 
+	if msg.MitigationNote != "" {
+		text += "\n\n🛠 " + html.EscapeString(msg.MitigationNote)
+	}
+
 	if msg.PendingURL != "" {
 		text += "\n\n✅ 確認這筆：\n" + html.EscapeString(msg.PendingURL)
 	}

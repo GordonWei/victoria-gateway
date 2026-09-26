@@ -43,6 +43,7 @@ func (h *handler) runEscalation(steps []escalationStep, alert aiops.Alert, logs 
 				log.Printf("aiops: alert %q escalated to cloud (%s)", alertName, reason)
 			}
 			h.metrics.IncEscalationsTotal(step.display)
+			h.recordMitigation(alertName, step, result.Mitigation)
 			return result, step, nil
 		}
 		h.metrics.IncEscalationFailuresTotal(step.display)
@@ -190,6 +191,13 @@ func pollBeyondGraceNotes(cfg *config.Config) []string {
 			}
 		case "aws-devops-agent":
 			limit = model.DevOpsAgentDefaultPollTimeout
+			if da := c.DevOpsAgent; da != nil && da.MitigationPlan {
+				mt := time.Duration(da.MitigationTimeoutSec) * time.Second
+				if mt <= 0 {
+					mt = model.DevOpsAgentDefaultMitigationTimeout
+				}
+				limit += mt
+			}
 		default:
 			return
 		}

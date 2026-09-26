@@ -61,6 +61,10 @@ type Counters struct {
 	localLLMBreakerOpen  labeledGauge  // backend
 	localLLMSkippedTotal pairedCounter // backend, reason
 
+	// Mitigation plans requested alongside an escalation (today only
+	// aws-devops-agent with mitigation_plan on), by outcome.
+	mitigationPlanTotal pairedCounter // target, result
+
 	// Duration observations (sum + count pairs, enough for Grafana to
 	// graph an average) — deliberately not histograms: hand-rolling
 	// buckets buys little for a home-lab service, and this keeps the
@@ -370,6 +374,16 @@ func (c *Counters) IncLocalLLMSkippedTotal(backend, reason string) {
 	}
 }
 
+// IncMitigationPlanTotal counts one mitigation plan request made as part
+// of an escalation to target: result is "ok" (a plan came back), "none"
+// (the agent produced none) or "error" (failed or timed out). The
+// escalation itself succeeded either way.
+func (c *Counters) IncMitigationPlanTotal(target, result string) {
+	if c != nil {
+		c.mitigationPlanTotal.inc(target, result)
+	}
+}
+
 func (c *Counters) ObserveLocalLLMDuration(d time.Duration) {
 	if c != nil {
 		c.localLLMDuration.observe(d)
@@ -480,6 +494,23 @@ func (c *Counters) writeLocalLLMHealth(w io.Writer) {
 	}
 }
 
+// writeMitigationPlan writes victoria_gateway_mitigation_plan_total,
+// with an unlabeled 0 until the first request like the other counters.
+func (c *Counters) writeMitigationPlan(w io.Writer) {
+	if c == nil {
+		c = &Counters{}
+	}
+	const name = "victoria_gateway_mitigation_plan_total"
+	_, _ = fmt.Fprintf(w, "# HELP %s Mitigation plans requested alongside a successful escalation, by result (ok: plan attached; none: agent produced none; error: failed or timed out).\n# TYPE %s counter\n", name, name)
+	keys, counts := c.mitigationPlanTotal.snapshot()
+	if len(keys) == 0 {
+		_, _ = fmt.Fprintf(w, "%s 0\n", name)
+	}
+	for _, k := range keys {
+		_, _ = fmt.Fprintf(w, "%s{target=\"%s\",result=\"%s\"} %d\n", name, escapeLabelValue(k[0]), escapeLabelValue(k[1]), counts[k])
+	}
+}
+
 // Handler serves the counters at GET /metrics in Prometheus text
 // exposition format. Safe to call on a nil *Counters (renders every
 // counter as 0), matching the Inc methods' nil-safety above.
@@ -508,6 +539,7 @@ func (c *Counters) Handler() http.Handler {
 			}
 		}
 		c.writeLocalLLMHealth(w)
+		c.writeMitigationPlan(w)
 		if c == nil {
 			return
 		}
