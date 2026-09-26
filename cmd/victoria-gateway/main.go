@@ -673,6 +673,9 @@ type alertResult struct {
 	muted     bool                     // not exported to JSON; controls whether notification is skipped
 	similar   []notify.SimilarIncident // past confirmed incidents above the similarity threshold, for notifications
 	pendingID int64                    // this alert's own captured record id, 0 if RAG/capture is off or failed
+	// mitigationNote is the one-line pointer to an escalation's
+	// mitigation plan for notifications (see mitigationNote()).
+	mitigationNote string
 }
 
 func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Request) {
@@ -928,7 +931,9 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		res.AnalyzedBy = "cloud"
 		res.EscalatedTo = step.display
 		res.Summary = cloudResult.Summary
-		res.pendingID = h.captureIncident(alert, logs, cloudResult, res.AnalyzedBy, res.EscalatedTo)
+		var issue int64
+		res.pendingID, issue = h.captureIncident(alert, logs, cloudResult, res.AnalyzedBy, res.EscalatedTo)
+		res.mitigationNote = h.mitigationNote(res.AlertName, cloudResult.Mitigation, issue)
 		return
 	}
 	if local.ParseFailed {
@@ -968,7 +973,9 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	}
 
 	res.Summary = result.Summary
-	res.pendingID = h.captureIncident(alert, logs, result, res.AnalyzedBy, res.EscalatedTo)
+	var issue int64
+	res.pendingID, issue = h.captureIncident(alert, logs, result, res.AnalyzedBy, res.EscalatedTo)
+	res.mitigationNote = h.mitigationNote(res.AlertName, result.Mitigation, issue)
 	return
 }
 
@@ -1047,10 +1054,12 @@ func combineEscalation(existing bool, existingReason string, judgment judge.Esca
 // a resolution back. Best-effort like retrieveRAGContext — failures are
 // logged, never fail the alert itself. Returns the new record's id (0 on
 // any failure/no-op path) so the caller can put a direct confirm link in
-// the alert's own notification — see notifyResult/notify.Message.PendingURL.
-func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, result aiops.SummarizeResult, analyzedBy, escalatedTo string) (id int64) {
+// the alert's own notification — see notifyResult/notify.Message.PendingURL
+// — and the tracker issue it filed (0 if none), which is where a
+// mitigation plan ends up.
+func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, result aiops.SummarizeResult, analyzedBy, escalatedTo string) (id, issueNumber int64) {
 	if h.rag == nil || h.ragEmbedder == nil {
-		return 0
+		return 0, 0
 	}
 
 	host, _, _ := alert.AffectedIdentity()
@@ -1066,20 +1075,16 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 	if err != nil {
 		log.Printf("aiops: rag capture embed failed, incident not recorded: %v", err)
 		h.metrics.IncRAGCaptureFailuresTotal()
-		return 0
+		return 0, 0
 	}
 
-	var issueNumber int64
 	if h.tracker != nil {
 		title := fmt.Sprintf("[%s] %s", alert.Labels["alertname"], host)
 		analyzedLabel := analyzedBy
 		if escalatedTo != "" {
 			analyzedLabel = fmt.Sprintf("%s → %s", analyzedBy, escalatedTo)
 		}
-		body := fmt.Sprintf(
-			"**分析結果（%s）：**\n\n%s\n\n---\n此 Issue 由 Victoria Gateway 自動建立。調查完後請在關閉前留一則留言說明實際原因/怎麼修的，`victoria-gateway sync` 會把它讀回 RAG 資料庫，供未來類似告警參考。",
-			analyzedLabel, result.Summary)
-		n, err := h.tracker.CreateIssue(context.Background(), title, body)
+		n, err := h.tracker.CreateIssue(context.Background(), title, issueBody(analyzedLabel, result))
 		if err != nil {
 			log.Printf("aiops: create issue failed, capturing without a linked issue: %v", err)
 			h.metrics.IncTrackerCreateIssueFailuresTotal()
@@ -1113,7 +1118,7 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 	if err != nil {
 		log.Printf("aiops: rag insert pending failed: %v", err)
 		h.metrics.IncRAGCaptureFailuresTotal()
-		return 0
+		return 0, issueNumber
 	}
 	h.metrics.IncRAGCaptureTotal()
 	if issueNumber != 0 {
@@ -1121,7 +1126,7 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 	} else {
 		log.Printf("aiops: captured pending incident id=%d (no gitea issue)", id)
 	}
-	return id
+	return id, issueNumber
 }
 
 // retrieveRAGContext looks up past incidents similar to this alert, if
@@ -1223,5 +1228,7 @@ func (h *handler) notifyResult(res alertResult, labels map[string]string) {
 		Error:       res.Error,
 		Similar:     res.similar,
 		PendingURL:  pendingURL,
+
+		MitigationNote: res.mitigationNote,
 	}, labels)
 }

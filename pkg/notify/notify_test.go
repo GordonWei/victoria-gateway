@@ -378,3 +378,25 @@ func TestWebhookChannel_CarriesEscalatedTo(t *testing.T) {
 		t.Errorf("escalated_to present on a local result: %v", raw)
 	}
 }
+
+func TestFormatTelegramText_MitigationNote(t *testing.T) {
+	text := FormatTelegramText(Message{
+		AlertName:      "LambdaErrors",
+		Host:           "checkout",
+		Summary:        "bad deploy",
+		AnalyzedBy:     "cloud",
+		EscalatedTo:    "aws",
+		MitigationNote: "已附建議處置（AWS DevOps Agent mitigation plan）於 issue #42：https://git.example/issues/42?a=1&b=2",
+		PendingURL:     "https://vg.example/pending/7",
+	})
+	want := "\n\n🛠 已附建議處置（AWS DevOps Agent mitigation plan）於 issue #42：https://git.example/issues/42?a=1&amp;b=2"
+	if !strings.Contains(text, want) {
+		t.Errorf("formatted text missing the escaped mitigation note:\n%s", text)
+	}
+	if strings.Index(text, "🛠") > strings.Index(text, "確認這筆") {
+		t.Errorf("mitigation note should come before the confirm link:\n%s", text)
+	}
+	if strings.Contains(FormatTelegramText(Message{AlertName: "a", Summary: "s"}), "🛠") {
+		t.Error("note rendered without a MitigationNote")
+	}
+}
