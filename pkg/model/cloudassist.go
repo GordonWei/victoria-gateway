@@ -214,8 +214,27 @@ func (c *CloudAssistClient) Chat(messages []Message, _ *ChatOptions) (string, er
 		}
 		return "", fmt.Errorf("%s: investigation %s ended %s%s", cloudAssistBackend, inv.Name, done.ExecutionState, msg)
 	}
-	return formatInvestigation(done)
+	out, err := formatInvestigation(done)
+	if done.ExecutionState == caStateCompleted {
+		return out, err
+	}
+	// The run operation finished but the investigation doesn't say it
+	// completed (still RUNNING, or a state this client doesn't know).
+	// Whatever it produced is still worth showing, but flagged, so a
+	// partial result isn't read as the final one.
+	state := done.ExecutionState
+	if state == "" {
+		state = "unspecified"
+	}
+	if err != nil {
+		return "", fmt.Errorf("%w (execution state %s)", err, state)
+	}
+	return out + fmt.Sprintf("\nNote: the run finished but the investigation's execution state is %s, not COMPLETED; this result may be partial.\n", state), nil
 }
+
+// caStateCompleted is the executionState of an investigation whose run
+// finished normally.
+const caStateCompleted = "INVESTIGATION_EXECUTION_STATE_COMPLETED"
 
 // create sends step 1 of the flow in CloudAssistClient's doc comment.
 func (c *CloudAssistClient) create(ctx context.Context, issue string) (caInvestigation, error) {

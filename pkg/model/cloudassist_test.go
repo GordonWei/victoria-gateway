@@ -86,7 +86,7 @@ func (f *fakeCloudAssist) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func completedInvestigation() caInvestigation {
 	return caInvestigation{
 		Name:           testInvName,
-		ExecutionState: "INVESTIGATION_EXECUTION_STATE_COMPLETED",
+		ExecutionState: caStateCompleted,
 		Observations: map[string]caObservation{
 			"user.input.log": {ID: "user.input.log", Text: "the issue", ObservationType: "OBSERVATION_TYPE_CLOUD_LOG", ObserverType: "OBSERVER_TYPE_USER"},
 			"h.low":          {ID: "h.low", Title: "Quota exhausted", Text: "Maybe quota.", ObservationType: "OBSERVATION_TYPE_HYPOTHESIS", ObserverType: "OBSERVER_TYPE_AI", SystemRelevanceScore: 0.2},
@@ -295,6 +295,35 @@ func TestCloudAssistClient_RunFailed(t *testing.T) {
 	_, err = c.Chat(alertPrompt, nil)
 	if err == nil || !strings.Contains(err.Error(), "INVESTIGATION_EXECUTION_STATE_FAILED: observer blocked") {
 		t.Errorf("err = %v, want the failed execution state", err)
+	}
+}
+
+// A done run whose investigation isn't COMPLETED still returns what it
+// found, but says which state it was in; with nothing found, the error
+// names the state.
+func TestCloudAssistClient_DoneButNotCompleted(t *testing.T) {
+	inv := completedInvestigation()
+	inv.ExecutionState = "INVESTIGATION_EXECUTION_STATE_RUNNING"
+	c, _ := newTestCloudAssist(t, &fakeCloudAssist{pollsUntilDone: 1, final: inv})
+	reply, err := c.Chat(alertPrompt, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if !strings.Contains(reply, "Hypothesis 1: Bad deploy") || !strings.Contains(reply, "execution state is INVESTIGATION_EXECUTION_STATE_RUNNING") {
+		t.Errorf("reply should keep the findings and flag the state:\n%s", reply)
+	}
+
+	empty := caInvestigation{Name: testInvName}
+	c, _ = newTestCloudAssist(t, &fakeCloudAssist{pollsUntilDone: 1, final: empty})
+	_, err = c.Chat(alertPrompt, nil)
+	if err == nil || !strings.Contains(err.Error(), "no hypotheses or observations (execution state unspecified)") {
+		t.Errorf("err = %v, want the empty-result error with the state", err)
+	}
+
+	// COMPLETED output has no such note.
+	c, _ = newTestCloudAssist(t, &fakeCloudAssist{pollsUntilDone: 1, final: completedInvestigation()})
+	if reply, err := c.Chat(alertPrompt, nil); err != nil || strings.Contains(reply, "execution state") {
+		t.Errorf("completed: (%q, %v), want no state note", reply, err)
 	}
 }
 
