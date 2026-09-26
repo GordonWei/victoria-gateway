@@ -220,3 +220,43 @@ func TestLastUserMessage(t *testing.T) {
 		t.Errorf("lastUserMessage() with only a system message = %q, want empty", got)
 	}
 }
+
+func TestSubprocessEnv_Whitelist(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin", "HOME=/root", "LANG=C.UTF-8", "LC_ALL=C",
+		"AWS_REGION=us-east-1", "AWS_PROFILE=prod", "DEVOPS_AGENT_SPACE_ID=s",
+		"PYTHONPATH=/opt", "VIRTUAL_ENV=/venv", "HTTPS_PROXY=http://p:3128",
+		"VICTORIA_GATEWAY_CLOUD_API_KEY=secret", "VICTORIA_GATEWAY_RAG_POSTGRES_DSN=postgres://u:p@h/db",
+		"DATABASE_URL=postgres://x", "TELEGRAM_BOT_TOKEN=t", "GITEA_TOKEN=g", "malformed",
+	}
+	got := strings.Join(subprocessEnv(in), "\n")
+	for _, want := range []string{"PATH=/usr/bin", "HOME=/root", "LANG=C.UTF-8", "LC_ALL=C", "AWS_REGION=us-east-1", "AWS_PROFILE=prod", "DEVOPS_AGENT_SPACE_ID=s", "PYTHONPATH=/opt", "VIRTUAL_ENV=/venv", "HTTPS_PROXY=http://p:3128"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	for _, leak := range []string{"VICTORIA_GATEWAY_", "DATABASE_URL", "TELEGRAM", "GITEA", "malformed"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("%q leaked into the subprocess env:\n%s", leak, got)
+		}
+	}
+}
+
+func TestNewCommandTransport_EnvFiltered(t *testing.T) {
+	t.Setenv("VICTORIA_GATEWAY_RAG_POSTGRES_DSN", "postgres://secret")
+	t.Setenv("AWS_REGION", "ap-northeast-1")
+	c := NewDevOpsAgentClient(DevOpsAgentClientConfig{UserID: "u", Region: "us-west-2", SpaceID: "sp"})
+	tr, ok := c.newCommandTransport().(*mcp.CommandTransport)
+	if !ok {
+		t.Fatalf("transport is %T", c.newCommandTransport())
+	}
+	env := strings.Join(tr.Command.Env, "\n")
+	for _, want := range []string{"AWS_REGION=ap-northeast-1", "DEVOPS_AGENT_USER_ID=u", "DEVOPS_AGENT_REGION=us-west-2", "DEVOPS_AGENT_SPACE_ID=sp"} {
+		if !strings.Contains(env, want) {
+			t.Errorf("env missing %q", want)
+		}
+	}
+	if strings.Contains(env, "VICTORIA_GATEWAY_") {
+		t.Errorf("gateway secret leaked:\n%s", env)
+	}
+}
