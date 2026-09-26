@@ -992,6 +992,14 @@ How it's fetched:
    searched for the `mitigation_summary_md` journal record
    ([documented here](https://docs.aws.amazon.com/devopsagent/latest/userguide/configuring-integrations-and-knowledge-integrating-devops-agent-into-event-driven-applications-using-amazon-eventbridge-index.html#retrieving-an-investigation-or-mitigation-summary)).
 
+Checked read-only against the real service on 2026-09-27: on
+investigations whose plan had been generated earlier, the
+`mitigation_summary_md` record sat in the investigation's own execution
+(the task had no other execution), and this client read it back through
+the sample server as a ~3,000-character Markdown plan (Action,
+Reasoning, Execution Plan). Triggering a new plan was not exercised
+live, since it starts a billed agent run.
+
 The plan is only read. victoria-gateway never approves or applies it —
 the issue says so, and acting on it stays a human decision.
 

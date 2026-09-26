@@ -96,9 +96,14 @@ func (c *DevOpsAgentClient) mitigation(ctx context.Context, session *mcp.ClientS
 	}
 	// The task's own current executionId first (in case it now points at
 	// the mitigation run), then the task's other top-level executions,
-	// newest first.
-	if latestExecutionID != "" && latestExecutionID != investigationExecutionID {
+	// newest first, and finally the investigation's own execution again:
+	// in the real service a web-app-generated plan was found in the
+	// investigation's execution, on a task with no other execution.
+	if latestExecutionID != "" {
 		candidates = append([]string{latestExecutionID}, candidates...)
+	}
+	if investigationExecutionID != "" {
+		candidates = append(candidates, investigationExecutionID)
 	}
 	seen := map[string]bool{}
 	for _, id := range candidates {

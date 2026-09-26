@@ -19,6 +19,7 @@ type fakeMitigation struct {
 	plan         string // mitigation_summary_md written to "exe-mit" once the mitigation run completes
 	noTool       bool   // server predates create_mitigation_plan (sample < v1.1.0)
 	triggerError string // create_mitigation_plan answers {"error": triggerError}
+	sameExecPlan string // mitigation_summary_md written to "exe-inv" once the mitigation run completes
 	endStatus    string // status the mitigation run ends in; "" means COMPLETED
 	never        bool   // the mitigation run never finishes
 }
@@ -110,12 +111,22 @@ func newFakeMitigationServer(t *testing.T, f fakeMitigation, calls *fakeMitigati
 		switch {
 		case exec == "exe-inv" && f.inlinePlan != "":
 			records = append(records, map[string]any{"recordType": mitigationSummaryRecordType, "content": f.inlinePlan})
+		case exec == "exe-inv" && f.sameExecPlan != "" && triggeredAndDone(&mu, &mitigating, &pollsSinceTrigger):
+			records = append(records, map[string]any{"recordType": mitigationSummaryRecordType, "content": f.sameExecPlan})
 		case exec == "exe-mit" && f.plan != "":
 			records = append(records, map[string]any{"recordType": mitigationSummaryRecordType, "content": f.plan})
 		}
 		return textResult(map[string]any{"records": records}), nil, nil
 	})
 	return server
+}
+
+// triggeredAndDone reports whether the fake's mitigation run has been
+// started and polled past IN_PROGRESS.
+func triggeredAndDone(mu *sync.Mutex, mitigating *bool, polls *int) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	return *mitigating && *polls > 1
 }
 
 func mitigationClient(t *testing.T, server *mcp.Server, enabled bool, timeout time.Duration) *DevOpsAgentClient {
@@ -181,6 +192,20 @@ func TestDevOpsAgentMitigation_TriggersAndReadsPlan(t *testing.T) {
 		if id == "exe-sub" {
 			t.Errorf("read a sub-agent execution's journal: %v", reads)
 		}
+	}
+}
+
+// A plan generated into the investigation's own execution (what the web
+// app's button produced on the real service) is found after the run.
+func TestDevOpsAgentMitigation_PlanInInvestigationExecution(t *testing.T) {
+	calls := &fakeMitigationCalls{}
+	c := mitigationClient(t, newFakeMitigationServer(t, fakeMitigation{sameExecPlan: "same-exec plan"}, calls), true, 5*time.Second)
+	res := chatDetailed(t, c)
+	if res.Mitigation == nil || res.Mitigation.Result != MitigationOK || res.Mitigation.Plan != "same-exec plan" {
+		t.Fatalf("Mitigation = %+v, want the plan from the investigation's execution", res.Mitigation)
+	}
+	if n, _ := calls.snapshot(); n != 1 {
+		t.Errorf("create_mitigation_plan called %d times, want 1", n)
 	}
 }
 
