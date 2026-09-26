@@ -66,6 +66,42 @@ type Summarizer struct {
 	// now is the breakers' clock; tests swap it to step through a
 	// cooldown without sleeping.
 	now func() time.Time
+	// observer, when set, is told about breaker state and skipped
+	// backends (the metrics hook). Set once, before the first Summarize.
+	observer BackendObserver
+}
+
+// BackendObserver receives a Summarizer's per-backend health events —
+// implemented by *metrics.Counters, kept as an interface so this package
+// doesn't import pkg/metrics. backend is SummarizerBackend.Name.
+type BackendObserver interface {
+	// SetLocalLLMBreakerOpen reports a breaker opening (true, and it stays
+	// true through the half-open trial) or closing (false).
+	SetLocalLLMBreakerOpen(backend string, open bool)
+	// IncLocalLLMSkippedTotal counts a backend skipped without a chat
+	// call; reason is "probe" or "breaker".
+	IncLocalLLMSkippedTotal(backend, reason string)
+}
+
+// Skip reasons passed to BackendObserver.IncLocalLLMSkippedTotal.
+const (
+	SkipReasonProbe   = "probe"
+	SkipReasonBreaker = "breaker"
+)
+
+// SetObserver attaches o and reports every backend that has a circuit
+// breaker as closed, so the gauge exists from startup rather than from
+// the first time a breaker opens. Call it before the first Summarize.
+func (s *Summarizer) SetObserver(o BackendObserver) {
+	s.observer = o
+	if o == nil {
+		return
+	}
+	for i, st := range s.state {
+		if st.breaker != nil {
+			o.SetLocalLLMBreakerOpen(s.steps[i].Name, false)
+		}
+	}
 }
 
 // SummarizerBackend is one local model a Summarizer can call. Name only
@@ -217,6 +253,9 @@ func (s *Summarizer) try(i int, alert Alert, logs []LogEntry, ragContext string)
 		ok, retryIn, tr := b.allow(s.now())
 		s.breakerChanged(i, tr)
 		if !ok {
+			if s.observer != nil {
+				s.observer.IncLocalLLMSkippedTotal(step.Name, SkipReasonBreaker)
+			}
 			wait := "a trial alert is already testing it"
 			if retryIn > 0 {
 				wait = "next try in " + retryIn.Round(time.Second).String()
@@ -243,6 +282,14 @@ func (s *Summarizer) try(i int, alert Alert, logs []LogEntry, ragContext string)
 // breakerChanged logs a breaker transition on backend i.
 func (s *Summarizer) breakerChanged(i int, tr breakerTransition) {
 	step, b := s.steps[i], s.state[i].breaker
+	if s.observer != nil {
+		switch tr {
+		case transitionOpen, transitionReopen:
+			s.observer.SetLocalLLMBreakerOpen(step.Name, true)
+		case transitionClose:
+			s.observer.SetLocalLLMBreakerOpen(step.Name, false)
+		}
+	}
 	switch tr {
 	case transitionOpen:
 		log.Printf("aiops: circuit breaker for %s opened after %d consecutive unavailable failure(s); skipping it for %s", step.Name, b.threshold, b.cooldown)
@@ -278,6 +325,9 @@ func (s *Summarizer) probe(i int) error {
 	}
 	classified := classifyChatError(fmt.Errorf("summarize: %s health check failed, chat not attempted: %w", step.LLM.Backend(), err))
 	if IsLLMUnavailable(classified) {
+		if s.observer != nil {
+			s.observer.IncLocalLLMSkippedTotal(step.Name, SkipReasonProbe)
+		}
 		return classified
 	}
 	s.state[i].probeInconclusive.Do(func() {
