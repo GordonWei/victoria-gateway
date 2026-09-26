@@ -33,10 +33,14 @@ type fakeCloudAssist struct {
 	// of the client's time budget before polling starts.
 	createDelay time.Duration
 	runDelay    time.Duration
-	polls       int
-	created     caInvestigation
-	auth        []string
-	paths       []string
+	// noRevision and noOpName blank out the created investigation's
+	// revision and the run operation's name.
+	noRevision bool
+	noOpName   bool
+	polls      int
+	created    caInvestigation
+	auth       []string
+	paths      []string
 }
 
 func (f *fakeCloudAssist) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -64,9 +68,17 @@ func (f *fakeCloudAssist) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&f.created); err != nil {
 			f.t.Errorf("decode create body: %v", err)
 		}
-		_ = json.NewEncoder(w).Encode(caInvestigation{Name: testInvName, Revision: testRevName})
+		created := caInvestigation{Name: testInvName, Revision: testRevName}
+		if f.noRevision {
+			created.Revision = ""
+		}
+		_ = json.NewEncoder(w).Encode(created)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1alpha/"+testRevName+":run":
-		_ = json.NewEncoder(w).Encode(caOperation{Name: testOpName})
+		op := caOperation{Name: testOpName}
+		if f.noOpName {
+			op.Name = ""
+		}
+		_ = json.NewEncoder(w).Encode(op)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1alpha/"+testOpName:
 		f.polls++
 		op := caOperation{Name: testOpName, Done: f.polls >= f.pollsUntilDone}
@@ -324,6 +336,30 @@ func TestCloudAssistClient_DoneButNotCompleted(t *testing.T) {
 	c, _ = newTestCloudAssist(t, &fakeCloudAssist{pollsUntilDone: 1, final: completedInvestigation()})
 	if reply, err := c.Chat(alertPrompt, nil); err != nil || strings.Contains(reply, "execution state") {
 		t.Errorf("completed: (%q, %v), want no state note", reply, err)
+	}
+}
+
+// A reply missing the name the next step needs stops the flow with an
+// error that says which one, rather than calling a malformed URL.
+func TestCloudAssistClient_MissingRevisionOrOperation(t *testing.T) {
+	f := &fakeCloudAssist{pollsUntilDone: 1, final: completedInvestigation(), noRevision: true}
+	c, _ := newTestCloudAssist(t, f)
+	_, err := c.Chat(alertPrompt, nil)
+	if err == nil || !strings.Contains(err.Error(), "created investigation "+testInvName+" has no revision to run") {
+		t.Errorf("no revision: err = %v", err)
+	}
+	if len(f.paths) != 1 {
+		t.Errorf("no revision: requests = %v, want only the create", f.paths)
+	}
+
+	f = &fakeCloudAssist{pollsUntilDone: 1, final: completedInvestigation(), noOpName: true}
+	c, _ = newTestCloudAssist(t, f)
+	_, err = c.Chat(alertPrompt, nil)
+	if err == nil || !strings.Contains(err.Error(), "run of "+testInvName+" returned no operation name") {
+		t.Errorf("no operation name: err = %v", err)
+	}
+	if len(f.paths) != 2 {
+		t.Errorf("no operation name: requests = %v, want create and run only", f.paths)
 	}
 }
 
