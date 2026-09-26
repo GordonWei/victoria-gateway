@@ -48,6 +48,7 @@ type webhookBody struct {
 	Host             string            `json:"host,omitempty"`
 	Summary          string            `json:"summary,omitempty"`
 	AnalyzedBy       string            `json:"analyzed_by,omitempty"`
+	EscalatedTo      string            `json:"escalated_to,omitempty"`
 	Error            string            `json:"error,omitempty"`
 	SimilarIncidents []similarIncident `json:"similar_incidents,omitempty"`
 }
@@ -65,11 +66,12 @@ type similarIncident struct {
 // delivery effort than a chat message.
 func (w *WebhookChannel) Send(msg Message) error {
 	body := webhookBody{
-		AlertName:  msg.AlertName,
-		Host:       msg.Host,
-		Summary:    msg.Summary,
-		AnalyzedBy: msg.AnalyzedBy,
-		Error:      msg.Error,
+		AlertName:   msg.AlertName,
+		Host:        msg.Host,
+		Summary:     msg.Summary,
+		AnalyzedBy:  msg.AnalyzedBy,
+		EscalatedTo: msg.EscalatedTo,
+		Error:       msg.Error,
 	}
 	for _, s := range msg.Similar {
 		body.SimilarIncidents = append(body.SimilarIncidents, similarIncident(s))

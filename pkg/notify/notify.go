@@ -30,7 +30,11 @@ type Message struct {
 	Host       string
 	Summary    string
 	AnalyzedBy string // "local" or "cloud" (empty when Error is set)
-	Error      string
+	// EscalatedTo names the escalation target that answered when
+	// AnalyzedBy is "cloud" (target name in hybrid mode, provider in
+	// legacy mode); empty otherwise.
+	EscalatedTo string
+	Error       string
 
 	// Similar lists past confirmed incidents worth showing next to this
 	// alert (already filtered by similarity threshold by the caller).

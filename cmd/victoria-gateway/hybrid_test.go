@@ -86,9 +86,9 @@ func hybridTestConfig() *config.Config {
 			"aws":     {Provider: "aws-devops-agent", DevOpsAgent: &config.DevOpsAgentConfig{SpaceID: "s"}},
 		},
 		HybridRoutes: []config.HybridRouteConfig{
-			{Matchers: map[string]string{"cloud": "aws"}, LogSource: "aws", Escalation: "aws"},
-			{Matchers: map[string]string{"site": "b"}, LogSource: "site-b", Escalation: "default"},
-			{Default: true, LogSource: "onprem", Escalation: "default"},
+			{Matchers: map[string]string{"cloud": "aws"}, LogSource: "aws", Escalation: config.EscalationList{"aws"}},
+			{Matchers: map[string]string{"site": "b"}, LogSource: "site-b", Escalation: config.EscalationList{"default"}},
+			{Default: true, LogSource: "onprem", Escalation: config.EscalationList{"default"}},
 		},
 	}
 }
@@ -103,15 +103,18 @@ func TestBuildHybridRouter_WiresNamedSourcesAndTargets(t *testing.T) {
 		t.Fatalf("buildHybridRouter: %v", err)
 	}
 	aws := r.pick(map[string]string{"cloud": "aws"})
-	if aws.logSourceName != "aws" || aws.escalationName != "aws" || aws.cloud == nil || aws.logs == nil {
+	if aws.logSourceName != "aws" || len(aws.escalations) != 1 || aws.escalations[0].name != "aws" || aws.logs == nil {
 		t.Fatalf("aws route = %+v", aws)
 	}
-	if _, ok := aws.cloud.(*model.DevOpsAgentClient); !ok {
-		t.Errorf("aws route cloud = %T, want *model.DevOpsAgentClient", aws.cloud)
+	if _, ok := aws.escalations[0].llm.(*model.DevOpsAgentClient); !ok {
+		t.Errorf("aws route cloud = %T, want *model.DevOpsAgentClient", aws.escalations[0].llm)
+	}
+	if aws.escalations[0].display != "aws" {
+		t.Errorf("aws display = %q, want the target name", aws.escalations[0].display)
 	}
 	siteB := r.pick(map[string]string{"site": "b"})
 	def := r.pick(map[string]string{"host": "db01"})
-	if siteB.cloud != def.cloud {
+	if siteB.escalations[0].llm != def.escalations[0].llm {
 		t.Errorf("routes sharing escalation target %q should share one client", "default")
 	}
 	if siteB.logs == def.logs {
@@ -142,8 +145,8 @@ func newHybridTestHandler(t *testing.T, onprem, aws *recordingLogSource, default
 	h := newTestHandler(t, "http://unused-legacy-loki", llmSrv.URL)
 	h.logs = nil // hybrid mode must not touch the legacy single source
 	h.router = &hybridRouter{routes: []hybridRoute{
-		{matchers: map[string]string{"cloud": "aws"}, target: alertRoute{name: "hybrid_routes[0]", logs: aws, logSourceName: "aws", cloud: awsCloud, escalationName: "aws"}},
-		{isDefault: true, target: alertRoute{name: "default", logs: onprem, logSourceName: "onprem", cloud: defaultCloud, escalationName: "default"}},
+		{matchers: map[string]string{"cloud": "aws"}, target: alertRoute{name: "hybrid_routes[0]", logs: aws, logSourceName: "aws", escalations: oneStep("aws", awsCloud)}},
+		{isDefault: true, target: alertRoute{name: "default", logs: onprem, logSourceName: "onprem", escalations: oneStep("default", defaultCloud)}},
 	}}
 	return h
 }
@@ -227,7 +230,15 @@ func TestHandlerRoute_LegacyModeReturnsSingleSourceAndCloud(t *testing.T) {
 	cloud := model.NewAnthropicClient(model.AnthropicClientConfig{Endpoint: "http://x", APIKey: "k", Model: "m"})
 	h := &handler{logs: src, cloud: cloud}
 	got := h.route(map[string]string{"cloud": "aws"})
-	if got.logs != src || got.cloud != cloud || got.name != "" {
+	if got.logs != src || len(got.escalations) != 1 || got.escalations[0].llm != cloud || got.escalations[0].name != "" || got.name != "" {
 		t.Errorf("legacy route = %+v, want the handler's single logs/cloud with an empty name", got)
 	}
+}
+
+// oneStep is a single-target escalation chain, or none for a nil llm.
+func oneStep(name string, llm model.LLM) []escalationStep {
+	if llm == nil {
+		return nil
+	}
+	return []escalationStep{{name: name, display: name, llm: llm}}
 }

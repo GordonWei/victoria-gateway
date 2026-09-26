@@ -27,9 +27,15 @@ type Config struct {
 	// Loki-specific, just historically homed on that block.
 	LogSource  *LogSourceConfig `yaml:"log_source"`
 	Summarizer LLMConfig        `yaml:"summarizer"`
-	Cloud      *CloudConfig     `yaml:"cloud"`      // optional: cloud model for escalated alerts
-	Escalation EscalationConfig `yaml:"escalation"` // rules for when to escalate to Cloud
-	Judge      *JudgeConfig     `yaml:"judge"`      // optional: additional escalation signal from TypeSafe AI's Jev, see JudgeConfig
+	Cloud      *CloudConfig     `yaml:"cloud"` // optional: cloud model for escalated alerts
+	// CloudFallbacks are tried in order when the legacy cloud block's own
+	// escalation call fails (connection error, timeout, non-2xx). Legacy
+	// mode only — with hybrid_routes, list several targets in a route's
+	// escalation instead. Requires cloud. One escalation, however many of
+	// these it ends up trying, counts once against escalation.max_per_hour.
+	CloudFallbacks []*CloudConfig   `yaml:"cloud_fallbacks"`
+	Escalation     EscalationConfig `yaml:"escalation"` // rules for when to escalate to Cloud
+	Judge          *JudgeConfig     `yaml:"judge"`      // optional: additional escalation signal from TypeSafe AI's Jev, see JudgeConfig
 	// Alertmanager points at the Alertmanager instance `victoria-gateway
 	// suppression-candidates --apply-silences` creates real, time-bounded
 	// silences against. Optional — unset means --apply-silences refuses to
@@ -189,7 +195,10 @@ type LogSourceConfig struct {
 	// Loki optionally points a type-"loki" entry at its own Loki
 	// instance. Only meaningful inside log_sources (a hybrid deployment
 	// may have more than one Loki, e.g. one per site); unset falls back
-	// to the top-level loki.endpoint. Ignored by the other types.
+	// to the top-level loki.endpoint. Ignored by the other types, and
+	// ignored on the legacy top-level log_source block too (that path
+	// always uses loki.endpoint; startup prints a warning if this is set
+	// there).
 	Loki *LokiEndpointConfig `yaml:"loki"`
 }
 
@@ -210,11 +219,45 @@ type LokiEndpointConfig struct {
 type HybridRouteConfig struct {
 	Matchers  map[string]string `yaml:"matchers"`
 	LogSource string            `yaml:"log_source"` // name of an entry in log_sources; required
-	// Escalation names an entry in escalation_targets. Empty means
-	// alerts on this route never escalate — the local result is final,
-	// as if no cloud were configured at all for them.
-	Escalation string `yaml:"escalation"`
-	Default    bool   `yaml:"default"`
+	// Escalation names one entry in escalation_targets, or several in
+	// order (`escalation: aws` or `escalation: [aws, default]`): later
+	// entries are only tried when an earlier one fails. Empty means alerts
+	// on this route never escalate — the local result is final, as if no
+	// cloud were configured at all for them.
+	Escalation EscalationList `yaml:"escalation"`
+	Default    bool           `yaml:"default"`
+}
+
+// EscalationList is a route's ordered escalation target names. It
+// unmarshals from either a single YAML string or a sequence of strings,
+// so configs written before fallbacks existed (`escalation: aws`) keep
+// parsing unchanged.
+type EscalationList []string
+
+// UnmarshalYAML accepts a scalar (one name; "" means none) or a sequence.
+func (l *EscalationList) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		var s string
+		if err := n.Decode(&s); err != nil {
+			return err
+		}
+		if s == "" {
+			*l = nil
+		} else {
+			*l = EscalationList{s}
+		}
+		return nil
+	case yaml.SequenceNode:
+		var ss []string
+		if err := n.Decode(&ss); err != nil {
+			return err
+		}
+		*l = ss
+		return nil
+	default:
+		return fmt.Errorf("line %d: escalation must be a target name or a list of target names", n.Line)
+	}
 }
 
 // CloudWatchConfig configures pkg/cloudwatch as the log source. AWS
@@ -279,6 +322,14 @@ type LLMConfig struct {
 	// this above the cold-load time (e.g. 180) to make that first
 	// analysis succeed instead.
 	TimeoutSec int `yaml:"timeout_sec"`
+
+	// Fallbacks are other OpenAI-compatible endpoints tried in order when
+	// this one can't be reached (connection error, timeout, non-2xx). A
+	// reply that arrives but isn't valid JSON is not a failure — it's
+	// shown as-is, the same as without fallbacks. Only meaningful on the
+	// top-level summarizer block; a fallback may not have fallbacks of its
+	// own.
+	Fallbacks []LLMConfig `yaml:"fallbacks"`
 }
 
 // CloudConfig is the cloud model endpoint escalated alerts get
@@ -533,9 +584,38 @@ func (c *Config) Validate() error {
 	if c.Summarizer.TimeoutSec < 0 {
 		return fmt.Errorf("summarizer.timeout_sec must be >= 0 (0 means the 60s default)")
 	}
+	for i, fb := range c.Summarizer.Fallbacks {
+		label := fmt.Sprintf("summarizer.fallbacks[%d]", i)
+		if fb.Endpoint == "" {
+			return fmt.Errorf("%s.endpoint is not set", label)
+		}
+		if fb.TimeoutSec < 0 {
+			return fmt.Errorf("%s.timeout_sec must be >= 0 (0 means the 60s default)", label)
+		}
+		if len(fb.Fallbacks) > 0 {
+			return fmt.Errorf("%s has fallbacks of its own — list every fallback directly under summarizer.fallbacks instead", label)
+		}
+	}
 	if c.Cloud != nil {
 		if err := validateCloudAPIKey("cloud", c.Cloud); err != nil {
 			return err
+		}
+	}
+	if len(c.CloudFallbacks) > 0 {
+		if len(c.HybridRoutes) > 0 {
+			return fmt.Errorf("cloud_fallbacks is set together with hybrid_routes — with hybrid_routes, list fallback targets in each route's escalation instead (e.g. escalation: [aws, default])")
+		}
+		if c.Cloud == nil {
+			return fmt.Errorf("cloud_fallbacks is set but cloud is not — fallbacks only run after the cloud block's own escalation fails")
+		}
+		for i, fb := range c.CloudFallbacks {
+			label := fmt.Sprintf("cloud_fallbacks[%d]", i)
+			if fb == nil {
+				return fmt.Errorf("%s is empty", label)
+			}
+			if err := validateCloudEntry(label, fb); err != nil {
+				return err
+			}
 		}
 	}
 	// An escalation rule that can never fire (no Cloud configured) is a
@@ -698,11 +778,19 @@ func (c *Config) validateHybrid() error {
 			return fmt.Errorf("%s: log_source %q is not defined under log_sources", label, r.LogSource)
 		}
 		usedSources[r.LogSource] = true
-		if r.Escalation != "" {
-			if _, ok := c.EscalationTargets[r.Escalation]; !ok {
-				return fmt.Errorf("%s: escalation %q is not defined under escalation_targets", label, r.Escalation)
+		seen := map[string]bool{}
+		for _, esc := range r.Escalation {
+			if esc == "" {
+				return fmt.Errorf("%s: escalation has an empty target name", label)
 			}
-			usedTargets[r.Escalation] = true
+			if seen[esc] {
+				return fmt.Errorf("%s: escalation lists %q more than once", label, esc)
+			}
+			seen[esc] = true
+			if _, ok := c.EscalationTargets[esc]; !ok {
+				return fmt.Errorf("%s: escalation %q is not defined under escalation_targets", label, esc)
+			}
+			usedTargets[esc] = true
 		}
 	}
 	if !c.HybridRoutes[len(c.HybridRoutes)-1].Default {
@@ -930,6 +1018,22 @@ func applyEnvOverrides(cfg *Config) {
 	if cfg.Cloud != nil {
 		if v := os.Getenv("VICTORIA_GATEWAY_CLOUD_API_KEY"); v != "" {
 			cfg.Cloud.APIKey = v
+		}
+	}
+	// Fallbacks are addressed by position, e.g. summarizer.fallbacks[0] →
+	// VICTORIA_GATEWAY_SUMMARIZER_FALLBACK_0_API_KEY and cloud_fallbacks[1]
+	// → VICTORIA_GATEWAY_CLOUD_FALLBACK_1_API_KEY.
+	for i := range cfg.Summarizer.Fallbacks {
+		if v := os.Getenv(fmt.Sprintf("VICTORIA_GATEWAY_SUMMARIZER_FALLBACK_%d_API_KEY", i)); v != "" {
+			cfg.Summarizer.Fallbacks[i].APIKey = v
+		}
+	}
+	for i, fb := range cfg.CloudFallbacks {
+		if fb == nil {
+			continue
+		}
+		if v := os.Getenv(fmt.Sprintf("VICTORIA_GATEWAY_CLOUD_FALLBACK_%d_API_KEY", i)); v != "" {
+			fb.APIKey = v
 		}
 	}
 	// One var per named escalation target, e.g. escalation_targets.default

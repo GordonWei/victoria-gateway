@@ -113,14 +113,7 @@ func runServe(args []string) {
 		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 		os.Exit(1)
 	}
-	llm := model.NewOpenAIClient(model.OpenAIClientConfig{
-		Endpoint: cfg.Summarizer.Endpoint,
-		Model:    cfg.Summarizer.Model,
-		Backend:  "aiops-summarizer",
-		APIKey:   cfg.Summarizer.APIKey,
-		Timeout:  time.Duration(cfg.Summarizer.TimeoutSec) * time.Second,
-	})
-	summarizer := aiops.NewSummarizer(llm)
+	summarizer := buildSummarizer(cfg.Summarizer)
 
 	var cloud model.LLM
 	if cfg.Cloud != nil {
@@ -130,20 +123,26 @@ func runServe(args []string) {
 			os.Exit(1)
 		}
 	}
+	legacyEscalations, err := buildLegacyEscalations(cfg, cloud)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+		os.Exit(1)
+	}
 
 	h := &handler{
-		logs:        logs,
-		router:      router,
-		summarizer:  summarizer,
-		cloud:       cloud,
-		escalation:  cfg.Escalation,
-		lookback:    lookback,
-		limit:       limit,
-		webhookAuth: cfg.WebhookAuth,
-		webUIAuth:   cfg.WebUIAuth,
-		metrics:     &metrics.Counters{},
-		async:       cfg.WebhookAsync,
-		audit:       audit.NoopLogger{}, // overridden below if rag.audit_log is set
+		logs:              logs,
+		router:            router,
+		summarizer:        summarizer,
+		cloud:             cloud,
+		legacyEscalations: legacyEscalations,
+		escalation:        cfg.Escalation,
+		lookback:          lookback,
+		limit:             limit,
+		webhookAuth:       cfg.WebhookAuth,
+		webUIAuth:         cfg.WebUIAuth,
+		metrics:           &metrics.Counters{},
+		async:             cfg.WebhookAsync,
+		audit:             audit.NoopLogger{}, // overridden below if rag.audit_log is set
 	}
 
 	if cfg.Judge != nil && cfg.Judge.APIKey != "" {
@@ -304,6 +303,9 @@ func runServe(args []string) {
 		fmt.Printf("   log source (%s): %s | summarizer: %s (%s) | notify: %v | cloud: %v | rag: %v\n",
 			srcType, logSourceDesc, cfg.Summarizer.Endpoint, cfg.Summarizer.Model, h.notifier.Enabled(), cloud != nil, ragEnabled)
 	}
+	for _, line := range startupNotes(cfg) {
+		fmt.Printf("   %s\n", line)
+	}
 
 	// Graceful shutdown: SIGTERM/SIGINT stops accepting new requests,
 	// then waits (bounded) for in-flight analyses — which may be running
@@ -435,15 +437,19 @@ type handler struct {
 	// legacy (non-hybrid) config. router is non-nil exactly when
 	// hybrid_routes is configured, in which case logs/cloud are unused
 	// and every alert is routed by its labels instead — see route().
-	logs        aiops.LogSource
-	router      *hybridRouter
-	summarizer  *aiops.Summarizer
-	notifier    *notify.Router // nil-safe; nil or channel-less means "no pushes"
-	cloud       model.LLM      // nil if no cloud escalation target configured
-	escalation  config.EscalationConfig
-	lookback    time.Duration
-	limit       int
-	webhookAuth *config.WebhookAuthConfig // nil if the webhook endpoint requires no auth
+	logs       aiops.LogSource
+	router     *hybridRouter
+	summarizer *aiops.Summarizer
+	notifier   *notify.Router // nil-safe; nil or channel-less means "no pushes"
+	cloud      model.LLM      // nil if no cloud escalation target configured
+	// legacyEscalations is cloud followed by cloud_fallbacks, built once
+	// at startup. Nil means "derive a one-step chain from cloud", which
+	// is what the many test-constructed handlers that only set cloud get.
+	legacyEscalations []escalationStep
+	escalation        config.EscalationConfig
+	lookback          time.Duration
+	limit             int
+	webhookAuth       *config.WebhookAuthConfig // nil if the webhook endpoint requires no auth
 	// webUIAuth is non-nil exactly when webUIAuthMiddleware actually
 	// verifies Basic Auth on the web routes — see actorFromRequest's doc
 	// comment for why this has to be checked before trusting an
@@ -652,7 +658,12 @@ type alertResult struct {
 	Host       string `json:"host,omitempty"`
 	Summary    string `json:"summary,omitempty"`
 	AnalyzedBy string `json:"analyzed_by,omitempty"` // "local" or "cloud" or "suppressed"
-	Error      string `json:"error,omitempty"`
+	// EscalatedTo names which escalation target answered when AnalyzedBy
+	// is "cloud": the escalation_targets name in hybrid mode, the provider
+	// in legacy mode. Separate from AnalyzedBy so that field's existing
+	// values (which RAG records and dashboards key on) never change.
+	EscalatedTo string `json:"escalated_to,omitempty"`
+	Error       string `json:"error,omitempty"`
 
 	muted     bool                     // not exported to JSON; controls whether notification is skipped
 	similar   []notify.SimilarIncident // past confirmed incidents above the similarity threshold, for notifications
@@ -739,8 +750,7 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 			h.inFlight.Add(1)
 			go func(alert aiops.Alert) {
 				defer h.inFlight.Done()
-				res := h.summarizeOne(alert)
-				h.notifyResult(res, alert.Labels)
+				h.processAlert(alert)
 			}(alert)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -764,9 +774,7 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 		go func(i int, alert aiops.Alert) {
 			defer wg.Done()
 			defer h.inFlight.Done()
-			res := h.summarizeOne(alert)
-			results[i] = res
-			h.notifyResult(res, alert.Labels)
+			results[i] = h.processAlert(alert)
 		}(i, alert)
 	}
 	wg.Wait()
@@ -779,11 +787,26 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+// processAlert analyzes one alert and pushes the result. A failed
+// analysis is logged here in both sync and async mode: in async mode
+// there is no response body to carry res.Error, so without this line a
+// failure only surfaced as a notification (if any channel is set up)
+// and a metrics tick.
+func (h *handler) processAlert(alert aiops.Alert) alertResult {
+	res := h.summarizeOne(alert)
+	if res.Error != "" {
+		log.Printf("aiops: alert %q failed: %s", res.AlertName, res.Error)
+	}
+	h.notifyResult(res, alert.Labels)
+	return res
+}
+
 // summarizeOne handles a single alert end to end. Failures for one alert
 // (bad host label, Loki unreachable, LLM error) are captured in the result
 // rather than aborting the whole webhook request — a payload can carry
 // multiple alerts, and one bad one shouldn't blank out the rest.
 func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
+	route := h.route(alert.Labels)
 	h.metrics.IncAlertsTotal()
 	analysisStart := time.Now()
 	defer func() {
@@ -828,7 +851,6 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		return
 	}
 
-	route := h.route(alert.Labels)
 	if route.logs == nil {
 		// Unreachable for a validated config (hybrid_routes must end in a
 		// default route); reported per-alert rather than panicking.
@@ -836,11 +858,7 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		return
 	}
 	if route.name != "" {
-		esc := route.escalationName
-		if esc == "" {
-			esc = "none"
-		}
-		log.Printf("aiops: alert %q routed via %s → log source %q, escalation %q", res.AlertName, route.name, route.logSourceName, esc)
+		log.Printf("aiops: alert %q routed via %s → log source %q, escalation %q", res.AlertName, route.name, route.logSourceName, route.escalationNames())
 	}
 
 	logQueryStart := time.Now()
@@ -858,7 +876,29 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	local, err := h.summarizer.Summarize(alert, logs, ragContext)
 	h.metrics.ObserveLocalLLMDuration(time.Since(localStart))
 	if err != nil {
-		res.Error = fmt.Sprintf("summarize: %v", err)
+		if !aiops.IsLLMUnavailable(err) || len(route.escalations) == 0 {
+			res.Error = fmt.Sprintf("summarize: %v", err)
+			return
+		}
+		// Every local model is down, but this route has somewhere to
+		// escalate to: hand the alert over instead of failing it. Jev is
+		// skipped — it judges the local summary, and there isn't one.
+		log.Printf("aiops: local summarizer unavailable for alert %q, escalating instead: %v", res.AlertName, err)
+		if !h.allowEscalation() {
+			log.Printf("aiops: alert %q would escalate (%s) but escalation.max_per_hour is already reached this hour", res.AlertName, reasonLocalUnavailable)
+			h.metrics.IncEscalationRateLimitedTotal()
+			res.Error = fmt.Sprintf("summarize: %v; cloud escalation skipped: escalation.max_per_hour reached", err)
+			return
+		}
+		cloudResult, step, cloudErr := h.runEscalation(route.escalations, alert, logs, ragContext, reasonLocalUnavailable)
+		if cloudErr != nil {
+			res.Error = fmt.Sprintf("summarize: %v; cloud escalation (%s) also failed: %v", err, reasonLocalUnavailable, cloudErr)
+			return
+		}
+		res.AnalyzedBy = "cloud"
+		res.EscalatedTo = step.display
+		res.Summary = cloudResult.Summary
+		res.pendingID = h.captureIncident(alert, logs, cloudResult, res.AnalyzedBy, res.EscalatedTo)
 		return
 	}
 	if local.ParseFailed {
@@ -871,36 +911,34 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	escalate, reason := aiops.ShouldEscalate(res.AlertName, local, h.escalation.AlwaysCloud)
 	escalate, reason = h.applyJudge(res.AlertName, local, escalate, reason)
 
-	if escalate && route.cloud != nil && !h.allowEscalation() {
+	if escalate && len(route.escalations) == 0 {
+		if route.name != "" {
+			log.Printf("aiops: alert %q would escalate (%s) but route %q has no escalation target", res.AlertName, reason, route.name)
+		} else {
+			log.Printf("aiops: alert %q would escalate (%s) but no cloud is configured", res.AlertName, reason)
+		}
+		h.metrics.IncEscalationNoTargetTotal()
+		escalate = false
+	}
+	if escalate && !h.allowEscalation() {
 		log.Printf("aiops: alert %q would escalate (%s) but escalation.max_per_hour is already reached this hour; staying on the local result", res.AlertName, reason)
 		h.metrics.IncEscalationRateLimitedTotal()
 		escalate = false
 	}
-	if escalate && route.cloud != nil {
-		cloudStart := time.Now()
-		cloudResult, cloudErr := aiops.SummarizeWithLLM(route.cloud, alert, logs, ragContext)
-		h.metrics.ObserveCloudLLMDuration(time.Since(cloudStart))
-		if cloudErr != nil {
-			// Escalation failing isn't fatal to the alert — the local
-			// summary is still a real (if less confident) answer, and an
-			// operator seeing it plus this log line knows to double-check
-			// it themselves rather than getting nothing.
-			log.Printf("aiops: cloud escalation failed for alert %q (%s): %v", res.AlertName, reason, cloudErr)
-			h.metrics.IncEscalationFailuresTotal()
-		} else {
-			if route.escalationName != "" {
-				log.Printf("aiops: alert %q escalated to cloud target %q (%s)", res.AlertName, route.escalationName, reason)
-			} else {
-				log.Printf("aiops: alert %q escalated to cloud (%s)", res.AlertName, reason)
-			}
+	if escalate {
+		// Escalation failing isn't fatal to the alert — the local
+		// summary is still a real (if less confident) answer, and an
+		// operator seeing it plus runEscalation's log lines knows to
+		// double-check it themselves rather than getting nothing.
+		if cloudResult, step, cloudErr := h.runEscalation(route.escalations, alert, logs, ragContext, reason); cloudErr == nil {
 			result = cloudResult
 			res.AnalyzedBy = "cloud"
-			h.metrics.IncEscalationsTotal()
+			res.EscalatedTo = step.display
 		}
 	}
 
 	res.Summary = result.Summary
-	res.pendingID = h.captureIncident(alert, logs, result, res.AnalyzedBy)
+	res.pendingID = h.captureIncident(alert, logs, result, res.AnalyzedBy, res.EscalatedTo)
 	return
 }
 
@@ -912,7 +950,11 @@ func (h *handler) route(labels map[string]string) alertRoute {
 	if h.router != nil {
 		return h.router.pick(labels)
 	}
-	return alertRoute{logs: h.logs, cloud: h.cloud}
+	r := alertRoute{logs: h.logs, escalations: h.legacyEscalations}
+	if r.escalations == nil && h.cloud != nil {
+		r.escalations = []escalationStep{{display: h.cloud.Backend(), llm: h.cloud}}
+	}
+	return r
 }
 
 // applyJudge asks Jev (pkg/judge) for an independent escalation read and
@@ -976,7 +1018,7 @@ func combineEscalation(existing bool, existingReason string, judgment judge.Esca
 // logged, never fail the alert itself. Returns the new record's id (0 on
 // any failure/no-op path) so the caller can put a direct confirm link in
 // the alert's own notification — see notifyResult/notify.Message.PendingURL.
-func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, result aiops.SummarizeResult, analyzedBy string) (id int64) {
+func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, result aiops.SummarizeResult, analyzedBy, escalatedTo string) (id int64) {
 	if h.rag == nil || h.ragEmbedder == nil {
 		return 0
 	}
@@ -1000,9 +1042,13 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 	var issueNumber int64
 	if h.tracker != nil {
 		title := fmt.Sprintf("[%s] %s", alert.Labels["alertname"], host)
+		analyzedLabel := analyzedBy
+		if escalatedTo != "" {
+			analyzedLabel = fmt.Sprintf("%s → %s", analyzedBy, escalatedTo)
+		}
 		body := fmt.Sprintf(
 			"**分析結果（%s）：**\n\n%s\n\n---\n此 Issue 由 Victoria Gateway 自動建立。調查完後請在關閉前留一則留言說明實際原因/怎麼修的，`victoria-gateway sync` 會把它讀回 RAG 資料庫，供未來類似告警參考。",
-			analyzedBy, result.Summary)
+			analyzedLabel, result.Summary)
 		n, err := h.tracker.CreateIssue(context.Background(), title, body)
 		if err != nil {
 			log.Printf("aiops: create issue failed, capturing without a linked issue: %v", err)
@@ -1139,12 +1185,13 @@ func (h *handler) notifyResult(res alertResult, labels map[string]string) {
 		pendingURL = fmt.Sprintf("%s/pending/%d", h.publicBaseURL, res.pendingID)
 	}
 	h.notifier.Dispatch(notify.Message{
-		AlertName:  res.AlertName,
-		Host:       res.Host,
-		Summary:    res.Summary,
-		AnalyzedBy: res.AnalyzedBy,
-		Error:      res.Error,
-		Similar:    res.similar,
-		PendingURL: pendingURL,
+		AlertName:   res.AlertName,
+		Host:        res.Host,
+		Summary:     res.Summary,
+		AnalyzedBy:  res.AnalyzedBy,
+		EscalatedTo: res.EscalatedTo,
+		Error:       res.Error,
+		Similar:     res.similar,
+		PendingURL:  pendingURL,
 	}, labels)
 }

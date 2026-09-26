@@ -64,3 +64,16 @@ func TestCounters_HandlerContentType(t *testing.T) {
 		t.Errorf("Content-Type = %q, want text/plain prefix", ct)
 	}
 }
+
+func TestCounters_EscalationNoTarget(t *testing.T) {
+	var nilC *Counters
+	nilC.IncEscalationNoTargetTotal() // nil-safe
+
+	c := &Counters{}
+	c.IncEscalationNoTargetTotal()
+	rec := httptest.NewRecorder()
+	c.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(rec.Body.String(), "victoria_gateway_escalation_no_target_total 1") {
+		t.Errorf("metrics output missing the no-target counter, got:\n%s", rec.Body.String())
+	}
+}
