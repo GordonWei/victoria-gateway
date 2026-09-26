@@ -86,6 +86,28 @@ summarizer:
 #   api_key: "REPLACE-gemini-api-key"
 #   model: "gemini-2.5-flash"
 
+# Optional, instead of log_source + cloud above: route each alert by its
+# labels to its own log backend and escalation target, so one deployment
+# covers on-prem and cloud together (README: "Hybrid cloud routing").
+# Can't be combined with the log_source/cloud blocks — remove those first.
+# log_sources:
+#   onprem: {type: loki}          # uses loki.endpoint above
+#   aws:
+#     type: cloudwatch
+#     cloudwatch: {region: "us-east-1", log_group_names: ["/aws/lambda/REPLACE"]}
+# escalation_targets:
+#   default: {provider: "gemini", model: "gemini-2.5-flash"}   # key: VICTORIA_GATEWAY_ESCALATION_DEFAULT_API_KEY
+#   aws:
+#     provider: "aws-devops-agent"
+#     aws_devops_agent: {user_id: "REPLACE", space_id: "REPLACE"}
+# hybrid_routes:
+#   - matchers: {cloud: "aws"}
+#     log_source: aws
+#     escalation: aws
+#   - default: true
+#     log_source: onprem
+#     escalation: default
+
 # Optional. Alert names listed here always get re-analyzed by `cloud`
 # regardless of what the local model's own confidence says — use this for
 # alerts you already know are complex/sensitive in your environment.
