@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -124,7 +126,7 @@ func NewDevOpsAgentClient(cfg DevOpsAgentClientConfig) *DevOpsAgentClient {
 // minute investigation it's about to kick off.
 func (c *DevOpsAgentClient) newCommandTransport() mcp.Transport {
 	cmd := exec.Command(c.binaryPath, "mcp")
-	cmd.Env = append(cmd.Environ(),
+	cmd.Env = append(subprocessEnv(os.Environ()),
 		"DEVOPS_AGENT_USER_ID="+c.userID,
 		"DEVOPS_AGENT_REGION="+c.region,
 	)
@@ -132,6 +134,42 @@ func (c *DevOpsAgentClient) newCommandTransport() mcp.Transport {
 		cmd.Env = append(cmd.Env, "DEVOPS_AGENT_SPACE_ID="+c.spaceID)
 	}
 	return &mcp.CommandTransport{Command: cmd}
+}
+
+// subprocessEnv filters the gateway's own environment down to what the
+// aws-devops-agent CLI plausibly needs: process basics, locale, proxy and
+// CA settings, the AWS SDK's credential/config variables, its own
+// DEVOPS_AGENT_* settings, and Python's (it's a pip-installed tool).
+// Everything else — VICTORIA_GATEWAY_* secrets, the RAG Postgres DSN, a
+// Telegram token — stays out of a third-party binary's environment it has
+// no use for.
+func subprocessEnv(environ []string) []string {
+	exact := map[string]bool{
+		"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "SHELL": true,
+		"TMPDIR": true, "TZ": true, "LANG": true, "LANGUAGE": true,
+		"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "REQUESTS_CA_BUNDLE": true,
+		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
+		"http_proxy": true, "https_proxy": true, "no_proxy": true,
+		"VIRTUAL_ENV": true,
+	}
+	prefixes := []string{"LC_", "AWS_", "DEVOPS_AGENT_", "PYTHON"}
+	var out []string
+	for _, kv := range environ {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		keep := exact[k]
+		for _, p := range prefixes {
+			if strings.HasPrefix(k, p) {
+				keep = true
+			}
+		}
+		if keep {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // connect opens an MCP session over c.transport.
