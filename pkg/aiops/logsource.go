@@ -2,6 +2,7 @@ package aiops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -55,12 +56,6 @@ func (id LogIdentity) LokiSelector() string {
 	return fmt.Sprintf(`{host=%q}`, id.Host)
 }
 
-// Term picks the single most specific identifying string out of this
-// identity, in the same pod > deployment > statefulset > host precedence
-// as everywhere else — for backends like CloudWatch Logs Insights and GCP
-// Cloud Logging whose native query language has no concept of Loki's
-// multi-label stream selector and instead filters on a single search term
-// against the log line/payload.
 // SafeTerm returns Term() for splicing into a CloudWatch Logs Insights
 // query or a Cloud Logging filter, or an error if the term contains a
 // character that could step outside the literal it's placed in. Neither
@@ -68,20 +63,46 @@ func (id LogIdentity) LokiSelector() string {
 // every operator-written template (the term may land in a regex, a quoted
 // string, or bare), so instead of escaping, anything that isn't plausibly
 // part of a host/pod/instance name is refused: quotes, backslash, '/',
-// '|', backtick, parentheses, whitespace and control characters. A real
-// identifier never contains these; an alert label that does is either
-// malformed or an injection attempt, and failing that one alert's log
-// query is the safe outcome either way.
+// '|', backtick, parentheses, whitespace and control characters. A host
+// or pod name never contains these. A label that does — a blackbox
+// probe's instance="https://x/health" is the common harmless case, an
+// injection attempt the uncommon one — can't be searched for safely, so
+// that alert's log query is skipped rather than sent.
+// The returned error matches ErrUnsafeSearchTerm under errors.Is, so the
+// caller can carry on without logs instead of failing the alert.
 func (id LogIdentity) SafeTerm() (string, error) {
 	term := id.Term()
 	for _, r := range term {
 		if strings.ContainsRune("\"'\\/|`()", r) || unicode.IsSpace(r) || unicode.IsControl(r) {
-			return "", fmt.Errorf("refusing to search for %q: it contains %q, which could change the query's meaning", term, r)
+			return "", &unsafeTermError{term: term, char: r}
 		}
 	}
 	return term, nil
 }
 
+// ErrUnsafeSearchTerm is what SafeTerm's refusal matches under errors.Is.
+// A refused term isn't a log backend failure — the query was never sent
+// — so the alert is still summarized, just without logs, the same as a
+// query that found nothing.
+var ErrUnsafeSearchTerm = errors.New("unsafe log search term")
+
+type unsafeTermError struct {
+	term string
+	char rune
+}
+
+func (e *unsafeTermError) Error() string {
+	return fmt.Sprintf("refusing to search for %q: it contains %q, which could change the query's meaning", e.term, e.char)
+}
+
+func (e *unsafeTermError) Is(target error) bool { return target == ErrUnsafeSearchTerm }
+
+// Term picks the single most specific identifying string out of this
+// identity, in the same pod > deployment > statefulset > host precedence
+// as everywhere else — for backends like CloudWatch Logs Insights and GCP
+// Cloud Logging whose native query language has no concept of Loki's
+// multi-label stream selector and instead filters on a single search term
+// against the log line/payload.
 func (id LogIdentity) Term() string {
 	switch {
 	case id.Pod != "":

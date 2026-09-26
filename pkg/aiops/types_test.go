@@ -1,6 +1,10 @@
 package aiops
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"testing"
+)
 
 func TestAffectedIdentity_NamespacePodPreferredOverInstance(t *testing.T) {
 	// A kube-state-metrics-sourced alert (e.g. KubePodCrashLooping) carries
@@ -136,8 +140,8 @@ func TestLogIdentity_SafeTerm(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{`a"b`, "a'b", `a\b`, "a/b", "a|b", "a`b", "a(b", "a)b", "a b", "a\tb", "a\nb", "a\x00b"} {
-		if _, err := (LogIdentity{Host: bad}).SafeTerm(); err == nil {
-			t.Errorf("SafeTerm(%q) = nil error, want a refusal", bad)
+		if _, err := (LogIdentity{Host: bad}).SafeTerm(); err == nil || !errors.Is(fmt.Errorf("wrapped: %w", err), ErrUnsafeSearchTerm) {
+			t.Errorf("SafeTerm(%q) = %v, want a refusal matching ErrUnsafeSearchTerm", bad, err)
 		}
 	}
 	// Pod wins over host, same precedence as Term().

@@ -34,6 +34,7 @@ type Counters struct {
 	escalationFailuresTotal    labeledCounter // target
 	escalationRateLimitedTotal labeledCounter // target
 	escalationNoTargetTotal    labeledCounter // route (there is no target to name)
+	logQueryRefusedTotal       labeledCounter // log_source
 
 	dedupSkippedTotal               atomic.Int64
 	resolvedSkippedTotal            atomic.Int64
@@ -151,6 +152,15 @@ func (c *Counters) IncAlertsTotal(route string) {
 func (c *Counters) IncAlertsErrorTotal(route string) {
 	if c != nil {
 		c.alertsErrorTotal.inc(route)
+	}
+}
+
+// IncLogQueryRefusedTotal counts alerts whose log query was never sent
+// because the search term was refused as unsafe (see
+// aiops.ErrUnsafeSearchTerm); the alert is still summarized without logs.
+func (c *Counters) IncLogQueryRefusedTotal(logSource string) {
+	if c != nil {
+		c.logQueryRefusedTotal.inc(logSource)
 	}
 }
 
@@ -304,6 +314,7 @@ func (c *Counters) snapshot() []counterDef {
 	return []counterDef{
 		{name: "victoria_gateway_alerts_total", help: "Alerts analyzed (excludes resolved and deduped deliveries).", label: "route", lc: &c.alertsTotal},
 		{name: "victoria_gateway_alerts_error_total", help: "Alerts that failed before producing a summary (bad host label, Loki error, LLM error).", label: "route", lc: &c.alertsErrorTotal},
+		{name: "victoria_gateway_log_query_refused_total", help: "Log queries skipped because the alert's search term was refused as unsafe (the alert was summarized without logs).", label: "log_source", lc: &c.logQueryRefusedTotal},
 		{name: "victoria_gateway_dedup_skipped_total", help: "Deliveries skipped as a duplicate of an already-claimed alert fingerprint.", val: c.dedupSkippedTotal.Load()},
 		{name: "victoria_gateway_resolved_skipped_total", help: "Resolved deliveries received (never analyzed).", val: c.resolvedSkippedTotal.Load()},
 		{name: "victoria_gateway_webhook_auth_rejected_total", help: "Webhook requests rejected for missing or wrong Basic Auth credentials.", val: c.webhookAuthRejectedTotal.Load()},

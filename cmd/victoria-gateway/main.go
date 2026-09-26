@@ -17,6 +17,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -881,6 +882,14 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	logQueryStart := time.Now()
 	logs, err := route.logs.QueryRange(context.Background(), identity, start.Add(-h.lookback), time.Now(), h.limit)
 	h.metrics.ObserveLokiQueryDuration(route.logSourceName, time.Since(logQueryStart))
+	if errors.Is(err, aiops.ErrUnsafeSearchTerm) {
+		// The query was never sent: the alert's identity (typically a
+		// blackbox probe URL) can't be searched for safely. Carry on
+		// without logs, the same as a query that found nothing.
+		log.Printf("aiops: alert %q log query skipped on log source %q, summarizing without logs: %v", res.AlertName, route.logSourceName, err)
+		h.metrics.IncLogQueryRefusedTotal(route.logSourceName)
+		logs, err = nil, nil
+	}
 	if err != nil {
 		res.Error = fmt.Sprintf("log query: %v", err)
 		return
