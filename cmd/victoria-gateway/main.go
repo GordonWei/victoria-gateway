@@ -115,6 +115,8 @@ func runServe(args []string) {
 		os.Exit(1)
 	}
 	summarizer := buildSummarizer(cfg.Summarizer)
+	counters := &metrics.Counters{}
+	summarizer.SetObserver(counters)
 
 	var cloud model.LLM
 	if cfg.Cloud != nil {
@@ -142,7 +144,7 @@ func runServe(args []string) {
 		limit:             limit,
 		webhookAuth:       cfg.WebhookAuth,
 		webUIAuth:         cfg.WebUIAuth,
-		metrics:           &metrics.Counters{},
+		metrics:           counters,
 		async:             cfg.WebhookAsync,
 		audit:             audit.NoopLogger{}, // overridden below if rag.audit_log is set
 	}

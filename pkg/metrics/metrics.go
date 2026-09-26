@@ -9,6 +9,7 @@ package metrics
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -54,6 +55,12 @@ type Counters struct {
 	notifyPushTotal        labeledCounter
 	notifyPushFailureTotal labeledCounter
 
+	// Local summarizer health (see pkg/aiops.Summarizer): whether each
+	// backend's circuit breaker is open, and how often a backend was
+	// skipped without a chat call, by why.
+	localLLMBreakerOpen  labeledGauge  // backend
+	localLLMSkippedTotal pairedCounter // backend, reason
+
 	// Duration observations (sum + count pairs, enough for Grafana to
 	// graph an average) — deliberately not histograms: hand-rolling
 	// buckets buys little for a home-lab service, and this keeps the
@@ -93,6 +100,68 @@ func (l *labeledCounter) snapshot() (labels []string, vals map[string]int64) {
 	}
 	sort.Strings(labels)
 	return labels, vals
+}
+
+// labeledGauge is a gauge family with one string label. Zero value is
+// ready to use.
+type labeledGauge struct {
+	mu   sync.Mutex
+	vals map[string]int64
+}
+
+func (l *labeledGauge) set(label string, v int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.vals == nil {
+		l.vals = make(map[string]int64)
+	}
+	l.vals[label] = v
+}
+
+func (l *labeledGauge) snapshot() (labels []string, vals map[string]int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	vals = make(map[string]int64, len(l.vals))
+	for k, v := range l.vals {
+		vals[k] = v
+		labels = append(labels, k)
+	}
+	sort.Strings(labels)
+	return labels, vals
+}
+
+// pairedCounter is a counter family with two string labels. Zero value
+// is ready to use.
+type pairedCounter struct {
+	mu   sync.Mutex
+	vals map[[2]string]int64
+}
+
+func (p *pairedCounter) inc(a, b string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.vals == nil {
+		p.vals = make(map[[2]string]int64)
+	}
+	p.vals[[2]string{a, b}]++
+}
+
+// snapshot returns the label pairs sorted by first then second label.
+func (p *pairedCounter) snapshot() (keys [][2]string, vals map[[2]string]int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	vals = make(map[[2]string]int64, len(p.vals))
+	for k, v := range p.vals {
+		vals[k] = v
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i][0] != keys[j][0] {
+			return keys[i][0] < keys[j][0]
+		}
+		return keys[i][1] < keys[j][1]
+	})
+	return keys, vals
 }
 
 // durationStat accumulates observations as a sum (nanoseconds, in an
@@ -279,6 +348,28 @@ func (c *Counters) ObserveLokiQueryDuration(logSource string, d time.Duration) {
 	}
 }
 
+// SetLocalLLMBreakerOpen records whether a local summarizer backend's
+// circuit breaker is open (skipping it) or closed.
+func (c *Counters) SetLocalLLMBreakerOpen(backend string, open bool) {
+	if c == nil {
+		return
+	}
+	var v int64
+	if open {
+		v = 1
+	}
+	c.localLLMBreakerOpen.set(backend, v)
+}
+
+// IncLocalLLMSkippedTotal counts an alert that skipped a local summarizer
+// backend without calling its chat: reason is "probe" (the health check
+// found it unavailable) or "breaker" (its circuit breaker was open).
+func (c *Counters) IncLocalLLMSkippedTotal(backend, reason string) {
+	if c != nil {
+		c.localLLMSkippedTotal.inc(backend, reason)
+	}
+}
+
 func (c *Counters) ObserveLocalLLMDuration(d time.Duration) {
 	if c != nil {
 		c.localLLMDuration.observe(d)
@@ -363,6 +454,32 @@ func (c *Counters) durations() []durationDef {
 	}
 }
 
+// writeLocalLLMHealth writes the local summarizer health families. The
+// gauge has no samples until a backend with a breaker is registered —
+// an unlabeled 0 would read as a backend that doesn't exist — while the
+// counter follows the other counters' unlabeled-0 convention.
+func (c *Counters) writeLocalLLMHealth(w io.Writer) {
+	if c == nil {
+		c = &Counters{}
+	}
+	const gauge = "victoria_gateway_local_llm_breaker_open"
+	_, _ = fmt.Fprintf(w, "# HELP %s 1 while the local summarizer backend's circuit breaker is open (or half-open, testing it), 0 while closed.\n# TYPE %s gauge\n", gauge, gauge)
+	labels, vals := c.localLLMBreakerOpen.snapshot()
+	for _, l := range labels {
+		_, _ = fmt.Fprintf(w, "%s{backend=\"%s\"} %d\n", gauge, escapeLabelValue(l), vals[l])
+	}
+
+	const skipped = "victoria_gateway_local_llm_skipped_total"
+	_, _ = fmt.Fprintf(w, "# HELP %s Local summarizer backends skipped without a chat call, by reason (probe: health check failed; breaker: circuit breaker open).\n# TYPE %s counter\n", skipped, skipped)
+	keys, counts := c.localLLMSkippedTotal.snapshot()
+	if len(keys) == 0 {
+		_, _ = fmt.Fprintf(w, "%s 0\n", skipped)
+	}
+	for _, k := range keys {
+		_, _ = fmt.Fprintf(w, "%s{backend=\"%s\",reason=\"%s\"} %d\n", skipped, escapeLabelValue(k[0]), escapeLabelValue(k[1]), counts[k])
+	}
+}
+
 // Handler serves the counters at GET /metrics in Prometheus text
 // exposition format. Safe to call on a nil *Counters (renders every
 // counter as 0), matching the Inc methods' nil-safety above.
@@ -390,6 +507,7 @@ func (c *Counters) Handler() http.Handler {
 				_, _ = fmt.Fprintf(w, "%s{%s=\"%s\"} %d\n", d.name, d.label, escapeLabelValue(l), vals[l])
 			}
 		}
+		c.writeLocalLLMHealth(w)
 		if c == nil {
 			return
 		}

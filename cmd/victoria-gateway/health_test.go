@@ -73,6 +73,7 @@ func TestSummarizeOne_DefaultBreaker_OpenLocalStillEscalates(t *testing.T) {
 	h.cloud = anthropicAt(cloud.URL)
 	h.legacyEscalations = []escalationStep{{display: "bedrock", llm: h.cloud}}
 	h.metrics = &metrics.Counters{}
+	h.summarizer.SetObserver(h.metrics)
 
 	for i := range 4 {
 		res := h.summarizeOne(testAlert())
@@ -87,4 +88,9 @@ func TestSummarizeOne_DefaultBreaker_OpenLocalStillEscalates(t *testing.T) {
 		t.Errorf("cloud calls = %d, want 4", cloudCalls)
 	}
 	wantContains(t, "log", logs(), "circuit breaker for summarizer opened", "summarizer skipped: circuit breaker open")
+	wantContains(t, "metrics", scrape(t, h.metrics),
+		`victoria_gateway_local_llm_breaker_open{backend="summarizer"} 1`,
+		`victoria_gateway_local_llm_skipped_total{backend="summarizer",reason="probe"} 2`,
+		`victoria_gateway_local_llm_skipped_total{backend="summarizer",reason="breaker"} 2`,
+		`victoria_gateway_escalations_total{target="bedrock"} 4`)
 }

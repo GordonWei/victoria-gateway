@@ -1,6 +1,7 @@
 package aiops
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -394,4 +395,55 @@ func (l lockedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(p)
+}
+
+// recordingObserver records BackendObserver calls in order.
+type recordingObserver struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (o *recordingObserver) SetLocalLLMBreakerOpen(backend string, open bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.events = append(o.events, fmt.Sprintf("open %s=%v", backend, open))
+}
+
+func (o *recordingObserver) IncLocalLLMSkippedTotal(backend, reason string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.events = append(o.events, fmt.Sprintf("skip %s %s", backend, reason))
+}
+
+func TestSummarizerObserver_ReportsBreakerAndSkips(t *testing.T) {
+	clk := newFakeClock()
+	primary := newSwitchableServer(t)
+	primary.down.Store(true)
+	fallback := okServer(t, goodReply, nil)
+	s := breakerSummarizer(t, primary.URL, fallback.URL, clk)
+	obs := &recordingObserver{}
+	s.SetObserver(obs)
+
+	_, _ = s.Summarize(fallbackAlert, nil, "") // probe fails
+	_, _ = s.Summarize(fallbackAlert, nil, "") // probe fails, opens
+	_, _ = s.Summarize(fallbackAlert, nil, "") // skipped by breaker
+	clk.Advance(2 * time.Minute)
+	_, _ = s.Summarize(fallbackAlert, nil, "") // trial, probe fails, re-opens
+	clk.Advance(2 * time.Minute)
+	primary.down.Store(false)
+	_, _ = s.Summarize(fallbackAlert, nil, "") // trial succeeds, closes
+
+	want := []string{
+		"open summarizer=false", // SetObserver registers it; the fallback has no breaker
+		"skip summarizer probe",
+		"skip summarizer probe",
+		"open summarizer=true",
+		"skip summarizer breaker",
+		"skip summarizer probe",
+		"open summarizer=true",
+		"open summarizer=false",
+	}
+	if got := strings.Join(obs.events, "\n"); got != strings.Join(want, "\n") {
+		t.Errorf("observer events:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+	}
 }
