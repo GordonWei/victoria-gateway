@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -126,6 +129,14 @@ func blackboxAlert() aiops.Alert {
 	}
 }
 
+// unsafeBlackboxAlert's instance is a URL whose hostname is still unsafe
+// after ForLogQuery reduces it, so it takes the refused path.
+func unsafeBlackboxAlert() aiops.Alert {
+	a := blackboxAlert()
+	a.Labels = map[string]string{"alertname": "probe_failed", "instance": "http://a'b.example/health"}
+	return a
+}
+
 func TestSummarizeOne_RefusedSearchTerm_SummarizesWithoutLogs(t *testing.T) {
 	llmSrv := newFakeLLM(t, `{"summary":"probe down","confidence":"high","escalate":false,"reason":"x"}`)
 	defer llmSrv.Close()
@@ -136,7 +147,7 @@ func TestSummarizeOne_RefusedSearchTerm_SummarizesWithoutLogs(t *testing.T) {
 	h.metrics = &metrics.Counters{}
 	logs := captureLog(t)
 
-	res := h.summarizeOne(blackboxAlert())
+	res := h.summarizeOne(unsafeBlackboxAlert())
 	if res.Error != "" || res.Summary != "probe down" || res.AnalyzedBy != "local" {
 		t.Fatalf("res = %+v, want a local summary without logs", res)
 	}
@@ -161,5 +172,77 @@ func TestSummarizeOne_OtherLogQueryErrorStillFails(t *testing.T) {
 	}
 	if strings.Contains(scrape(t, h.metrics), `victoria_gateway_log_query_refused_total{`) {
 		t.Error("a real log query error must not count as refused")
+	}
+}
+
+// identityRecordingLogSource remembers the identity it was asked for.
+type identityRecordingLogSource struct{ got []aiops.LogIdentity }
+
+func (r *identityRecordingLogSource) QueryRange(_ context.Context, id aiops.LogIdentity, _, _ time.Time, _ int) ([]aiops.LogEntry, error) {
+	r.got = append(r.got, id)
+	if _, err := id.SafeTerm(); err != nil {
+		return nil, err
+	}
+	return []aiops.LogEntry{{Timestamp: time.Now(), Line: "probe log"}}, nil
+}
+
+func TestSummarizeOne_URLInstanceSearchesHostname(t *testing.T) {
+	llmSrv := newFakeLLM(t, `{"summary":"probe down","confidence":"high","escalate":false,"reason":"x"}`)
+	defer llmSrv.Close()
+	src := &identityRecordingLogSource{}
+	h := newTestHandler(t, "http://unused.invalid", llmSrv.URL)
+	h.logs = src
+	h.legacyLogSource = "cloudwatch"
+	h.metrics = &metrics.Counters{}
+	logs := captureLog(t)
+
+	alert := blackboxAlert()
+	alert.Labels["instance"] = "https://kmp.tw:8443/health?x=1"
+	res := h.summarizeOne(alert)
+	if res.Error != "" || res.Summary != "probe down" {
+		t.Fatalf("res = %+v", res)
+	}
+	if len(src.got) != 1 || src.got[0].Host != "kmp.tw" {
+		t.Fatalf("log source asked for %+v, want host kmp.tw", src.got)
+	}
+	if res.Host != "https://kmp.tw:8443/health?x=1" {
+		t.Errorf("res.Host = %q, want the original instance kept for display", res.Host)
+	}
+	wantContains(t, "log", logs(), `log search host "https://kmp.tw:8443/health?x=1" is a URL, searching for its hostname "kmp.tw" instead`)
+	if strings.Contains(scrape(t, h.metrics), `victoria_gateway_log_query_refused_total{`) {
+		t.Error("a normalized URL must not count as refused")
+	}
+}
+
+// Loki gets the same normalization; a host:port instance is untouched.
+func TestSummarizeOne_LokiSelectorForURLAndHostPort(t *testing.T) {
+	llmSrv := newFakeLLM(t, `{"summary":"s","confidence":"high","escalate":false,"reason":"x"}`)
+	defer llmSrv.Close()
+	var mu sync.Mutex
+	var queries []string
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		queries = append(queries, r.URL.Query().Get("query"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+	}))
+	defer loki.Close()
+	h := newTestHandler(t, loki.URL, llmSrv.URL)
+	logs := captureLog(t)
+
+	for _, instance := range []string{"https://kmp.tw/health", "172.16.100.6:9100", "http://[2001:db8::1]:9115/probe"} {
+		alert := blackboxAlert()
+		alert.Labels["instance"] = instance
+		if res := h.summarizeOne(alert); res.Error != "" {
+			t.Fatalf("%s: res = %+v", instance, res)
+		}
+	}
+	want := []string{`{host="kmp.tw"}`, `{host="172.16.100.6:9100"}`, `{host="2001:db8::1"}`}
+	if strings.Join(queries, " ") != strings.Join(want, " ") {
+		t.Errorf("Loki queries = %q, want %q", queries, want)
+	}
+	if strings.Contains(logs(), `"172.16.100.6:9100" is a URL`) {
+		t.Error("a host:port instance was logged as normalized")
 	}
 }

@@ -274,13 +274,25 @@ better with a template that filters on that field directly, e.g.
 string replace, not a format verb, so it's safe even if your own query
 text contains `%` characters.
 
+A blackbox probe's `instance` is a URL (`https://kmp.tw/health`), which
+no log line or Loki stream is labeled with. When the host is a URL with a
+scheme and a host, every log backend — Loki included — searches for just
+its hostname instead (`kmp.tw`: no port, path or query; `[2001:db8::1]`
+becomes `2001:db8::1`), and the switch is logged (`log search host
+"https://kmp.tw/health" is a URL, searching for its hostname "kmp.tw"
+instead`). Anything else, including `host:port` instances such as
+`172.16.100.6:9100`, is searched for exactly as before. The alert is still
+shown, filed and matched against past incidents under the full URL; only
+the log query changes.
+
 The term comes from alert labels, so it's treated as untrusted: a term
 containing a quote, backslash, `/`, `|`, backtick, parenthesis,
 whitespace or a control character is refused rather than spliced into
 the query, since it could close the literal it sits in and append query
-syntax of its own. Real host/pod names never contain these; the common
-case that does is a blackbox probe whose `instance` is a URL
-(`https://x/health`). A refused term doesn't fail the alert: the query is
+syntax of its own. Real host/pod names never contain these, and after the
+URL reduction above a probe URL doesn't either; what's left is a label
+that is odd even as a hostname (`http://a'b.example/`) or an injection
+attempt. A refused term doesn't fail the alert: the query is
 skipped, the alert is summarized without logs (the same as a query that
 found nothing), and the skip is logged (`log query skipped on log source
 "..."`, with the `refusing to search for ...` reason) and counted in

@@ -881,13 +881,18 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		log.Printf("aiops: alert %q routed via %s → log source %q, escalation %q", res.AlertName, route.name, route.logSourceName, route.escalationNames())
 	}
 
+	queryIdentity := identity.ForLogQuery()
+	if queryIdentity.Host != identity.Host {
+		log.Printf("aiops: alert %q log search host %q is a URL, searching for its hostname %q instead", res.AlertName, identity.Host, queryIdentity.Host)
+	}
 	logQueryStart := time.Now()
-	logs, err := route.logs.QueryRange(context.Background(), identity, start.Add(-h.lookback), time.Now(), h.limit)
+	logs, err := route.logs.QueryRange(context.Background(), queryIdentity, start.Add(-h.lookback), time.Now(), h.limit)
 	h.metrics.ObserveLokiQueryDuration(route.logSourceName, time.Since(logQueryStart))
 	if errors.Is(err, aiops.ErrUnsafeSearchTerm) {
-		// The query was never sent: the alert's identity (typically a
-		// blackbox probe URL) can't be searched for safely. Carry on
-		// without logs, the same as a query that found nothing.
+		// The query was never sent: the alert's identity can't be
+		// searched for safely, even after ForLogQuery reduced a URL to
+		// its hostname. Carry on without logs, the same as a query that
+		// found nothing.
 		log.Printf("aiops: alert %q log query skipped on log source %q, summarizing without logs: %v", res.AlertName, route.logSourceName, err)
 		h.metrics.IncLogQueryRefusedTotal(route.logSourceName)
 		logs, err = nil, nil

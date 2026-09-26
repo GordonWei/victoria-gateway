@@ -149,3 +149,52 @@ func TestLogIdentity_SafeTerm(t *testing.T) {
 		t.Errorf("SafeTerm picked %q, want the pod", got)
 	}
 }
+
+func TestLogIdentity_ForLogQuery(t *testing.T) {
+	cases := map[string]string{
+		"https://kmp.tw/health":               "kmp.tw",
+		"https://kmp.tw:8443/health?x=1&y=2":  "kmp.tw",
+		"http://user:pw@probe.example:80/p#f": "probe.example",
+		"tcp://10.0.0.5:22":                   "10.0.0.5",
+		"http://[2001:db8::1]:9115/probe":     "2001:db8::1",
+		"http://[::1]/":                       "::1",
+		// Not URLs with a host: unchanged.
+		"172.16.100.6:9100": "172.16.100.6:9100",
+		"node1:9100":        "node1:9100",
+		"web01":             "web01",
+		"kmp.tw/health":     "kmp.tw/health",
+		"http://":           "http://",
+		"mailto:ops@x":      "mailto:ops@x",
+	}
+	for in, want := range cases {
+		if got := (LogIdentity{Host: in}).ForLogQuery().Host; got != want {
+			t.Errorf("ForLogQuery(%q).Host = %q, want %q", in, got, want)
+		}
+	}
+	pod := LogIdentity{Namespace: "ns", Pod: "p-1"}
+	if got := pod.ForLogQuery(); got != pod {
+		t.Errorf("ForLogQuery changed a pod identity: %+v", got)
+	}
+}
+
+func TestLogIdentity_ForLogQuery_ThenSafeTerm(t *testing.T) {
+	if term, err := (LogIdentity{Host: "https://kmp.tw/health"}).ForLogQuery().SafeTerm(); err != nil || term != "kmp.tw" {
+		t.Errorf("SafeTerm after ForLogQuery = %q, %v; want kmp.tw accepted", term, err)
+	}
+	if term, err := (LogIdentity{Host: "http://[2001:db8::1]:9115/x"}).ForLogQuery().SafeTerm(); err != nil || term != "2001:db8::1" {
+		t.Errorf("IPv6: SafeTerm after ForLogQuery = %q, %v", term, err)
+	}
+	// A hostname that is itself unsafe is still refused.
+	for _, bad := range []string{"http://a'b.example/health", "http://a(b).example/"} {
+		if _, err := (LogIdentity{Host: bad}).ForLogQuery().SafeTerm(); !errors.Is(err, ErrUnsafeSearchTerm) {
+			t.Errorf("%q: err = %v, want still refused after normalization", bad, err)
+		}
+	}
+	// Loki: the selector follows the normalized host; host:port unchanged.
+	if got := (LogIdentity{Host: "https://kmp.tw/health"}).ForLogQuery().LokiSelector(); got != `{host="kmp.tw"}` {
+		t.Errorf("LokiSelector = %s", got)
+	}
+	if got := (LogIdentity{Host: "172.16.100.6:9100"}).ForLogQuery().LokiSelector(); got != `{host="172.16.100.6:9100"}` {
+		t.Errorf("LokiSelector = %s", got)
+	}
+}
