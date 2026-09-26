@@ -410,3 +410,10 @@ func TestTruncateUTF8(t *testing.T) {
 		t.Errorf("issue text is %d bytes, want at most %d and a prefix of the prompt", len(got), cloudAssistMaxIssueBytes)
 	}
 }
+
+func TestCloudAssistClient_Defaults(t *testing.T) {
+	c := newCloudAssistClient(CloudAssistClientConfig{Project: "p1"})
+	if c.pollTimeout != 270*time.Second || c.pollInterval != 15*time.Second || c.client.Timeout != 30*time.Second {
+		t.Errorf("defaults = poll timeout %s, interval %s, HTTP timeout %s; want 270s/15s/30s", c.pollTimeout, c.pollInterval, c.client.Timeout)
+	}
+}

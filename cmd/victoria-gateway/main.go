@@ -331,10 +331,7 @@ func runServe(args []string) {
 	case <-ctx.Done():
 	}
 
-	grace := time.Duration(cfg.ShutdownGraceSec) * time.Second
-	if grace <= 0 {
-		grace = 5 * time.Minute
-	}
+	grace := shutdownGrace(cfg)
 	log.Printf("shutdown: signal received, draining (grace %s)", grace)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

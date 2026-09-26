@@ -144,7 +144,7 @@ summarizer:
 #   gcp:   # needs Premium Support or account-team access to run investigations (README)
 #     provider: "gcp-cloud-assist"
 #     project: "REPLACE-gcp-project"
-#     poll_timeout_sec: 600   # optional, default 600
+#     poll_timeout_sec: 270   # optional, default 270 (under the default shutdown_grace_sec of 300)
 # hybrid_routes:
 #   - matchers: {cloud: "aws"}
 #     log_source: aws

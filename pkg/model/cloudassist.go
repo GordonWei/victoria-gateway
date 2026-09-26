@@ -79,12 +79,18 @@ type CloudAssistClient struct {
 type CloudAssistClientConfig struct {
 	Project      string        // GCP project ID the investigation runs in and looks at
 	PollInterval time.Duration // defaults to 15s
-	PollTimeout  time.Duration // defaults to 10 minutes: one budget for create + run + waiting for the result
+	PollTimeout  time.Duration // defaults to CloudAssistDefaultPollTimeout: one budget for create + run + waiting for the result
 	Timeout      time.Duration // one HTTP call; defaults to 30s
 	// Endpoint overrides "https://geminicloudassist.googleapis.com".
 	// Leave empty for real use; it exists for tests.
 	Endpoint string
 }
+
+// CloudAssistDefaultPollTimeout is CloudAssistClientConfig.PollTimeout's
+// default. It is kept under the gateway's default shutdown grace (300s),
+// together with the one HTTP timeout the final read may add, so a
+// restart doesn't cut a default-configured escalation short.
+const CloudAssistDefaultPollTimeout = 270 * time.Second
 
 const (
 	cloudAssistDefaultEndpoint = "https://geminicloudassist.googleapis.com"
@@ -123,7 +129,7 @@ func newCloudAssistClient(cfg CloudAssistClientConfig) *CloudAssistClient {
 	}
 	pollTimeout := cfg.PollTimeout
 	if pollTimeout <= 0 {
-		pollTimeout = 10 * time.Minute
+		pollTimeout = CloudAssistDefaultPollTimeout
 	}
 	return &CloudAssistClient{
 		project:      cfg.Project,

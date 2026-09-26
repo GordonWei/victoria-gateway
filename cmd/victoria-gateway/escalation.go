@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -150,6 +151,64 @@ func startupNotes(cfg *config.Config) []string {
 			notes = append(notes, fmt.Sprintf("⚠️  escalation.always_cloud is set, but route(s) %s have no escalation target — always_cloud alerts routed there stay on the local result",
 				strings.Join(missing, ", ")))
 		}
+	}
+	notes = append(notes, pollBeyondGraceNotes(cfg)...)
+	return notes
+}
+
+// defaultShutdownGrace is shutdown_grace_sec's default.
+const defaultShutdownGrace = 5 * time.Minute
+
+// shutdownGrace is how long a SIGTERM'd process waits for in-flight
+// analyses: shutdown_grace_sec, or defaultShutdownGrace when unset.
+func shutdownGrace(cfg *config.Config) time.Duration {
+	if cfg.ShutdownGraceSec > 0 {
+		return time.Duration(cfg.ShutdownGraceSec) * time.Second
+	}
+	return defaultShutdownGrace
+}
+
+// pollBeyondGraceNotes warns about each investigation-style target
+// (gcp-cloud-assist, aws-devops-agent) that may wait longer for its
+// result than a restart waits for in-flight analyses, so a redeploy can
+// cut an escalation to it short. Every place a target can be configured
+// is checked: the legacy cloud block, cloud_fallbacks and
+// escalation_targets.
+func pollBeyondGraceNotes(cfg *config.Config) []string {
+	grace := shutdownGrace(cfg)
+	var notes []string
+	check := func(label string, c *config.CloudConfig) {
+		if c == nil {
+			return
+		}
+		var limit time.Duration
+		switch c.Provider {
+		case "gcp-cloud-assist":
+			limit = time.Duration(c.PollTimeoutSec) * time.Second
+			if limit <= 0 {
+				limit = model.CloudAssistDefaultPollTimeout
+			}
+		case "aws-devops-agent":
+			limit = model.DevOpsAgentDefaultPollTimeout
+		default:
+			return
+		}
+		if limit > grace {
+			notes = append(notes, fmt.Sprintf("⚠️  %s (%s) can wait up to %s for an investigation, longer than shutdown_grace_sec (%s) — a restart during one cuts the escalation short",
+				label, c.Provider, limit, grace))
+		}
+	}
+	check("cloud", cfg.Cloud)
+	for i, fb := range cfg.CloudFallbacks {
+		check(fmt.Sprintf("cloud_fallbacks[%d]", i), fb)
+	}
+	names := make([]string, 0, len(cfg.EscalationTargets))
+	for name := range cfg.EscalationTargets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		check("escalation_targets."+name, cfg.EscalationTargets[name])
 	}
 	return notes
 }
