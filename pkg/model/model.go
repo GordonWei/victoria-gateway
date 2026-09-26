@@ -2,11 +2,13 @@ package model
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -178,17 +180,43 @@ func (c *OpenAIClient) Chat(messages []Message, opts *ChatOptions) (string, erro
 	return result.Choices[0].Message.Content, nil
 }
 
+// Available reports whether Probe succeeds, with no deadline beyond the
+// client's own Timeout. Callers that need a short bound (the summarizer's
+// pre-chat health check) use Probe with a context instead.
 func (c *OpenAIClient) Available() bool {
+	return c.Probe(context.Background()) == nil
+}
+
+// probeBodyLimit caps how much of a /v1/models reply Probe reads: enough
+// to drain a normal model list so the connection can be reused, and to
+// quote an error body, without letting a misbehaving server stream
+// forever into a health check.
+const probeBodyLimit = 64 << 10
+
+// Probe does GET /v1/models, bounded by ctx as well as the client's
+// Timeout, and returns nil on any 2xx. A non-2xx answer comes back as an
+// *HTTPStatusError (the same type Chat uses, so callers can tell 5xx/429
+// from a 404 on a server that simply doesn't implement the endpoint); a
+// dial failure, reset or ctx deadline comes back as the transport error.
+//
+// It exists for the case a connect timeout can't catch: a host that is
+// asleep or wedged still accepts the TCP connection but never sends a
+// response header, so a chat call would sit there for the whole Timeout.
+func (c *OpenAIClient) Probe(ctx context.Context) error {
 	req, err := c.newRequest(http.MethodGet, "/v1/models", nil)
 	if err != nil {
-		return false
+		return err
 	}
-	resp, err := c.client.Do(req)
+	resp, err := c.client.Do(req.WithContext(ctx))
 	if err != nil {
-		return false
+		return fmt.Errorf("probe %s: %w", c.backend, err)
 	}
-	_ = resp.Body.Close()
-	return resp.StatusCode == 200
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, probeBodyLimit))
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return &HTTPStatusError{Backend: c.backend, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
+	}
+	return nil
 }
 
 func (c *OpenAIClient) ModelName() string {
