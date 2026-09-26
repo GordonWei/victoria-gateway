@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -28,13 +29,27 @@ type fakeCloudAssist struct {
 	final          caInvestigation
 	createStatus   int
 	createBody     string
-	polls          int
-	created        caInvestigation
-	auth           []string
-	paths          []string
+	// createDelay and runDelay hold those replies back, to use up part
+	// of the client's time budget before polling starts.
+	createDelay time.Duration
+	runDelay    time.Duration
+	polls       int
+	created     caInvestigation
+	auth        []string
+	paths       []string
 }
 
 func (f *fakeCloudAssist) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	var delay time.Duration
+	switch {
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/investigations"):
+		delay = f.createDelay
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":run"):
+		delay = f.runDelay
+	}
+	f.mu.Unlock()
+	time.Sleep(delay)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.auth = append(f.auth, r.Header.Get("Authorization"))
@@ -202,6 +217,65 @@ func TestCloudAssistClient_PollTimeout(t *testing.T) {
 	}
 	if f.polls < 2 {
 		t.Errorf("polls = %d, want it to have polled more than once", f.polls)
+	}
+}
+
+// create and run share the poll budget: when they are slow enough to use
+// it all up, Chat stops at the deadline with the same "did not complete
+// within" error instead of starting a fresh poll wait after them.
+func TestCloudAssistClient_SlowCreateAndRunShareTheBudget(t *testing.T) {
+	f := &fakeCloudAssist{pollsUntilDone: 1 << 30, createDelay: 60 * time.Millisecond, runDelay: 60 * time.Millisecond}
+	c, _ := newTestCloudAssist(t, f)
+	c.now = time.Now
+	c.pollTimeout = 100 * time.Millisecond
+
+	start := time.Now()
+	_, err := c.Chat(alertPrompt, nil)
+	if err == nil || !strings.Contains(err.Error(), "did not complete within 100ms") || !strings.Contains(err.Error(), testInvName) {
+		t.Fatalf("err = %v, want the timeout naming the investigation", err)
+	}
+	if f.polls != 0 {
+		t.Errorf("polls = %d, want 0: create and run already used the whole budget", f.polls)
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Errorf("took %s, want it to stop near the 100ms budget", el)
+	}
+}
+
+// When the budget runs out in the middle of a poll request, the error is
+// still the timeout, not a context error from the poll.
+func TestCloudAssistClient_BudgetEndsDuringPoll(t *testing.T) {
+	f := &fakeCloudAssist{pollsUntilDone: 1 << 30}
+	c, srv := newTestCloudAssist(t, f)
+	c.now = time.Now
+	c.pollTimeout = 100 * time.Millisecond
+	c.client.Timeout = 80 * time.Millisecond
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var polls atomic.Int32
+	inner := srv.Config.Handler
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1alpha/"+testOpName {
+			if polls.Add(1) == 1 {
+				// The first poll is slow but answers "not done yet"...
+				time.Sleep(60 * time.Millisecond)
+				inner.ServeHTTP(w, r)
+				return
+			}
+			// ...and the second, sent before the deadline, never answers,
+			// so its HTTP timeout fires after the deadline.
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+
+	_, err := c.Chat(alertPrompt, nil)
+	if err == nil || !strings.Contains(err.Error(), "did not complete within 100ms") {
+		t.Fatalf("err = %v, want the friendly timeout", err)
 	}
 }
 
