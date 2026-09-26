@@ -163,9 +163,10 @@ type vertexAIResponse struct {
 }
 
 // Chat sends one generateContent request. A non-200 answer comes back as
-// *HTTPStatusError, so a 5xx or 429 (quota) moves an escalation on to
-// the next target and shows up as "unavailable" the same way it does for
-// the OpenAI-compatible clients.
+// *HTTPStatusError, the same type the OpenAI-compatible clients use, so
+// the status and body are in the error text. It doesn't decide whether
+// an escalation moves on: the cloud chain tries the next target on any
+// error.
 func (c *VertexAIClient) Chat(messages []Message, opts *ChatOptions) (string, error) {
 	maxTokens := 1024
 	temperature := 0.1

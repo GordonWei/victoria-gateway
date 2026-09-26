@@ -735,7 +735,7 @@ sections below for their extra setup:
 
 ```yaml
 cloud:
-  provider: "gemini"   # optional, defaults to "gemini"; "anthropic" also supported
+  provider: "gemini"   # optional, defaults to "gemini"; also "anthropic", "bedrock", "azure-openai", "aws-devops-agent", "openai-compatible", "vertex-ai", "gcp-cloud-assist"
   endpoint: ""   # optional; each provider has its own default
   api_key: "AIza..."
   model: "gemini-2.5-flash"
@@ -867,9 +867,9 @@ cloud:
 `endpoint` is the part before `/v1`: `https://openrouter.ai/api` for
 OpenRouter, `http://host:11434` for Ollama, `http://host:8000` for vLLM.
 It's the same client the local summarizer uses (`pkg/model.OpenAIClient`),
-so a 5xx or 429 is reported as the server being unavailable, and a host
-that is switched off fails within the 5-second connect timeout instead
-of holding the alert for `timeout_sec`. `endpoint` and `model` are
+so an error reply carries its HTTP status and body in the logged error,
+and a host that is switched off fails within the 5-second connect
+timeout instead of holding the alert for `timeout_sec`. `endpoint` and `model` are
 required. The key can also come from the usual env var
 (`VICTORIA_GATEWAY_CLOUD_API_KEY`, `…_ESCALATION_<NAME>_API_KEY`, ...).
 
@@ -901,14 +901,16 @@ trade-off is data location: with `global` you
 "can't control or know which region your ML processing requests are sent
 to", so set a region (or `us`/`eu`) if that matters to you. The identity
 needs `roles/aiplatform.user` on the project and the Vertex AI API
-(`aiplatform.googleapis.com`) enabled. 5xx and 429 (quota) count as the
-target being unavailable, so the next target in the chain gets the alert.
+(`aiplatform.googleapis.com`) enabled. As with every escalation target,
+any error — a 5xx or 429 (quota), but equally a 403 or a timeout — hands
+the alert to the next target in the chain, if there is one; the HTTP
+status only shows up in the error text that gets logged.
 Verified 2026-09-27 against a real project on `global` with
 `gemini-2.5-flash` and `gemini-3.5-flash`.
 
 ### Optional: escalating to AWS DevOps Agent instead of a chat completion
 
-A third `provider` option, `"aws-devops-agent"`, escalates to
+`provider: "aws-devops-agent"` escalates to
 [AWS DevOps Agent](https://docs.aws.amazon.com/devopsagent/latest/userguide/)
 over MCP instead of asking a bigger LLM the same question. The difference
 matters: Gemini/Anthropic re-analyze whatever log excerpt Loki already gave
@@ -969,7 +971,14 @@ routing** (below) lets AWS alerts escalate to the DevOps Agent while
 everything else keeps escalating to Gemini/Anthropic/Bedrock, from one
 deployment.
 
-### Optional: escalating to a Gemini Cloud Assist investigation
+### Optional: escalating to a Gemini Cloud Assist investigation (experimental)
+
+> **Experimental.** Since 2026-04-10 Google only lets projects with a
+> Premium Support contract, or access requested through the Google Cloud
+> account team, create and run investigations; without it every run
+> fails. The `investigations.create` and `revisions.run` methods this
+> provider calls are also marked deprecated by Google, so it may stop
+> working without notice. Details under "Before enabling it" below.
 
 `provider: "gcp-cloud-assist"` is the GCP counterpart: it opens a
 [Gemini Cloud Assist investigation](https://docs.cloud.google.com/cloud-assist/create-investigation)
@@ -1203,7 +1212,10 @@ With `hybrid_routes`, list targets in the route instead
 (`escalation: [aws, default]`); `cloud_fallbacks` alongside
 `hybrid_routes` is rejected.
 
-Targets are tried in order until one answers. Each failure is logged
+Targets are tried in order until one answers. Unlike the local
+summarizer, *any* failure moves on to the next target — a 401, 403 or
+bad model name as much as a 5xx, 429 or timeout; the status code only
+changes the error text. Each failure is logged
 (`cloud escalation to "aws" failed ...`, then `falling back to escalation
 target "default"`) and counted in
 `victoria_gateway_escalation_failures_total{target=...}`; if every target
