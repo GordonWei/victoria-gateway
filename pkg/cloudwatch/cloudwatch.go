@@ -9,6 +9,7 @@ package cloudwatch
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -143,7 +144,19 @@ func (c *Client) QueryRange(ctx context.Context, id aiops.LogIdentity, start, en
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	queryString := strings.ReplaceAll(c.queryTemplate, termPlaceholder, id.Term())
+	term, err := id.SafeTerm()
+	if err != nil {
+		return nil, fmt.Errorf("cloudwatch: %w", err)
+	}
+	// The default template puts the term inside a /regex/, where '.' in
+	// a host name would otherwise match any character. An operator's own
+	// template may put it in a quoted string instead, where regexp
+	// escaping would be wrong, so that case gets the (already vetted)
+	// term verbatim.
+	if c.queryTemplate == defaultQueryTemplate {
+		term = regexp.QuoteMeta(term)
+	}
+	queryString := strings.ReplaceAll(c.queryTemplate, termPlaceholder, term)
 
 	startInput := &cloudwatchlogs.StartQueryInput{
 		LogGroupNames: c.logGroupNames,

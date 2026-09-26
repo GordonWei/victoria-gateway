@@ -171,3 +171,53 @@ func TestQueryRange_CustomFilterTemplate(t *testing.T) {
 		t.Errorf("filter = %q, want it to contain the custom template with the term substituted (%q)", receivedBody.Filter, want)
 	}
 }
+
+// TestQueryRange_RejectsInjectionTerms: a term that could close SEARCH("…")
+// and OR in a clause must be refused before any request is sent.
+func TestQueryRange_RejectsInjectionTerms(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+	}))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	for _, host := range []string{
+		`x") OR ("`,
+		`x\" OR severity>=DEFAULT`,
+		"x\nOR true",
+		"x OR y",
+		"x/y",
+	} {
+		_, err := client.QueryRange(context.Background(), aiops.LogIdentity{Host: host}, time.Now().Add(-time.Hour), time.Now(), 10)
+		if err == nil || !strings.Contains(err.Error(), "refusing to search for") {
+			t.Errorf("host %q: err = %v, want a refusal", host, err)
+		}
+	}
+	if calls != 0 {
+		t.Errorf("Cloud Logging called %d times, want 0", calls)
+	}
+}
+
+// TestQueryRange_TemplateORCannotEscapeTimeWindow: an operator template
+// with a top-level OR stays inside the timestamp constraint because the
+// template body is parenthesized.
+func TestQueryRange_TemplateORCannotEscapeTimeWindow(t *testing.T) {
+	var receivedBody entriesListRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+		_ = json.NewEncoder(w).Encode(entriesListResponse{})
+	}))
+	defer server.Close()
+	client := newTestClient(server.URL, func(c *Client) {
+		c.filterTemplate = `jsonPayload.host="{{TERM}}" OR labels.host="{{TERM}}"`
+	})
+	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	if _, err := client.QueryRange(context.Background(), aiops.LogIdentity{Host: "web-01"}, start, end, 10); err != nil {
+		t.Fatal(err)
+	}
+	want := `timestamp >= "2026-09-01T00:00:00Z" AND timestamp <= "2026-09-01T01:00:00Z" AND (jsonPayload.host="web-01" OR labels.host="web-01")`
+	if receivedBody.Filter != want {
+		t.Errorf("filter = %q\nwant     %q", receivedBody.Filter, want)
+	}
+}

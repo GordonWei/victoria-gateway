@@ -111,8 +111,10 @@ func TestQueryRange_PollsUntilCompleteAndParsesResults(t *testing.T) {
 	if getResultsCalls != 2 {
 		t.Errorf("GetQueryResults called %d times, want 2 (poll loop should have looped once)", getResultsCalls)
 	}
-	if !strings.Contains(receivedQueryString, "172.16.100.6") {
-		t.Errorf("query string = %q, want it to contain the identity term", receivedQueryString)
+	// The default template is a /regex/, so the dots are escaped: an
+	// unescaped "172.16.100.6" would also match "172x16y100z6".
+	if !strings.Contains(receivedQueryString, `/172\.16\.100\.6/`) {
+		t.Errorf("query string = %q, want it to contain the regexp-escaped identity term", receivedQueryString)
 	}
 	if receivedStart != start.Unix() || receivedEnd != end.Unix() {
 		t.Errorf("start/end = %d/%d, want %d/%d", receivedStart, receivedEnd, start.Unix(), end.Unix())
@@ -214,5 +216,37 @@ func TestQueryRange_CustomQueryTemplate(t *testing.T) {
 	}
 	if want := `filter host = "web-01"`; !strings.Contains(receivedQueryString, want) {
 		t.Errorf("query string = %q, want it to contain the custom template with the term substituted (%q)", receivedQueryString, want)
+	}
+}
+
+// TestQueryRange_RejectsInjectionTerms: a host label crafted to close the
+// /regex/ (or a quoted string in a custom template) and append its own
+// query commands must fail before any AWS call is made.
+func TestQueryRange_RejectsInjectionTerms(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	for _, tmpl := range []string{"", `fields @message | filter host = "{{TERM}}"`} {
+		client := newTestClient(t, server.URL, func(c *ClientConfig) { c.QueryTemplate = tmpl })
+		for _, host := range []string{
+			`x/ | stats count(*) by @logStream | filter @message like /`,
+			`web-01" or host != "`,
+			`web\01`,
+			"web-01\n| display @message",
+			"web 01",
+			"a|b",
+		} {
+			_, err := client.QueryRange(context.Background(), aiops.LogIdentity{Host: host}, time.Now().Add(-time.Hour), time.Now(), 10)
+			if err == nil || !strings.Contains(err.Error(), "refusing to search for") {
+				t.Errorf("template %q host %q: err = %v, want a refusal", tmpl, host, err)
+			}
+		}
+	}
+	if calls != 0 {
+		t.Errorf("AWS called %d times, want 0 — refusal must happen before the request", calls)
 	}
 }
