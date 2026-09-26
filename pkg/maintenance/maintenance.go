@@ -8,12 +8,12 @@ package maintenance
 
 import (
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/config"
+	"github.com/gordonwei/victoria-gateway/pkg/glob"
 )
 
 // Action is what happens to an alert that matches an active window.
@@ -377,7 +377,7 @@ func MatchLabels(matchers, labels map[string]string) bool {
 // gives '*' the "matches any run of characters" meaning implied by the
 // commit message and the design doc's examples.
 func matchGlob(pattern, value string) bool {
-	re, err := globToRegexp(pattern)
+	re, err := glob.Compile(pattern)
 	if err != nil {
 		// Malformed pattern: treat as no-match rather than crashing.
 		return false
@@ -385,38 +385,12 @@ func matchGlob(pattern, value string) bool {
 	return re.MatchString(value)
 }
 
-// globToRegexp compiles a shell-glob pattern into an anchored regexp.
-// '*' becomes ".*" (any run of characters, including '/'), '?' becomes
-// "." (any single character), and '[...]' bracket expressions are passed
-// through largely as-is -- glob and regexp bracket-class syntax (ranges,
-// leading '^' negation) are compatible for the patterns this project
-// uses. Everything else is treated as a literal.
-func globToRegexp(pattern string) (*regexp.Regexp, error) {
-	var sb strings.Builder
-	sb.WriteByte('^')
-	runes := []rune(pattern)
-	for i := 0; i < len(runes); i++ {
-		switch c := runes[i]; c {
-		case '*':
-			sb.WriteString(".*")
-		case '?':
-			sb.WriteByte('.')
-		case '[':
-			j := i + 1
-			for j < len(runes) && runes[j] != ']' {
-				j++
-			}
-			if j >= len(runes) {
-				return nil, fmt.Errorf("unterminated character class in glob %q", pattern)
-			}
-			sb.WriteString(string(runes[i : j+1]))
-			i = j
-		default:
-			sb.WriteString(regexp.QuoteMeta(string(c)))
-		}
-	}
-	sb.WriteByte('$')
-	return regexp.Compile(sb.String())
+// ValidateGlob reports whether a label-matcher glob pattern is well
+// formed. MatchLabels treats a malformed pattern as "never matches", so
+// config load uses this (via pkg/glob, which pkg/config can import) to
+// reject the pattern up front instead.
+func ValidateGlob(pattern string) error {
+	return glob.Validate(pattern)
 }
 
 // CheckAll evaluates all windows against an alert's labels at the given

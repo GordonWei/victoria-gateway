@@ -647,3 +647,12 @@ func TestIsActive_Timezone_SameInstantDifferentZones(t *testing.T) {
 		t.Error("expected inactive: Sat 08:30 America/Los_Angeles is outside SAT 23:00-02:00")
 	}
 }
+
+func TestValidateGlob(t *testing.T) {
+	if err := ValidateGlob("web-[0-9"); err == nil {
+		t.Error("ValidateGlob(unterminated class) = nil, want error")
+	}
+	if err := ValidateGlob("web-*"); err != nil {
+		t.Errorf("ValidateGlob(web-*) = %v, want nil", err)
+	}
+}
