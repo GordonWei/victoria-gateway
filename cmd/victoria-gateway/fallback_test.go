@@ -370,6 +370,50 @@ func TestStartupNotes(t *testing.T) {
 		"summarizer fallbacks: http://b (bm)", "cloud fallbacks: anthropic")
 }
 
+// Investigation targets whose poll limit exceeds the shutdown grace get a
+// warning, wherever they are configured; the defaults are chosen so a
+// default gcp-cloud-assist doesn't trigger it.
+func TestStartupNotes_PollBeyondGrace(t *testing.T) {
+	legacy := &config.Config{
+		Loki:  config.LokiConfig{Endpoint: "http://loki:3100"},
+		Cloud: &config.CloudConfig{Provider: "gcp-cloud-assist", Project: "p"},
+	}
+	if notes := startupNotes(legacy); len(notes) != 0 {
+		t.Errorf("default gcp-cloud-assist (270s) under the default grace (300s) got notes %v, want none", notes)
+	}
+	legacy.Cloud.PollTimeoutSec = 301
+	wantContains(t, "notes", strings.Join(startupNotes(legacy), "\n"),
+		"cloud (gcp-cloud-assist) can wait up to 5m1s for an investigation, longer than shutdown_grace_sec (5m0s)")
+	legacy.ShutdownGraceSec = 400
+	if notes := startupNotes(legacy); len(notes) != 0 {
+		t.Errorf("poll 301s under a 400s grace got notes %v, want none", notes)
+	}
+
+	fallbacks := &config.Config{
+		Loki:  config.LokiConfig{Endpoint: "http://loki:3100"},
+		Cloud: &config.CloudConfig{Provider: "gemini"},
+		CloudFallbacks: []*config.CloudConfig{
+			{Provider: "vertex-ai", Project: "p", Model: "m"},
+			{Provider: "aws-devops-agent", DevOpsAgent: &config.DevOpsAgentConfig{SpaceID: "s"}},
+		},
+		ShutdownGraceSec: 120,
+	}
+	notes := strings.Join(startupNotes(fallbacks), "\n")
+	wantContains(t, "notes", notes, "cloud_fallbacks[1] (aws-devops-agent) can wait up to 10m0s", "shutdown_grace_sec (2m0s)")
+	if strings.Contains(notes, "cloud_fallbacks[0]") {
+		t.Errorf("vertex-ai isn't an investigation target, but got a note:\n%s", notes)
+	}
+
+	h := hybridTestConfig()
+	h.EscalationTargets["gcp"] = &config.CloudConfig{Provider: "gcp-cloud-assist", Project: "p", PollTimeoutSec: 900}
+	h.EscalationTargets["aws"] = &config.CloudConfig{Provider: "aws-devops-agent", DevOpsAgent: &config.DevOpsAgentConfig{SpaceID: "s"}}
+	notes = strings.Join(startupNotes(h), "\n")
+	wantContains(t, "notes", notes, "escalation_targets.aws (aws-devops-agent) can wait up to 10m0s", "escalation_targets.gcp (gcp-cloud-assist) can wait up to 15m0s")
+	if strings.Index(notes, "escalation_targets.aws") > strings.Index(notes, "escalation_targets.gcp") {
+		t.Errorf("notes not in target-name order:\n%s", notes)
+	}
+}
+
 // ── legacy log_source.loki is dropped even if Validate was skipped ──
 
 func TestBuildLogSource_LegacyIgnoresNestedLokiEndpoint(t *testing.T) {

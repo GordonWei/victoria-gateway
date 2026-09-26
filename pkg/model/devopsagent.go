@@ -82,8 +82,13 @@ type DevOpsAgentClientConfig struct {
 	SpaceID      string
 	Priority     string        // defaults to "HIGH"
 	PollInterval time.Duration // defaults to 30s, per the tool's own documented cadence
-	PollTimeout  time.Duration // defaults to 10 minutes; investigations are documented as taking 5-8 min
+	PollTimeout  time.Duration // defaults to DevOpsAgentDefaultPollTimeout; investigations are documented as taking 5-8 min
 }
+
+// DevOpsAgentDefaultPollTimeout is how long DevOpsAgentClient waits for
+// an investigation when DevOpsAgentClientConfig.PollTimeout is unset,
+// which is always the case from config.yaml.
+const DevOpsAgentDefaultPollTimeout = 10 * time.Minute
 
 func NewDevOpsAgentClient(cfg DevOpsAgentClientConfig) *DevOpsAgentClient {
 	binaryPath := cfg.BinaryPath
@@ -104,7 +109,7 @@ func NewDevOpsAgentClient(cfg DevOpsAgentClientConfig) *DevOpsAgentClient {
 	}
 	pollTimeout := cfg.PollTimeout
 	if pollTimeout <= 0 {
-		pollTimeout = 10 * time.Minute
+		pollTimeout = DevOpsAgentDefaultPollTimeout
 	}
 	c := &DevOpsAgentClient{
 		binaryPath:   binaryPath,

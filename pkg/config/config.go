@@ -455,10 +455,11 @@ type CloudConfig struct {
 
 	// PollIntervalSec and PollTimeoutSec pace a "gcp-cloud-assist"
 	// investigation: how often its run is polled (0 means 15s) and how
-	// long the gateway waits for it before giving up and moving on to the
-	// next escalation target (0 means 600s). The investigation itself
-	// keeps running on GCP after a timeout. Ignored by every other
-	// provider.
+	// long the gateway waits for it, counted from the start of the
+	// escalation, before giving up and moving on to the next escalation
+	// target (0 means 270s, under the default shutdown_grace_sec). The
+	// investigation itself keeps running on GCP after a timeout. Ignored
+	// by every other provider.
 	PollIntervalSec int `yaml:"poll_interval_sec"`
 	PollTimeoutSec  int `yaml:"poll_timeout_sec"`
 
@@ -1048,7 +1049,7 @@ func validateCloudCommon(label string, c *CloudConfig) error {
 		return fmt.Errorf("%s.timeout_sec must be >= 0 (0 means the provider's default)", label)
 	}
 	if c.PollIntervalSec < 0 || c.PollTimeoutSec < 0 {
-		return fmt.Errorf("%s.poll_interval_sec/poll_timeout_sec must be >= 0 (0 means the 15s/600s default)", label)
+		return fmt.Errorf("%s.poll_interval_sec/poll_timeout_sec must be >= 0 (0 means the 15s/270s default)", label)
 	}
 	if c.Provider == "gcp-cloud-assist" && c.Location != "" && c.Location != "global" {
 		return fmt.Errorf("%s.location is %q, but the Gemini Cloud Assist investigations API only serves \"global\" — remove location or set it to global", label, c.Location)

@@ -713,7 +713,10 @@ async background ones — to finish before exiting, so a redeploy doesn't
 kill a half-done escalation, RAG capture, or issue filing. Pair it with
 `stop_grace_period` on the compose service (see
 `deploy/docker-compose.snippet.yml`), or Docker's default 10s SIGKILL
-lands first and the drain never happens.
+lands first and the drain never happens. If a `gcp-cloud-assist` or
+`aws-devops-agent` target (in `cloud`, `cloud_fallbacks` or
+`escalation_targets`) can wait longer for its investigation than
+`shutdown_grace_sec`, the startup banner prints a warning naming it.
 
 ## Triage: escalating a hard alert to a cloud model
 
@@ -980,7 +983,7 @@ escalation_targets:
     provider: "gcp-cloud-assist"
     project: "my-gcp-project"
     poll_interval_sec: 15     # optional, default 15
-    poll_timeout_sec: 600     # optional, default 600; the gateway gives up (and tries the next target) after this
+    poll_timeout_sec: 270     # optional, default 270; the gateway gives up (and tries the next target) after this, counted from the start
     timeout_sec: 30           # optional, default 30; one HTTP call
 ```
 
@@ -1015,11 +1018,15 @@ Before enabling it:
   be created/run by the agent"). They're still what gcloud calls today,
   but this provider depends on them staying available.
 
-Like the AWS DevOps Agent, an investigation takes minutes. The default
-`poll_timeout_sec` (600) is longer than the default `shutdown_grace_sec`
-(300), so a restart can cut a waiting escalation short; the investigation
+Like the AWS DevOps Agent, an investigation takes minutes.
+`poll_timeout_sec` is one budget for the whole escalation — creating the
+investigation, starting it and waiting for it — and its default (270) is
+kept under the default `shutdown_grace_sec` (300) so a restart doesn't cut
+a waiting escalation short. If you raise it above `shutdown_grace_sec`,
+the startup banner warns about it; raise `shutdown_grace_sec` (and the
+compose `stop_grace_period`) with it. On a timeout the investigation
 itself keeps running on GCP and can be opened in the console (its name is
-in the result and in any timeout error). Route only alerts about that GCP
+in the result and in the timeout error). Route only alerts about that GCP
 project to it, for example `escalation: [gcp, default]` on a
 `matchers: {cloud: gcp}` route.
 
