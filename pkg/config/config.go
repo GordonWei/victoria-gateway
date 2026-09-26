@@ -533,6 +533,11 @@ func (c *Config) Validate() error {
 	if c.Summarizer.TimeoutSec < 0 {
 		return fmt.Errorf("summarizer.timeout_sec must be >= 0 (0 means the 60s default)")
 	}
+	if c.Cloud != nil {
+		if err := validateCloudAPIKey("cloud", c.Cloud); err != nil {
+			return err
+		}
+	}
 	// An escalation rule that can never fire (no Cloud configured) is a
 	// silent no-op the operator almost certainly didn't intend — fail
 	// loudly rather than have alerts quietly never escalate.
@@ -648,6 +653,7 @@ func (c *Config) validateHybrid() error {
 			return err
 		}
 	}
+	envNames := map[string]string{}
 	for name, t := range c.EscalationTargets {
 		if t == nil {
 			return fmt.Errorf("escalation_targets.%s is empty", name)
@@ -655,6 +661,18 @@ func (c *Config) validateHybrid() error {
 		if err := validateCloudEntry("escalation_targets."+name, t); err != nil {
 			return err
 		}
+		// Two names that differ only in case or punctuation ("aws-prod"
+		// vs "aws_prod") would read their API key from the same env var,
+		// and which one got it would depend on map iteration order.
+		env := EnvName(name)
+		if other, ok := envNames[env]; ok {
+			a, b := other, name
+			if b < a {
+				a, b = b, a
+			}
+			return fmt.Errorf("escalation_targets %q and %q both map to the env var VICTORIA_GATEWAY_ESCALATION_%s_API_KEY — rename one so they differ in more than case or punctuation", a, b, env)
+		}
+		envNames[env] = name
 	}
 	usedSources := map[string]bool{}
 	usedTargets := map[string]bool{}
@@ -714,6 +732,7 @@ func (c *Config) validateHybrid() error {
 func validateCloudEntry(label string, c *CloudConfig) error {
 	switch c.Provider {
 	case "", "gemini", "anthropic":
+		return validateCloudAPIKey(label, c)
 	case "bedrock":
 		if c.Region == "" || c.Model == "" {
 			return fmt.Errorf("%s.provider is \"bedrock\" but %s.region/model is missing", label, label)
@@ -728,6 +747,26 @@ func validateCloudEntry(label string, c *CloudConfig) error {
 		}
 	default:
 		return fmt.Errorf("%s.provider is %q, want \"gemini\", \"anthropic\", \"bedrock\", \"azure-openai\", or \"aws-devops-agent\"", label, c.Provider)
+	}
+	return nil
+}
+
+// validateCloudAPIKey rejects a gemini/anthropic block with no api_key:
+// both providers answer every call with 401 without one, so the gap would
+// otherwise only surface as "every escalation fails" on the first alert.
+// The legacy cloud block only gets this check (its other per-provider
+// checks stay in buildCloud, unchanged); api_key may also arrive via the
+// VICTORIA_GATEWAY_*_API_KEY env vars, which Load applies before Validate.
+func validateCloudAPIKey(label string, c *CloudConfig) error {
+	switch c.Provider {
+	case "", "gemini", "anthropic":
+		if c.APIKey == "" {
+			p := c.Provider
+			if p == "" {
+				p = "gemini"
+			}
+			return fmt.Errorf("%s.provider is %q but %s.api_key is empty", label, p, label)
+		}
 	}
 	return nil
 }
@@ -948,7 +987,7 @@ func applyEnvOverrides(cfg *Config) {
 func EnvName(name string) string {
 	b := []byte(strings.ToUpper(name))
 	for i, ch := range b {
-		if !(ch >= 'A' && ch <= 'Z') && !(ch >= '0' && ch <= '9') {
+		if (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') {
 			b[i] = '_'
 		}
 	}
