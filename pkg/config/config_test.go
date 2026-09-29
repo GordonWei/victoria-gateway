@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func validConfig() *Config {
@@ -305,7 +307,7 @@ func TestValidate_RAGSimilarityThresholdOutOfRange(t *testing.T) {
 
 func TestValidate_AuditLogWithoutRAGEnabled(t *testing.T) {
 	c := validConfig()
-	c.RAG = &RAGConfig{Enabled: false, AuditLog: true}
+	c.RAG = &RAGConfig{Enabled: false, AuditLog: boolPtr(true)}
 	if err := c.Validate(); err == nil {
 		t.Error("expected error for audit_log: true without rag.enabled: true")
 	}
@@ -313,9 +315,49 @@ func TestValidate_AuditLogWithoutRAGEnabled(t *testing.T) {
 
 func TestValidate_AuditLogWithRAGEnabled_OK(t *testing.T) {
 	c := validConfig()
-	c.RAG = &RAGConfig{Enabled: true, PostgresDSN: "d", EmbeddingEndpoint: "e", EmbeddingModel: "m", AuditLog: true}
+	c.RAG = &RAGConfig{Enabled: true, PostgresDSN: "d", EmbeddingEndpoint: "e", EmbeddingModel: "m", AuditLog: boolPtr(true)}
 	if err := c.Validate(); err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+func TestAuditEnabled_Defaults(t *testing.T) {
+	var nilCfg *RAGConfig
+	cases := []struct {
+		name string
+		cfg  *RAGConfig
+		want bool
+	}{
+		{"nil RAG config", nilCfg, false},
+		{"RAG disabled", &RAGConfig{Enabled: false}, false},
+		{"RAG enabled, audit_log unset -> on by default", &RAGConfig{Enabled: true}, true},
+		{"RAG enabled, audit_log true", &RAGConfig{Enabled: true, AuditLog: boolPtr(true)}, true},
+		{"RAG enabled, audit_log false -> opt out", &RAGConfig{Enabled: true, AuditLog: boolPtr(false)}, false},
+	}
+	for _, tc := range cases {
+		if got := tc.cfg.AuditEnabled(); got != tc.want {
+			t.Errorf("%s: AuditEnabled() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestValidate_AuditLogFalseWithoutRAGEnabled_OK(t *testing.T) {
+	c := validConfig()
+	c.RAG = &RAGConfig{Enabled: false, AuditLog: boolPtr(false)}
+	if err := c.Validate(); err != nil {
+		t.Errorf("explicit audit_log: false without RAG should be fine: %v", err)
+	}
+}
+
+func TestLoad_AuditLogYAML(t *testing.T) {
+	var r RAGConfig
+	if err := yaml.Unmarshal([]byte("enabled: true\n"), &r); err != nil || r.AuditLog != nil {
+		t.Fatalf("unset audit_log should stay nil, got %v (err %v)", r.AuditLog, err)
+	}
+	if err := yaml.Unmarshal([]byte("enabled: true\naudit_log: false\n"), &r); err != nil || r.AuditLog == nil || *r.AuditLog {
+		t.Fatalf("audit_log: false should parse to a false pointer, got %v (err %v)", r.AuditLog, err)
 	}
 }
 
@@ -486,4 +528,26 @@ func TestLoad_EnvOverride_RAGPostgresDSNAndGiteaToken(t *testing.T) {
 	if cfg.RAG.Gitea.Token != "from-env-token" {
 		t.Errorf("RAG.Gitea.Token = %q, want from-env-token", cfg.RAG.Gitea.Token)
 	}
+}
+
+func TestValidate_Notifications_WebhookBodyTemplate(t *testing.T) {
+	c := validConfig()
+	c.Notifications = validNotifications()
+	c.Notifications.Channels[1].BodyTemplate = `{"text": {{json .Text}}}`
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil for a template using the json func", err)
+	}
+
+	c.Notifications.Channels[1].BodyTemplate = `{"text": {{json .Text}`
+	wantErrContaining(t, c.Validate(), "body_template does not parse")
+
+	c.Notifications.Channels[1].BodyTemplate = `{"text": {{nosuchfunc .Text}}}`
+	wantErrContaining(t, c.Validate(), "body_template does not parse")
+}
+
+func TestValidate_Notifications_TelegramRejectsBodyTemplate(t *testing.T) {
+	c := validConfig()
+	c.Notifications = validNotifications()
+	c.Notifications.Channels[0].BodyTemplate = `{}`
+	wantErrContaining(t, c.Validate(), "body_template only applies to type webhook")
 }

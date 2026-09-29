@@ -494,6 +494,99 @@ the top-level block is ignored (with a startup log line saying so).
 response's `alert_result` shape (`alert_name`, `host`, `summary`,
 `analyzed_by`, plus `similar_incidents` when present).
 
+#### Slack, Teams and other chat webhooks
+
+That fixed body is written for a consumer built against this service. A
+chat product's incoming webhook wants its own schema: Slack's rejects a
+body with no `text` (or `blocks`), and a Teams Workflows webhook expects
+an Adaptive Card message. So a bare `type: webhook` channel pointed at
+either one does not work. Give the channel a `body_template` (a Go
+`text/template`) that renders the schema the endpoint expects:
+
+```yaml
+notifications:
+  channels:
+    - name: "slack-ops"
+      type: webhook
+      url: "https://hooks.slack.com/services/REPLACE/REPLACE/REPLACE"
+      body_template: '{"text": {{json .Text}}}'
+    - name: "teams-ops"
+      type: webhook
+      url: "REPLACE-workflows-webhook-url"
+      body_template: |
+        {"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive",
+        "content":{"type":"AdaptiveCard","$schema":"http://adaptivecards.io/schemas/adaptive-card.json",
+        "version":"1.4","body":[{"type":"TextBlock","text":{{json .Text}},"wrap":true}]}}]}
+  routes:
+    - default: true
+      channels: ["slack-ops", "teams-ops"]
+```
+
+The template sees `.AlertName`, `.Host`, `.Summary`, `.AnalyzedBy`,
+`.EscalatedTo`, `.Error`, `.PendingURL`, `.MitigationNote`, `.Similar`
+(a list of `.Ref` / `.Date` / `.URL`), and `.Text`: the whole
+notification pre-rendered as plain text, the same content as the Telegram
+push without its HTML. Wrap anything free-form in `{{json ...}}`, which
+quotes and escapes it: an LLM summary routinely contains quotes and
+newlines, and pasted into a template bare it breaks the JSON. The
+rendered body must be valid JSON. If it is not, the gateway refuses to
+send it, logs the reason, and counts a failed push for that channel.
+`body_template` is only valid on `type: webhook`, and a template that
+does not parse stops the service at startup instead of failing at the
+first alert.
+
+What is and is not verified: the rendering is unit-tested against local
+`httptest` servers (a Slack-shaped `{"text": ...}` body and a Teams
+Adaptive Card envelope, including a summary with quotes, newlines and
+angle brackets). **It has not been sent to a real Slack or Teams
+endpoint**, and the two schemas above come from those products'
+documentation, not from a live test, so try each with a throwaway
+channel first. Two known rough edges: the text is not escaped for Slack's
+own `&`, `<`, `>` control characters, and a Teams Adaptive Card has a
+message size limit that a very long cloud analysis could exceed.
+
+#### Getting alerts from something other than Alertmanager
+
+`POST /webhook/alertmanager` is the only alert input, and it speaks the
+Alertmanager webhook format. There is no CloudWatch, EventBridge or
+Datadog receiver, and the intended way to add one is not another
+receiver in this binary but a small translator in front of it, so the
+gateway keeps one input contract. For a CloudWatch alarm that translator
+is typically SNS → a Lambda function (or any small service) that
+rebuilds the alarm as this payload and POSTs it:
+
+```json
+{
+  "version": "4",
+  "status": "firing",
+  "alerts": [{
+    "status": "firing",
+    "labels": {"alertname": "HighErrorRate", "host": "checkout-api", "cloud": "aws"},
+    "annotations": {"summary": "5xx rate above 5% for 5 minutes"},
+    "startsAt": "2026-09-30T02:15:00Z",
+    "fingerprint": "cloudwatch-HighErrorRate-checkout-api"
+  }]
+}
+```
+
+Things the translator has to get right, all of which the gateway checks
+or depends on: `version` must be the string `"4"` and `alerts` must be
+non-empty, or the request is rejected; `startsAt` must be RFC3339, since
+it anchors the log query window; the labels must identify what to look
+up (`host`/`instance`, or `namespace` + `pod`/`deployment`/`statefulset`),
+because that is what the log query is built from; and a stable
+`fingerprint` per alarm lets the gateway's dedup recognise a repeated
+notification for the same episode (with none, every delivery is analyzed
+again). Send `"status": "resolved"` when the alarm returns to OK so the
+dedup entry is cleared. Labels are also what `hybrid_routes`,
+`notifications.routes` and maintenance-window matchers match on, so the
+`cloud: aws` label above is how such an alert reaches an AWS log source.
+
+This translator is not part of the repository, and the payload above is
+built from the format the gateway parses, not from a captured CloudWatch
+event; the gateway side is covered by its own tests, the Lambda side is
+yours to write and test.
+
 Delivery reliability, both channel types: messages that fail on a
 transient error (network error, 429, 5xx) are retried twice with short
 backoff; permanent rejections (4xx) are not retried. Telegram messages are
@@ -569,21 +662,53 @@ right row. Only appears when RAG capture actually produced a record
 ### What data this stores, and where it goes
 
 Enabling RAG means every analyzed alert's log excerpt (up to 4,000
-characters) ends up in three places: written into Postgres
+characters) ends up in several places: written into Postgres
 (`incidents.log_excerpt`), sent to whichever LLM does the summarizing
-(local and/or cloud), and rendered in plain text on `/incidents/{id}` and
-`/pending/{id}` — both of which have **no authentication by default** (see
-"Securing the web UI" below).
+(local and/or cloud), fed to the embedding endpoint, and rendered in
+plain text on `/incidents/{id}` and `/pending/{id}` — both of which have
+**no authentication by default** (see "Securing the web UI" below). What
+the models write back (the summary, and a mitigation plan when an
+escalation target produces one) is also stored, filed into the tracker
+issue, and pushed in the notification, and it can quote whatever it was
+shown.
 
 If the Loki you're pointing this at is a real production instance, this
 matters: production logs routinely contain passwords, tokens, and other
 things you didn't mean to publish on an open port. `rag.mask_log_excerpt:
-true` (off by default — see its doc comment in `pkg/config` for why
-enabling it is not automatically the right call) redacts substrings that
-look like credential assignments before they're stored; it's not a
-substitute for not logging secrets in the first place, and it only
-recognizes common `key=value`/`Bearer <token>` shapes, not every
-application's log format.
+true` is the opt-in redaction for that. It is **off by default** (the
+content of a log line is usually the root-cause signal — see its doc
+comment in `pkg/config`), and when on it is applied at the two boundaries
+text crosses, so each exit is covered:
+
+| Where the text goes | Redacted when `mask_log_excerpt: true`? |
+|---|---|
+| Local summarizer prompt (log lines, alert `summary`/`description` annotations, retrieved past-incident context) | Yes |
+| Cloud escalation prompt (same inputs) | Yes |
+| Embedding endpoint input | Yes |
+| Jev (the escalation judge, sent the local summary) | Yes, it is sent the redacted summary |
+| Summary and mitigation plan the model writes back → notification, tracker issue, Postgres, `/incidents`, `/pending` | Yes |
+| Stored `log_excerpt` in Postgres and the web pages | Yes |
+| Alert **labels** (alertname, host, ...) | No — they identify the alert and the host |
+| The incoming Alertmanager webhook body, Loki query text, and this process's own log output | No |
+| Records stored **before** you turned the switch on | No — they stay as they were written (retrieved context from them is redacted on its way into a prompt, but the row itself is not rewritten) |
+
+What "redacted" means is narrow: only `key=value` / `key: value`
+assignments whose key looks like a secret (`password`, `passwd`, `pwd`,
+`secret`, `token`, `api_key`, `access_key`, `credential`) and `Bearer
+<token>` values are rewritten, each value replaced by its shape (digits
+→ `0`, lowercase → `a`, uppercase → `A`), so `password=hunter2secret`
+becomes `password=aaaaaa0aaaaaa` and everything else in the line, IPs and
+ports included, is left readable. A secret with no such key next to it (a
+bare API key in a stack trace, a connection string, a JSON field named
+something else) is not caught. It is not a substitute for not logging
+secrets in the first place.
+
+Embeddings: turning the switch on changes the text that gets embedded,
+but only the characters of a redacted value, so a new incident should
+still land near its unredacted predecessors (not measured, the
+difference is a few characters in a long text); you do not need to re-embed
+old records, and the embedding-model drift check (which compares model
+names) is unaffected.
 
 ### RAG has nothing to retrieve until something is Confirmed
 
@@ -623,7 +748,7 @@ victoria-gateway suppression-candidates --min-count 5 --apply-silences          
 victoria-gateway suppression-candidates --min-count 5 --apply-silences --yes     # actually create them
 ```
 
-If `rag.audit_log` is enabled, every silence actually created this way is
+If audit logging is enabled (the default when RAG is on), every silence actually created this way is
 recorded there (see "Audit log" below) — actor is `cli:$USER`.
 
 ### Securing the web UI
@@ -671,17 +796,28 @@ doesn't require touching any handler.
 
 The one question none of the above answers: *who* changed the
 maintenance windows, confirmed that pending incident, or applied that
-suppression candidate as a silence — and when. `rag.audit_log: true`
-(off by default; requires `rag.enabled: true`, since it reuses that same
-Postgres database rather than adding a second storage dependency)
-records exactly those three operations to an `audit_log` table (see
+suppression candidate as a silence — and when. It also answers the
+automatic side of the same question: *why did this alert go to the cloud
+(or not)*. Audit logging is **on by default whenever `rag.enabled: true`**
+(it reuses that same Postgres database rather than adding a second
+storage dependency; set `rag.audit_log: false` to opt out — an explicit
+`audit_log: true` without `rag.enabled` is a config error). It records
+these operations to an `audit_log` table (see
 `pkg/audit` and `pkg/rag/schema.sql`), viewable at `GET /audit` —
-authenticated by `webui_auth` the same as `/incidents` and `/pending`.
+authenticated by `webui_auth` the same as `/incidents` and `/pending`:
+
+| Action | Recorded when |
+|---|---|
+| `maintenance_windows.replace` | `PUT /maintenance-windows` replaces the window set |
+| `pending.confirm`, `pending.batch_confirm` | a pending incident (or a group) is confirmed on the web UI |
+| `suppression.apply_silence` | `suppression-candidates --apply-silences --yes` creates a silence |
+| `escalation.trigger` | an alert is handed to a cloud escalation target, with the reason, the target that answered, and `result=ok` / `result=failed error=...` |
+| `escalation.rate_limited` | `escalation.max_per_hour` stopped an escalation that would otherwise have happened |
 
 ```yaml
 rag:
   enabled: true
-  audit_log: true
+  # audit_log: false   # opt out; on by default when RAG is enabled
   # ... postgres_dsn / embedding_endpoint / embedding_model as usual
 ```
 
@@ -689,11 +825,16 @@ The actor recorded is the `webui_auth` username when that's configured,
 the caller's remote IP otherwise (`ip:1.2.3.4`) — there's no real identity
 system here, so an unauthenticated deployment gets the closest honest
 substitute rather than an empty field. CLI-triggered entries (from
-`suppression-candidates --apply-silences --yes`) record `cli:$USER`.
-Nothing about the core webhook→Loki→LLM→notify path is audited — this is
-specifically the handful of operations that change *live system behavior*
-rather than just observing it, matching what most audit-trail requests
-actually ask for ("why is this suppressed, who set that window").
+`suppression-candidates --apply-silences --yes`) record `cli:$USER`, and the
+two `escalation.*` actions, which the alert pipeline decides on its own,
+record `system`.
+Analyzing an alert, notifying, and every other step of the core
+webhook→Loki→LLM→notify path is not audited; an escalation is the one
+automatic step recorded, because it spends money and sends alert context
+to a third party, and the rate-limit entry is the only trace of the spend
+guardrail having declined one. There is no per-alert "skip the guardrail"
+switch to audit: `escalation.max_per_hour` is a config value, so changing
+it is a config change, not a runtime operation this log can see.
 
 ## Async webhook mode and graceful shutdown
 

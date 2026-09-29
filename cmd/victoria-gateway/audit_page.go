@@ -19,7 +19,7 @@ var auditListTmpl = template.Must(template.New("audit-list").Parse(`<!doctype ht
 <title>victoria-gateway audit log</title><style>` + incidentsBaseCSS + `</style></head>
 <body>
 <h1>🔍 稽核紀錄（最近 {{len .Entries}} 筆）</h1>
-<p class="muted">誰在什麼時候改了維護窗口、確認了 pending 記錄、或套用了抑制規則候選。</p>
+<p class="muted">誰在什麼時候改了維護窗口、確認了 pending 記錄、套用了抑制規則候選；另外 escalation 升級到雲端（escalation.trigger）與被 escalation.max_per_hour 擋下（escalation.rate_limited）由系統自動記錄，操作者為 system。</p>
 {{if .Entries}}
 <table>
 <tr><th>時間</th><th>操作者</th><th>動作</th><th>對象</th><th>內容</th></tr>

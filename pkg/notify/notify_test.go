@@ -3,6 +3,7 @@ package notify
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -398,5 +399,142 @@ func TestFormatTelegramText_MitigationNote(t *testing.T) {
 	}
 	if strings.Contains(FormatTelegramText(Message{AlertName: "a", Summary: "s"}), "🛠") {
 		t.Error("note rendered without a MitigationNote")
+	}
+}
+
+// ── body_template: chat-product webhook schemas ─────────────────────
+//
+// Local httptest servers only. These prove the request body a Slack- or
+// Teams-shaped template produces; they say nothing about whether the real
+// services accept it.
+
+func newTemplateChannel(t *testing.T, url, tmpl string) *WebhookChannel {
+	t.Helper()
+	parsed, err := ParseBodyTemplate(tmpl)
+	if err != nil {
+		t.Fatalf("ParseBodyTemplate: %v", err)
+	}
+	ch := NewWebhookChannel("chat", url, "", nil)
+	ch.SetBodyTemplate(parsed)
+	ch.sleep = func(time.Duration) {}
+	return ch
+}
+
+func TestWebhookChannel_BodyTemplate_SlackShape(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ch := newTemplateChannel(t, srv.URL, `{"text": {{json .Text}}}`)
+	// A summary with quotes, a newline and angle brackets must survive as
+	// one valid JSON string.
+	msg := Message{AlertName: "InstanceDown", Host: "web01", Summary: "disk \"full\"\nsee <details> & retry", AnalyzedBy: "local", PendingURL: "http://gw/pending/7"}
+	if err := ch.Send(msg); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	var got struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("body is not the {\"text\":...} shape Slack expects: %v\n%s", err, raw)
+	}
+	for _, want := range []string{"InstanceDown", "web01", "disk \"full\"\nsee <details> & retry", "http://gw/pending/7"} {
+		if !strings.Contains(got.Text, want) {
+			t.Errorf("text missing %q:\n%s", want, got.Text)
+		}
+	}
+}
+
+func TestWebhookChannel_BodyTemplate_TeamsAdaptiveCardShape(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	tmpl := `{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"type":"AdaptiveCard","$schema":"http://adaptivecards.io/schemas/adaptive-card.json","version":"1.4","body":[{"type":"TextBlock","text":{{json .Text}},"wrap":true}]}}]}`
+	ch := newTemplateChannel(t, srv.URL, tmpl)
+	if err := ch.Send(Message{AlertName: "A", Host: "h", Summary: "s", AnalyzedBy: "cloud", EscalatedTo: "gemini"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	var got struct {
+		Type        string `json:"type"`
+		Attachments []struct {
+			ContentType string `json:"contentType"`
+			Content     struct {
+				Type string `json:"type"`
+				Body []struct {
+					Text string `json:"text"`
+				} `json:"body"`
+			} `json:"content"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode: %v\n%s", err, raw)
+	}
+	if got.Type != "message" || len(got.Attachments) != 1 || got.Attachments[0].Content.Type != "AdaptiveCard" {
+		t.Fatalf("unexpected card envelope: %s", raw)
+	}
+	if body := got.Attachments[0].Content.Body; len(body) != 1 || !strings.Contains(body[0].Text, "gemini") {
+		t.Errorf("card text should carry the notification: %s", raw)
+	}
+}
+
+func TestWebhookChannel_BodyTemplate_NotValidJSON_NotRetried(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+	}))
+	defer srv.Close()
+
+	// Forgot {{json ...}}: a summary with a quote would break the JSON.
+	ch := newTemplateChannel(t, srv.URL, `{"text": "{{.Summary}}"}`)
+	err := ch.Send(Message{AlertName: "A", Summary: `say "hi"`})
+	if err == nil || !strings.Contains(err.Error(), "not valid JSON") {
+		t.Fatalf("Send error = %v, want a not-valid-JSON error", err)
+	}
+	if calls.Load() != 0 {
+		t.Errorf("an invalid body must not be sent at all, got %d requests", calls.Load())
+	}
+}
+
+func TestWebhookChannel_BodyTemplate_UnknownFieldFails(t *testing.T) {
+	ch := newTemplateChannel(t, "http://unused.invalid", `{"text": {{json .NoSuchField}}}`)
+	if err := ch.Send(Message{AlertName: "A"}); err == nil {
+		t.Fatal("expected an error for a field BodyTemplateData does not have")
+	}
+}
+
+func TestWebhookChannel_NoTemplate_StillFixedJSON(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ = io.ReadAll(r.Body)
+	}))
+	defer srv.Close()
+	ch := NewWebhookChannel("itsm", srv.URL, "", nil)
+	if err := ch.Send(Message{AlertName: "A", Host: "h"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !strings.Contains(string(raw), `"alert_name":"A"`) {
+		t.Errorf("default body changed: %s", raw)
+	}
+}
+
+func TestFormatPlainText_MatchesTelegramContentWithoutMarkup(t *testing.T) {
+	msg := Message{AlertName: "A", Host: "h", Summary: "a < b", AnalyzedBy: "cloud", EscalatedTo: "gemini",
+		MitigationNote: "plan in #3", PendingURL: "http://gw/pending/1",
+		Similar: []SimilarIncident{{Ref: "#1 A (h)", Date: "2026-01-01", URL: "http://gw/i/1"}}}
+	got := FormatPlainText(msg)
+	for _, want := range []string{"🔍 A (h)", "gemini", "a < b", "🛠 plan in #3", "✅ 確認這筆：\nhttp://gw/pending/1", "📎 相似歷史事件：", "#1 A (h) — 2026-01-01", "http://gw/i/1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plain text missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "<b>") || strings.Contains(got, "&lt;") {
+		t.Errorf("plain text should carry no HTML markup:\n%s", got)
 	}
 }

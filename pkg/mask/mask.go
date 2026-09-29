@@ -1,10 +1,10 @@
-// Package mask provides an opt-in, shape-preserving redaction for log
-// excerpts that get stored and displayed by victoria-gateway. It exists
-// because RAG's captured log excerpts land in three places (Postgres, the
-// summarizer prompt, and the unauthenticated /incidents pages — see the
-// README's "What data this stores, and where it goes" section), and an
-// operator pointing this at a real production Loki may not want raw
-// credential-shaped strings sitting in any of them.
+// Package mask provides an opt-in, shape-preserving redaction for log text
+// handled by victoria-gateway. It exists because a captured log line goes
+// to several places (the summarizer and cloud prompts, the embedder,
+// Postgres, and the unauthenticated /incidents pages — see the README's
+// "What data this stores, and where it goes" section), and an operator
+// pointing this at a real production Loki may not want raw
+// credential-shaped strings in any of them.
 //
 // This is opt-in and off by default (rag.mask_log_excerpt: true) for a
 // reason spelled out in the README: for most alerts, the actual content of

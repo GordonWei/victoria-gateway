@@ -376,3 +376,55 @@ func TestPGStore_DistinctEmbeddingModels_QueryError(t *testing.T) {
 		t.Error("expected error when the query fails")
 	}
 }
+
+// ConfirmPending is the compare-and-set behind the web confirm form: the
+// UPDATE only takes effect while the row is still 'pending', and zero
+// affected rows is how a second, racing confirm learns it lost.
+func TestPGStore_ConfirmPending_OnlyWhilePending(t *testing.T) {
+	store, mock := newMockStore(t)
+	mock.ExpectExec("UPDATE incidents SET resolution = \\$2, status = 'confirmed', confirmed_at = now\\(\\)\\s+WHERE id = \\$1 AND status = 'pending'").
+		WithArgs(int64(7), "rotated the cert").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := store.ConfirmPending(context.Background(), 7, "rotated the cert"); err != nil {
+		t.Fatalf("ConfirmPending: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+func TestPGStore_ConfirmPending_AlreadyConfirmedReturnsSentinel(t *testing.T) {
+	store, mock := newMockStore(t)
+	// The loser of a race (or a stale form) matches no 'pending' row.
+	mock.ExpectExec("UPDATE incidents SET resolution").
+		WithArgs(int64(7), "second writer").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	err := store.ConfirmPending(context.Background(), 7, "second writer")
+	if !errors.Is(err, ErrAlreadyConfirmed) {
+		t.Errorf("err = %v, want ErrAlreadyConfirmed", err)
+	}
+}
+
+func TestPGStore_ConfirmPending_BlankResolutionNeverTouchesDB(t *testing.T) {
+	store, mock := newMockStore(t)
+	if err := store.ConfirmPending(context.Background(), 7, "  \n"); err == nil {
+		t.Error("want an error for a blank resolution")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil { // no Exec was expected
+		t.Errorf("unexpected DB call: %v", err)
+	}
+}
+
+func TestPGStore_ConfirmPending_DBErrorIsNotAlreadyConfirmed(t *testing.T) {
+	store, mock := newMockStore(t)
+	mock.ExpectExec("UPDATE incidents SET resolution").
+		WithArgs(int64(7), "x").
+		WillReturnError(errors.New("connection reset"))
+
+	err := store.ConfirmPending(context.Background(), 7, "x")
+	if err == nil || errors.Is(err, ErrAlreadyConfirmed) {
+		t.Errorf("err = %v, want a plain DB error, not ErrAlreadyConfirmed", err)
+	}
+}

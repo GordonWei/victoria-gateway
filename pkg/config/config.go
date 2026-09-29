@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/glob"
@@ -125,6 +126,15 @@ type NotifyChannelConfig struct {
 	URL     string            `yaml:"url"`
 	Method  string            `yaml:"method"`  // defaults to POST
 	Headers map[string]string `yaml:"headers"` // sent verbatim, e.g. Authorization
+	// BodyTemplate, if set, replaces the fixed JSON body with the
+	// rendering of this Go text/template — for endpoints that want their
+	// own schema (a Slack or Teams incoming webhook). Fields: .AlertName
+	// .Host .Summary .AnalyzedBy .EscalatedTo .Error .PendingURL
+	// .MitigationNote .Similar and .Text (the whole notification as plain
+	// text); use {{json .Field}} for anything free-form so it is quoted
+	// and escaped. The result must be valid JSON. See the README's
+	// "Slack, Teams and other chat webhooks".
+	BodyTemplate string `yaml:"body_template"`
 }
 
 // NotifyRouteConfig is one routing rule: first route whose matchers all
@@ -592,14 +602,20 @@ type RAGConfig struct {
 	// context, not a claim.
 	SimilarityThreshold float64 `yaml:"similarity_threshold"`
 
-	// MaskLogExcerpt, when true, redacts substrings in a captured log
-	// excerpt that look like credential assignments (password=, token:,
-	// Authorization: Bearer ...) before it's stored, using
-	// pkg/mask.RedactLikelyCredentials — a shape-preserving, irreversible
-	// rewrite. Off by default: for most alerts the actual content of an
-	// error message is the root-cause signal, not something to hide, and
-	// masking indiscriminately would defeat that. See the README's "What
-	// data this stores, and where it goes" section before turning this on.
+	// MaskLogExcerpt, when true, redacts substrings that look like
+	// credential assignments (password=, token:, Authorization: Bearer
+	// ...) using pkg/mask.RedactLikelyCredentials — a shape-preserving,
+	// irreversible rewrite. It is applied to what enters the pipeline (log
+	// lines and the alert's summary/description annotations, so the
+	// summarizer and cloud prompts, the embedder and the stored excerpt
+	// all see the redacted text) and to what a model writes back (summary
+	// and mitigation plan, so the notification, tracker issue and stored
+	// record do too). Alert labels, the raw webhook body and the process
+	// log are not touched. Off by default: for most alerts the actual
+	// content of an error message is the root-cause signal, not something
+	// to hide, and masking indiscriminately would defeat that. See the
+	// README's "What data this stores, and where it goes" section before
+	// turning this on.
 	MaskLogExcerpt bool `yaml:"mask_log_excerpt"`
 
 	// PublicBaseURL, e.g. "http://172.16.100.6:8090", is what /incidents
@@ -618,15 +634,17 @@ type RAGConfig struct {
 	Gitea  *GiteaConfig  `yaml:"gitea"`
 	GitHub *GitHubConfig `yaml:"github"`
 
-	// AuditLog, when true, records who replaced the maintenance window
-	// set, confirmed a pending incident, or applied a suppression
-	// candidate as a real Alertmanager silence — see pkg/audit. Off by
-	// default: it reuses this same Postgres connection (no new
-	// dependency), but still adds a write on every such operation, and a
-	// single-operator homelab deployment may not need "who did this"
-	// answered by anything more than "well, me." Requires Enabled: true
-	// (there is no separate audit-only database).
-	AuditLog bool `yaml:"audit_log"`
+	// AuditLog records who replaced the maintenance window set, confirmed
+	// a pending incident, or applied a suppression candidate as a real
+	// Alertmanager silence, and (as actor "system") each escalation to a
+	// cloud target and each one escalation.max_per_hour declined — see
+	// pkg/audit. On by default whenever RAG is enabled: it reuses this same
+	// Postgres connection (no new dependency), and "who did this" is much
+	// harder to reconstruct after the fact than to record up front. Set
+	// `audit_log: false` to opt out. An explicit `audit_log: true` without
+	// rag.enabled is a config error (there is no audit-only database).
+	// Read it through AuditEnabled, not directly: nil means "default".
+	AuditLog *bool `yaml:"audit_log"`
 
 	// CloseIssueOnWebConfirm, when true, makes confirming a record via
 	// the /pending web form also close its linked tracker issue (posting
@@ -685,6 +703,15 @@ type GitHubConfig struct {
 type TelegramConfig struct {
 	BotToken string `yaml:"bot_token"`
 	ChatID   int64  `yaml:"chat_id"`
+}
+
+// AuditEnabled reports whether audit logging is on: RAG enabled and
+// audit_log not explicitly set to false.
+func (r *RAGConfig) AuditEnabled() bool {
+	if r == nil || !r.Enabled {
+		return false
+	}
+	return r.AuditLog == nil || *r.AuditLog
 }
 
 // Validate checks the parts of Config that Load's YAML unmarshal can't —
@@ -782,7 +809,7 @@ func (c *Config) Validate() error {
 		if c.RAG.SimilarityThreshold < 0 || c.RAG.SimilarityThreshold > 1 {
 			return fmt.Errorf("rag.similarity_threshold must be between 0 and 1 (0 means the 0.75 default)")
 		}
-	} else if c.RAG != nil && c.RAG.AuditLog {
+	} else if c.RAG != nil && c.RAG.AuditLog != nil && *c.RAG.AuditLog {
 		return fmt.Errorf("rag.audit_log is true but rag.enabled is not — audit logging reuses the RAG Postgres connection, so RAG must be enabled too")
 	}
 	if c.ShutdownGraceSec < 0 {
@@ -1187,9 +1214,20 @@ func (c *Config) validateNotifications() error {
 			if ch.BotToken == "" || ch.ChatID == 0 {
 				return fmt.Errorf("%s: type telegram requires bot_token and chat_id", label)
 			}
+			if ch.BodyTemplate != "" {
+				return fmt.Errorf("%s: body_template only applies to type webhook", label)
+			}
 		case "webhook":
 			if ch.URL == "" {
 				return fmt.Errorf("%s: type webhook requires url", label)
+			}
+			if ch.BodyTemplate != "" {
+				// Same function names as notify.bodyTemplateFuncs (this package
+				// can't import notify: notify → maintenance → config).
+				stub := template.FuncMap{"json": func(v any) (string, error) { return "", nil }}
+				if _, err := template.New("body").Funcs(stub).Option("missingkey=error").Parse(ch.BodyTemplate); err != nil {
+					return fmt.Errorf("%s: body_template does not parse: %w", label, err)
+				}
 			}
 		default:
 			return fmt.Errorf("%s: type must be \"telegram\" or \"webhook\", got %q", label, ch.Type)

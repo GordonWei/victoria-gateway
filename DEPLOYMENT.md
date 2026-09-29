@@ -443,8 +443,11 @@ placeholder password) in the file.
 ## 5. Optional: audit log
 
 Records who replaced the maintenance-window set, confirmed a pending
-incident, or applied a suppression candidate as a silence. Requires RAG
-(section 3), since it reuses that Postgres connection. Reasoning and the
+incident, or applied a suppression candidate as a silence. **On by default
+once RAG is enabled** (section 3), since it reuses that Postgres connection;
+set `audit_log: false` to opt out. Because it is on by default, apply
+`schema.sql` (step 1) before upgrading an existing RAG deployment, or the
+writes will log errors. Reasoning and the
 actor semantics are in README's "Audit log".
 
 1. Make sure the `audit_log` table exists. `schema.sql` is idempotent
@@ -467,7 +470,7 @@ actor semantics are in README's "Audit log".
    ```yaml
    rag:
      enabled: true
-     audit_log: true
+     # audit_log: false   # only needed to opt out; on by default
    ```
 
 3. Restart and verify (add `-u ops:...` if `webui_auth` is set):
