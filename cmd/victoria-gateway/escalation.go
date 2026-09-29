@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
+	"github.com/gordonwei/victoria-gateway/pkg/audit"
 	"github.com/gordonwei/victoria-gateway/pkg/config"
 	"github.com/gordonwei/victoria-gateway/pkg/model"
 )
@@ -30,6 +32,13 @@ const reasonLocalUnavailable = "local LLM unavailable"
 // legacy config without cloud_fallbacks) the log lines and counters are
 // exactly what they were before fallbacks existed.
 func (h *handler) runEscalation(steps []escalationStep, alert aiops.Alert, logs []aiops.LogEntry, ragContext, reason string) (aiops.SummarizeResult, escalationStep, error) {
+	result, step, err := h.tryEscalationSteps(steps, alert, logs, ragContext, reason)
+	h.auditEscalation(alert, reason, step, err)
+	return result, step, err
+}
+
+// tryEscalationSteps is runEscalation's loop over the route's steps.
+func (h *handler) tryEscalationSteps(steps []escalationStep, alert aiops.Alert, logs []aiops.LogEntry, ragContext, reason string) (aiops.SummarizeResult, escalationStep, error) {
 	alertName := alert.Labels["alertname"]
 	var failures []string
 	for i, step := range steps {
@@ -65,6 +74,46 @@ func (h *handler) runEscalation(steps []escalationStep, alert aiops.Alert, logs 
 		return aiops.SummarizeResult{}, escalationStep{}, errors.New(failures[0])
 	}
 	return aiops.SummarizeResult{}, escalationStep{}, fmt.Errorf("all %d escalation targets failed: %s", len(failures), strings.Join(failures, "; "))
+}
+
+// Audit actor for the two escalation actions below: they're decided by the
+// alert pipeline itself, not by a person, so there is no user or IP to
+// record.
+const auditActorSystem = "system"
+
+// auditEscalation records that an alert was handed to a cloud escalation
+// target — the one automatic action that spends money and sends alert
+// context to a third party — and how it ended. Called once per
+// runEscalation, after the fallback chain has finished: step is the target
+// that answered, or err says why none did. A no-op unless rag.audit_log is
+// on, and never blocks the alert (see recordAudit).
+func (h *handler) auditEscalation(alert aiops.Alert, reason string, step escalationStep, err error) {
+	detail := fmt.Sprintf("reason=%q target=%q result=ok", reason, step.display)
+	if err != nil {
+		detail = fmt.Sprintf("reason=%q result=failed error=%q", reason, err.Error())
+	}
+	h.auditAlertAction("escalation.trigger", alert, detail)
+}
+
+// auditEscalationRateLimited records that escalation.max_per_hour stopped
+// an escalation that would otherwise have happened — the spend guardrail
+// doing its job, which is worth being able to find later when someone asks
+// why an alert got the local answer only.
+func (h *handler) auditEscalationRateLimited(alert aiops.Alert, reason string) {
+	h.auditAlertAction("escalation.rate_limited", alert,
+		fmt.Sprintf("reason=%q max_per_hour=%d", reason, h.escalation.MaxPerHour))
+}
+
+func (h *handler) auditAlertAction(action string, alert aiops.Alert, detail string) {
+	host, _, _ := alert.AffectedIdentity()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h.recordAudit(ctx, audit.Entry{
+		Actor:  auditActorSystem,
+		Action: action,
+		Target: fmt.Sprintf("alertname=%s host=%s", alert.Labels["alertname"], host),
+		Detail: detail,
+	})
 }
 
 // buildLegacyEscalations turns the legacy cloud block plus

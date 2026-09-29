@@ -51,10 +51,14 @@ func testCandidate() suppress.Candidate {
 	}
 }
 
+// auditOff opts these tests out of audit logging, which is on by default
+// whenever RAG is enabled — they have no Postgres to write to.
+func auditOff() *bool { f := false; return &f }
+
 func TestApplySuppressionSilences_DryRun_DoesNotCreate(t *testing.T) {
 	server, createCalls := fakeAlertmanager(t, false)
 	cfg := &config.Config{
-		RAG:          &config.RAGConfig{Enabled: true},
+		RAG:          &config.RAGConfig{Enabled: true, AuditLog: auditOff()},
 		Alertmanager: &config.AlertmanagerConfig{Endpoint: server.URL},
 	}
 
@@ -68,7 +72,7 @@ func TestApplySuppressionSilences_DryRun_DoesNotCreate(t *testing.T) {
 func TestApplySuppressionSilences_Yes_Creates(t *testing.T) {
 	server, createCalls := fakeAlertmanager(t, false)
 	cfg := &config.Config{
-		RAG:          &config.RAGConfig{Enabled: true},
+		RAG:          &config.RAGConfig{Enabled: true, AuditLog: auditOff()},
 		Alertmanager: &config.AlertmanagerConfig{Endpoint: server.URL},
 	}
 
@@ -82,7 +86,7 @@ func TestApplySuppressionSilences_Yes_Creates(t *testing.T) {
 func TestApplySuppressionSilences_ExistingActiveSilence_SkipsCreate(t *testing.T) {
 	server, createCalls := fakeAlertmanager(t, true /* preload an active silence matching testCandidate() */)
 	cfg := &config.Config{
-		RAG:          &config.RAGConfig{Enabled: true},
+		RAG:          &config.RAGConfig{Enabled: true, AuditLog: auditOff()},
 		Alertmanager: &config.AlertmanagerConfig{Endpoint: server.URL},
 	}
 

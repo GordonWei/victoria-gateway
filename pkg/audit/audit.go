@@ -1,9 +1,11 @@
 // Package audit records who changed what, and when, for the handful of
 // operations in victoria-gateway that change live system behavior rather
 // than just observing it: replacing the maintenance window set, confirming
-// a pending incident's resolution, and applying a suppression-rule
-// candidate as a real Alertmanager silence. Everything else (an alert
-// being analyzed, escalated, notified) is already visible in the process
+// a pending incident's resolution, applying a suppression-rule
+// candidate as a real Alertmanager silence, and — the one automatic
+// action recorded — handing an alert to a cloud escalation target (or
+// being stopped from doing so by escalation.max_per_hour). Everything else
+// (an alert being analyzed, notified) is already visible in the process
 // log and pkg/metrics — this package exists for the question those don't
 // answer well: "who did this, and when," after the fact, queryable without
 // grepping historical container logs that may have rotated away.

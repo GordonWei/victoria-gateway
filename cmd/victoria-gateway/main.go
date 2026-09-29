@@ -35,7 +35,6 @@ import (
 	"github.com/gordonwei/victoria-gateway/pkg/config"
 	"github.com/gordonwei/victoria-gateway/pkg/judge"
 	"github.com/gordonwei/victoria-gateway/pkg/maintenance"
-	"github.com/gordonwei/victoria-gateway/pkg/mask"
 	"github.com/gordonwei/victoria-gateway/pkg/metrics"
 	"github.com/gordonwei/victoria-gateway/pkg/model"
 	"github.com/gordonwei/victoria-gateway/pkg/notify"
@@ -234,7 +233,7 @@ func runServe(args []string) {
 		if cfg.RAG.GitHub != nil {
 			h.githubWebhookSecret = cfg.RAG.GitHub.WebhookSecret
 		}
-		if cfg.RAG.AuditLog {
+		if cfg.RAG.AuditEnabled() {
 			auditLogger, err := audit.OpenPostgres(cfg.RAG.PostgresDSN)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "❌ audit: %v\n", err)
@@ -276,7 +275,7 @@ func runServe(args []string) {
 		// tracker (or neither) is actually configured.
 		mux.HandleFunc("/webhook/gitea-issues", h.handleGiteaIssueWebhook)
 		mux.HandleFunc("/webhook/github-issues", h.handleGitHubIssueWebhook)
-		if cfg.RAG.AuditLog {
+		if cfg.RAG.AuditEnabled() {
 			mux.Handle("/audit", webUI(http.HandlerFunc(h.handleAuditLog)))
 		}
 	}
@@ -375,7 +374,16 @@ func buildNotifier(cfg *config.Config, m *metrics.Counters) (*notify.Router, err
 			case "telegram":
 				channels = append(channels, notify.NewTelegramChannel(ch.Name, ch.BotToken, ch.ChatID))
 			case "webhook":
-				channels = append(channels, notify.NewWebhookChannel(ch.Name, ch.URL, ch.Method, ch.Headers))
+				wh := notify.NewWebhookChannel(ch.Name, ch.URL, ch.Method, ch.Headers)
+				if ch.BodyTemplate != "" {
+					tmpl, err := notify.ParseBodyTemplate(ch.BodyTemplate)
+					if err != nil {
+						// config.Validate parses it too; this is the belt to that brace.
+						return nil, fmt.Errorf("notifications channel %q: body_template: %w", ch.Name, err)
+					}
+					wh.SetBodyTemplate(tmpl)
+				}
+				channels = append(channels, wh)
 			default:
 				// config.Validate already rejected anything else.
 				return nil, fmt.Errorf("notifications: unknown channel type %q", ch.Type)
@@ -902,12 +910,19 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		return
 	}
 
+	// From here on alert and logs are what leaves the process (both model
+	// prompts, the embedder, Jev, the stored record), so they are the
+	// redacted copies when rag.mask_log_excerpt is on — see masking.go.
+	alert, logs = h.maskInputs(alert, logs)
+
 	ragContext, similar := h.retrieveRAGContext(alert, logs)
+	ragContext = h.maskText(ragContext)
 	res.similar = similar
 
 	localStart := time.Now()
 	local, err := h.summarizer.Summarize(alert, logs, ragContext)
 	h.metrics.ObserveLocalLLMDuration(time.Since(localStart))
+	local = h.maskResult(local)
 	if err != nil {
 		if !aiops.IsLLMUnavailable(err) || len(route.escalations) == 0 {
 			res.Error = fmt.Sprintf("summarize: %v", err)
@@ -920,10 +935,12 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		if !h.allowEscalation() {
 			log.Printf("aiops: alert %q would escalate (%s) but escalation.max_per_hour is already reached this hour", res.AlertName, reasonLocalUnavailable)
 			h.metrics.IncEscalationRateLimitedTotal(route.escalations[0].display)
+			h.auditEscalationRateLimited(alert, reasonLocalUnavailable)
 			res.Error = fmt.Sprintf("summarize: %v; cloud escalation skipped: escalation.max_per_hour reached", err)
 			return
 		}
 		cloudResult, step, cloudErr := h.runEscalation(route.escalations, alert, logs, ragContext, reasonLocalUnavailable)
+		cloudResult = h.maskResult(cloudResult)
 		if cloudErr != nil {
 			res.Error = fmt.Sprintf("summarize: %v; cloud escalation (%s) also failed: %v", err, reasonLocalUnavailable, cloudErr)
 			return
@@ -958,6 +975,7 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	if escalate && !h.allowEscalation() {
 		log.Printf("aiops: alert %q would escalate (%s) but escalation.max_per_hour is already reached this hour; staying on the local result", res.AlertName, reason)
 		h.metrics.IncEscalationRateLimitedTotal(route.escalations[0].display)
+		h.auditEscalationRateLimited(alert, reason)
 		escalate = false
 	}
 	if escalate {
@@ -966,7 +984,7 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 		// operator seeing it plus runEscalation's log lines knows to
 		// double-check it themselves rather than getting nothing.
 		if cloudResult, step, cloudErr := h.runEscalation(route.escalations, alert, logs, ragContext, reason); cloudErr == nil {
-			result = cloudResult
+			result = h.maskResult(cloudResult)
 			res.AnalyzedBy = "cloud"
 			res.EscalatedTo = step.display
 		}
@@ -1100,11 +1118,12 @@ func (h *handler) captureIncident(alert aiops.Alert, logs []aiops.LogEntry, resu
 	}
 	// Opt-in only (rag.mask_log_excerpt) — off by default because the
 	// actual content of a log line is usually the root-cause signal, not
-	// noise. See pkg/mask's package doc and the README's "What data this
-	// stores, and where it goes" section for the reasoning.
-	if h.maskLogExcerpt {
-		logExcerpt = mask.RedactLikelyCredentials(logExcerpt)
-	}
+	// noise. summarizeOne already hands this function redacted logs (see
+	// masking.go), so this second pass is a no-op for that caller (the
+	// redaction is idempotent); it stays so a future caller that passes
+	// raw logs still can't store them. See pkg/mask's package doc and the
+	// README's "What data this stores, and where it goes" section.
+	logExcerpt = h.maskText(logExcerpt)
 
 	rec := rag.Record{
 		AlertName:        alert.Labels["alertname"],
