@@ -1,0 +1,688 @@
+{
+  "uid": "victoria-gateway-metrics",
+  "title": "Victoria Gateway — Metrics",
+  "tags": [
+    "victoria-gateway",
+    "aiops"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "label": "job",
+        "type": "custom",
+        "query": "victoria-gateway",
+        "current": {
+          "text": "victoria-gateway",
+          "value": "victoria-gateway"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "victoria-gateway",
+            "value": "victoria-gateway"
+          }
+        ],
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Version",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "victoria_gateway_build_info{job=\"$job\"}",
+          "legendFormat": "{{version}} ({{commit}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "description": "victoria_gateway_build_info: the running binary's version and commit (set at build time; see README \"Build version\").",
+      "options": {
+        "textMode": "name",
+        "colorMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Up",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "up{job=\"$job\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Alerts analyzed (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum(increase(victoria_gateway_alerts_total{job=\"$job\"}[24h]))",
+          "legendFormat": "alerts"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Escalations (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum(increase(victoria_gateway_escalations_total{job=\"$job\"}[24h]))",
+          "legendFormat": "escalations"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Notification failures (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum(increase(victoria_gateway_notify_push_failure_total{job=\"$job\"}[24h])) or vector(0)",
+          "legendFormat": "failures"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Alerts and errors by route",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (route) (rate(victoria_gateway_alerts_total{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "alerts {{route}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (route) (rate(victoria_gateway_alerts_error_total{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "errors {{route}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Escalations by target",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (target) (rate(victoria_gateway_escalations_total{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "ok {{target}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (target) (rate(victoria_gateway_escalation_failures_total{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "failed {{target}}"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (target) (rate(victoria_gateway_escalation_rate_limited_total{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "rate limited {{target}}"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (route) (rate(victoria_gateway_escalation_no_target_total{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "no target {{route}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Average durations",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_analysis_duration_seconds_sum{job=\"$job\"}[$__rate_interval]) / rate(victoria_gateway_analysis_duration_seconds_count{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "whole analysis"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_local_llm_duration_seconds_sum{job=\"$job\"}[$__rate_interval]) / rate(victoria_gateway_local_llm_duration_seconds_count{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "local LLM"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (target) (rate(victoria_gateway_cloud_llm_duration_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum by (target) (rate(victoria_gateway_cloud_llm_duration_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "cloud {{target}}"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (log_source) (rate(victoria_gateway_loki_query_duration_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum by (log_source) (rate(victoria_gateway_loki_query_duration_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "log query {{log_source}}"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_rag_search_duration_seconds_sum{job=\"$job\"}[$__rate_interval]) / rate(victoria_gateway_rag_search_duration_seconds_count{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "RAG search"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "Averages from the _sum/_count pairs (there are no histograms). Gaps mean no observations in the interval."
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Local LLM health",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "max by (backend) (victoria_gateway_local_llm_breaker_open{job=\"$job\"})",
+          "legendFormat": "breaker open {{backend}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (backend, reason) (rate(victoria_gateway_local_llm_skipped_total{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "skipped {{backend}} ({{reason}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "description": "Breaker open is 1 while a local backend's circuit breaker is open. Skipped counts backends passed over without a chat call."
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Notifications by channel",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (channel) (rate(victoria_gateway_notify_push_total{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "sent {{channel}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (channel) (rate(victoria_gateway_notify_push_failure_total{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "failed {{channel}}"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_telegram_push_failures_total{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "telegram failures (legacy counter)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "RAG and tracker",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_rag_capture_total{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "captured"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_rag_capture_failures_total{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "capture failures"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_rag_search_failures_total{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "search failures"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_tracker_create_issue_failures_total{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "issue create failures"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (target, result) (rate(victoria_gateway_mitigation_plan_total{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "mitigation {{target}} {{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Skipped and refused deliveries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_dedup_skipped_total{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "dedup"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_resolved_skipped_total{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "resolved"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_maintenance_suppressed_total{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "maintenance suppressed"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_maintenance_muted_total{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "maintenance muted"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "rate(victoria_gateway_webhook_auth_rejected_total{job=\"$job\"}[$__rate_interval])",
+          "legendFormat": "webhook auth rejected"
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (log_source) (rate(victoria_gateway_log_query_refused_total{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "log query refused {{log_source}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Telegram button presses",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoria-gateway-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoria-gateway-prometheus"
+          },
+          "expr": "sum by (action, result) (increase(victoria_gateway_telegram_actions_total{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "{{action}} {{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "description": "telegram_actions (v1.14.0). action=denied with result bad_signature, user_not_allowed or wrong_chat means someone pressed a button they shouldn't have."
+    }
+  ]
+}

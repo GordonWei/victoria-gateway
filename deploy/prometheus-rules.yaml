@@ -1,0 +1,140 @@
+# Prometheus alerting rules for victoria-gateway itself: it watches other
+# services, so something should watch it. Load with rule_files: in
+# prometheus.yml. Every rule assumes the scrape job is named
+# "victoria-gateway"; change job="victoria-gateway" below if yours isn't.
+#
+# These rules route through your own Alertmanager. If that Alertmanager
+# also feeds victoria-gateway, a "VictoriaGatewayDown" alert can't be
+# summarized by the gateway it is about: send it to a receiver that
+# doesn't depend on victoria-gateway (see deploy/external-healthcheck/ for
+# a check that runs somewhere else entirely).
+#
+# Only metrics victoria-gateway actually exposes are used (a test in
+# pkg/metrics checks every name). There is no tokens-per-second metric,
+# so local-model degradation is judged on call latency alone.
+groups:
+  - name: victoria-gateway
+    rules:
+      - alert: VictoriaGatewayDown
+        expr: up{job="victoria-gateway"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: victoria-gateway is not answering scrapes
+          description: Prometheus could not scrape {{ $labels.instance }} for 5 minutes. Alerts sent to it are not being summarized or pushed.
+
+      - alert: VictoriaGatewayMetricsAbsent
+        expr: absent(up{job="victoria-gateway"})
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: no victoria-gateway scrape target
+          description: There is no up series for job="victoria-gateway". The scrape config may have lost the target, or the job name differs from these rules.
+
+      - alert: VictoriaGatewayVersionChanged
+        expr: victoria_gateway_build_info{job="victoria-gateway"} unless on (job, instance, version) (victoria_gateway_build_info{job="victoria-gateway"} offset 1h)
+        labels:
+          severity: info
+        annotations:
+          summary: victoria-gateway {{ $labels.version }} is running
+          description: "{{ $labels.instance }} reports version {{ $labels.version }} (commit {{ $labels.commit }}), which it did not report an hour ago. Expected after a deploy; otherwise find out who restarted it with a different image."
+
+      - alert: VictoriaGatewayAnalysisErrors
+        expr: |
+          sum by (job) (rate(victoria_gateway_alerts_error_total{job="victoria-gateway"}[15m]))
+            / sum by (job) (rate(victoria_gateway_alerts_total{job="victoria-gateway"}[15m])) > 0.2
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: over 20% of alerts fail to get a summary
+          description: 'Alerts are reaching victoria-gateway but failing before a summary (log query, local model, labels). They are still pushed with the error text. Check the process log for "aiops: alert ... failed".'
+
+      - alert: VictoriaGatewayEscalationFailureRate
+        expr: |
+          (
+            sum by (job) (increase(victoria_gateway_escalation_failures_total{job="victoria-gateway"}[30m]))
+              / (
+                sum by (job) (increase(victoria_gateway_escalations_total{job="victoria-gateway"}[30m]))
+                + sum by (job) (increase(victoria_gateway_escalation_failures_total{job="victoria-gateway"}[30m]))
+              )
+          ) > 0.5
+          and sum by (job) (increase(victoria_gateway_escalation_failures_total{job="victoria-gateway"}[30m])) >= 3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: most cloud escalations are failing
+          description: Over half of the cloud escalation calls in the last 30 minutes failed (at least 3). Alerts fall back to the local summary. Check the target's API key, quota or region.
+
+      - alert: VictoriaGatewayEscalationRateLimited
+        expr: sum by (job, target) (increase(victoria_gateway_escalation_rate_limited_total{job="victoria-gateway"}[1h])) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: escalation.max_per_hour is stopping escalations
+          description: "{{ $value | humanize }} escalations to {{ $labels.target }} were skipped in the last hour because escalation.max_per_hour was reached. Those alerts got the local summary only."
+
+      - alert: VictoriaGatewayNotificationFailures
+        expr: sum by (job, channel) (increase(victoria_gateway_notify_push_failure_total{job="victoria-gateway"}[15m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: notifications to {{ $labels.channel }} are failing
+          description: "{{ $value | humanize }} pushes to channel {{ $labels.channel }} failed after retries in the last 15 minutes. Those summaries reached nobody."
+
+      - alert: VictoriaGatewayLocalLLMBreakerOpen
+        expr: max by (job, backend) (victoria_gateway_local_llm_breaker_open{job="victoria-gateway"}) == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: local model {{ $labels.backend }} has been skipped for 10 minutes
+          description: The circuit breaker for local backend {{ $labels.backend }} has stayed open. Alerts go to a fallback or a cloud target, or fail if there is none.
+
+      - alert: VictoriaGatewayLocalLLMSlow
+        expr: |
+          (
+            rate(victoria_gateway_local_llm_duration_seconds_sum{job="victoria-gateway"}[30m])
+              / rate(victoria_gateway_local_llm_duration_seconds_count{job="victoria-gateway"}[30m])
+          )
+          > 2 * (
+            rate(victoria_gateway_local_llm_duration_seconds_sum{job="victoria-gateway"}[7d])
+              / rate(victoria_gateway_local_llm_duration_seconds_count{job="victoria-gateway"}[7d])
+          )
+          and increase(victoria_gateway_local_llm_duration_seconds_count{job="victoria-gateway"}[30m]) >= 3
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: the local model is twice as slow as its weekly average
+          description: The average local LLM call over the last 30 minutes took {{ $value | humanizeDuration }}, more than twice the 7-day average. Typical causes are a model swapped for a larger one, memory pressure on the model host, or the GPU shared with another job.
+
+      - alert: VictoriaGatewayRAGFailures
+        expr: |
+          sum by (job) (increase(victoria_gateway_rag_capture_failures_total{job="victoria-gateway"}[30m]))
+            + sum by (job) (increase(victoria_gateway_rag_search_failures_total{job="victoria-gateway"}[30m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: RAG capture or search is failing
+          description: The embedding endpoint or Postgres is failing. Summaries continue without past-incident context, and new incidents are not being captured.
+
+      - alert: VictoriaGatewayTrackerFailures
+        expr: sum by (job) (increase(victoria_gateway_tracker_create_issue_failures_total{job="victoria-gateway"}[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: issues are not being filed in the tracker
+          description: Gitea/GitHub issue creation failed {{ $value | humanize }} times in the last hour. Incidents are still captured as Pending, without a linked issue.
+
+      - alert: VictoriaGatewayTelegramButtonRefused
+        expr: sum by (job, result) (increase(victoria_gateway_telegram_actions_total{job="victoria-gateway", action="denied", result=~"bad_signature|user_not_allowed|wrong_chat"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: a Telegram button press was refused ({{ $labels.result }})
+          description: Someone outside telegram_actions.allowed_user_ids, another chat, or edited callback data pressed a victoria-gateway button. Check the audit log for telegram.action_denied.
