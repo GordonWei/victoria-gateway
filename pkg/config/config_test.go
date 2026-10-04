@@ -551,3 +551,15 @@ func TestValidate_Notifications_TelegramRejectsBodyTemplate(t *testing.T) {
 	c.Notifications.Channels[0].BodyTemplate = `{}`
 	wantErrContaining(t, c.Validate(), "body_template only applies to type webhook")
 }
+
+func TestLoad_MetricsOptionsAndEnvOverride(t *testing.T) {
+	path := writeTempConfig(t, "loki:\n  endpoint: \"http://loki:3100\"\nsummarizer:\n  endpoint: \"http://llm:1234\"\n  model: \"m\"\nmetrics_listen_addr: \":9091\"\nmetrics_auth:\n  username: \"prom\"\n  password: \"from-yaml\"\n")
+	t.Setenv("VICTORIA_GATEWAY_METRICS_AUTH_PASSWORD", "from-env")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MetricsListenAddr != ":9091" || cfg.MetricsAuth == nil || cfg.MetricsAuth.Username != "prom" || cfg.MetricsAuth.Password != "from-env" {
+		t.Errorf("metrics options = %q %+v", cfg.MetricsListenAddr, cfg.MetricsAuth)
+	}
+}

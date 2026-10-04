@@ -210,6 +210,7 @@ set):
 | `rag.github.token` | `VICTORIA_GATEWAY_GITHUB_TOKEN` |
 | `webhook_auth.password` | `VICTORIA_GATEWAY_WEBHOOK_AUTH_PASSWORD` |
 | `webui_auth.password` | `VICTORIA_GATEWAY_WEBUI_AUTH_PASSWORD` |
+| `metrics_auth.password` | `VICTORIA_GATEWAY_METRICS_AUTH_PASSWORD` |
 | `alertmanager.password` | `VICTORIA_GATEWAY_ALERTMANAGER_PASSWORD` |
 
 Each one only overrides a field inside a block `config.yaml` already
@@ -350,6 +351,51 @@ Request bodies are capped at 4 MiB regardless of auth (`413` above that).
 A real Alertmanager payload is a few KB even for a large group; the cap
 only keeps a misbehaving client from making the process buffer an
 arbitrarily large body.
+
+### Securing `/metrics`
+
+`/metrics` is served on the main port with no auth by default, as it always
+has been, so existing Prometheus scrape configs keep working. It exposes
+counts and route/target/channel names, not log content. Two optional
+settings change that:
+
+```yaml
+metrics_listen_addr: ":9091"   # serve /metrics on a second listener; the main port then 404s it
+metrics_auth:                  # require Basic Auth on /metrics, wherever it is served
+  username: "prometheus"
+  password: "a-real-secret"    # or VICTORIA_GATEWAY_METRICS_AUTH_PASSWORD
+```
+
+They are independent: `metrics_auth` alone protects `/metrics` on the main
+port; `metrics_listen_addr` alone moves it, e.g. to a port you don't
+publish beyond the monitoring network. There is no default address for
+the second listener. Inside a container, bind `":9091"` (and publish it)
+rather than `127.0.0.1:9091`, or Prometheus outside the container can't
+reach it. `metrics_listen_addr` on the same address as the main listener
+is a startup error. `/healthz` stays on the main port. Both listeners
+are shut down together on SIGTERM. *(v1.14.0, unreleased.)*
+
+### Build version
+
+`victoria-gateway version` prints the build's version and commit, and
+`/metrics` carries them as `victoria_gateway_build_info{version="...",commit="..."} 1`.
+They are set at build time:
+
+```bash
+docker build \
+  --build-arg VERSION=v1.14.0 \
+  --build-arg COMMIT=$(git rev-parse --short HEAD) \
+  -t victoria-gateway:v1.14.0 .
+# or, without Docker:
+go build -ldflags "-X main.version=v1.14.0 -X main.commit=$(git rev-parse --short HEAD)" ./cmd/victoria-gateway
+```
+
+Without the build args the image reports `version="docker"`,
+`commit="unknown"` (a plain `go build`: `dev`/`unknown`). The version is
+whatever you pass, not derived from git: build the release image with
+the version you intend to tag, verify it on the target, then put the tag
+on that same commit, so `version` matches the tag and `commit` matches
+what's deployed. *(v1.14.0, unreleased.)*
 
 ### Startup warnings
 

@@ -60,6 +60,17 @@ On the monitoring host, from the repo root:
 docker build -t victoria-gateway:latest .
 ```
 
+To have the running service report its version (`victoria-gateway
+version`, and `victoria_gateway_build_info` on `/metrics`), pass it in;
+without these the image reports `docker`/`unknown`:
+
+```bash
+docker build \
+  --build-arg VERSION=v1.14.0 \
+  --build-arg COMMIT=$(git rev-parse --short HEAD) \
+  -t victoria-gateway:latest .
+```
+
 ### 2A.2 Create the config
 
 Copy the annotated template next to your stack's `docker-compose.yml`. The
@@ -584,8 +595,10 @@ How to know it actually works, as opposed to merely running:
 
 ```bash
 git pull
-docker build -t victoria-gateway:latest .
+docker build --build-arg VERSION=$(git describe --tags --always) \
+  --build-arg COMMIT=$(git rev-parse --short HEAD) -t victoria-gateway:latest .
 docker compose up -d victoria-gateway
+docker compose exec victoria-gateway victoria-gateway version
 docker compose logs -f victoria-gateway
 ```
 

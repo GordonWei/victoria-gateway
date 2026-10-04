@@ -74,6 +74,32 @@ type Counters struct {
 	localLLMDuration  durationStat
 	cloudLLMDuration  labeledDuration // target
 	ragSearchDuration durationStat    // embed + search, the retrieval side only
+
+	// buildInfo is the running binary's version and commit, exposed as
+	// victoria_gateway_build_info once SetBuildInfo is called.
+	buildInfo atomic.Pointer[[2]string]
+}
+
+// SetBuildInfo records the binary's version and commit for the
+// victoria_gateway_build_info gauge. Until it is called the gauge is not
+// emitted.
+func (c *Counters) SetBuildInfo(version, commit string) {
+	if c == nil {
+		return
+	}
+	c.buildInfo.Store(&[2]string{version, commit})
+}
+
+func (c *Counters) writeBuildInfo(w io.Writer) {
+	if c == nil {
+		return
+	}
+	bi := c.buildInfo.Load()
+	if bi == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "# HELP victoria_gateway_build_info Version and commit of the running binary (always 1).\n# TYPE victoria_gateway_build_info gauge\nvictoria_gateway_build_info{version=\"%s\",commit=\"%s\"} 1\n",
+		escapeLabelValue(bi[0]), escapeLabelValue(bi[1]))
 }
 
 // labeledCounter is a counter family with one string label. Zero value
@@ -517,6 +543,7 @@ func (c *Counters) writeMitigationPlan(w io.Writer) {
 func (c *Counters) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		c.writeBuildInfo(w)
 		for _, d := range c.snapshot() {
 			// A write failure here just means the client went away
 			// mid-scrape; nothing useful to do about it, and the next

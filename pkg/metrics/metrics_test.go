@@ -222,3 +222,26 @@ func TestCounters_LabelValuesUsePrometheusEscaping(t *testing.T) {
 		t.Error("exposition contains a Go-style \\t escape, which the text format doesn't define")
 	}
 }
+
+func TestCounters_BuildInfo(t *testing.T) {
+	scrapeBody := func(c *Counters) string {
+		rec := httptest.NewRecorder()
+		c.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+		return rec.Body.String()
+	}
+	c := &Counters{}
+	if body := scrapeBody(c); strings.Contains(body, "victoria_gateway_build_info") {
+		t.Errorf("build_info emitted before SetBuildInfo:\n%s", body)
+	}
+	c.SetBuildInfo("v1.14.0", `ab"c1\23`)
+	body := scrapeBody(c)
+	want := `victoria_gateway_build_info{version="v1.14.0",commit="ab\"c1\\23"} 1`
+	if !strings.Contains(body, want) || !strings.Contains(body, "# TYPE victoria_gateway_build_info gauge") {
+		t.Errorf("metrics output missing %q, got:\n%s", want, body)
+	}
+	var nilC *Counters
+	nilC.SetBuildInfo("x", "y") // must not panic
+	if strings.Contains(scrapeBody(nilC), "build_info") {
+		t.Error("nil Counters emitted build_info")
+	}
+}

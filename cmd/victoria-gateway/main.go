@@ -10,7 +10,8 @@
 // pulls resolutions back from closed Gitea issues linked to pending
 // records — see sync.go; `victoria-gateway suppression-candidates` prints
 // (never applies) candidate Alertmanager suppression rules derived from
-// confirmed-incident history — see suppression.go.
+// confirmed-incident history — see suppression.go; `victoria-gateway
+// version` prints the build's version and commit.
 package main
 
 import (
@@ -42,9 +43,24 @@ import (
 	"github.com/gordonwei/victoria-gateway/pkg/tracker"
 )
 
+// version and commit identify the build. They are set at link time,
+//
+//	go build -ldflags "-X main.version=v1.14.0 -X main.commit=$(git rev-parse --short HEAD)" ./cmd/victoria-gateway
+//
+// (the Dockerfile does this from its VERSION and COMMIT build args), and
+// show up in `victoria-gateway version` and the
+// victoria_gateway_build_info metric.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "version":
+			fmt.Printf("victoria-gateway %s (commit %s)\n", version, commit)
+			return
 		case "note":
 			runNote(os.Args[2:])
 			return
@@ -86,6 +102,10 @@ func runServe(args []string) {
 	if *port != "" {
 		addr = ":" + *port
 	}
+	if cfg.MetricsListenAddr != "" && config.SameListenAddr(cfg.MetricsListenAddr, addr) {
+		fmt.Fprintf(os.Stderr, "❌ metrics_listen_addr %q is the same address the server listens on (%s)\n", cfg.MetricsListenAddr, addr)
+		os.Exit(1)
+	}
 
 	lookback := time.Duration(cfg.Loki.LookbackSec) * time.Second
 	if lookback <= 0 {
@@ -115,6 +135,7 @@ func runServe(args []string) {
 	}
 	summarizer := buildSummarizer(cfg.Summarizer)
 	counters := &metrics.Counters{}
+	counters.SetBuildInfo(version, commit)
 	summarizer.SetObserver(counters)
 
 	var cloud model.LLM
@@ -257,7 +278,7 @@ func runServe(args []string) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.Handle("/metrics", h.metrics.Handler())
+	metricsSrv := registerMetrics(cfg, mux, h.metrics)
 	if ragEnabled {
 		mux.Handle("/incidents", webUI(http.HandlerFunc(h.handleIncidentsList)))
 		mux.Handle("/incidents/", webUI(http.HandlerFunc(h.handleIncidentDetail)))
@@ -281,18 +302,7 @@ func runServe(args []string) {
 	}
 	mux.Handle("/maintenance-windows", webUI(http.HandlerFunc(h.handleMaintenanceWindows)))
 
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-		// A slow or stalled client mustn't pin a goroutine forever.
-		// ReadTimeout is generous because Alertmanager payloads are small
-		// and local — it's a stall guard, not a pacing device. No
-		// WriteTimeout: in sync mode the response legitimately takes as
-		// long as the slowest analysis (minutes on a cloud escalation).
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
+	srv := newHTTPServer(addr, mux)
 
 	fmt.Printf("🚀 victoria-gateway listening on %s (POST /webhook/alertmanager, async=%v)\n", addr, cfg.WebhookAsync)
 	if router != nil {
@@ -313,6 +323,9 @@ func runServe(args []string) {
 	for _, line := range securityWarnings(cfg) {
 		fmt.Printf("   %s\n", line)
 	}
+	if metricsSrv != nil {
+		fmt.Printf("   /metrics on %s (not on the main port)\n", metricsSrv.Addr)
+	}
 
 	// Graceful shutdown: SIGTERM/SIGINT stops accepting new requests,
 	// then waits (bounded) for in-flight analyses — which may be running
@@ -323,8 +336,11 @@ func runServe(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	serveErr := make(chan error, 1)
+	serveErr := make(chan error, 2)
 	go func() { serveErr <- srv.ListenAndServe() }()
+	if metricsSrv != nil {
+		go func() { serveErr <- fmt.Errorf("metrics listener: %w", metricsSrv.ListenAndServe()) }()
+	}
 
 	select {
 	case err := <-serveErr:
@@ -340,6 +356,11 @@ func runServe(args []string) {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: server close: %v", err)
+	}
+	if metricsSrv != nil {
+		if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown: metrics server close: %v", err)
+		}
 	}
 
 	done := make(chan struct{})

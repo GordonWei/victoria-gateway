@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"sort"
@@ -18,8 +19,20 @@ import (
 )
 
 type Config struct {
-	ListenAddr string     `yaml:"listen_addr"` // e.g. ":8090"
-	Loki       LokiConfig `yaml:"loki"`
+	ListenAddr string `yaml:"listen_addr"` // e.g. ":8090"
+	// MetricsListenAddr, when set, moves /metrics off the main listener
+	// onto a second one at this address (e.g. ":9091", or
+	// "127.0.0.1:9091" on a host where Prometheus runs alongside). The
+	// main port then answers /metrics with 404. Unset (the default) keeps
+	// /metrics on the main port exactly as before, and no second listener
+	// is started.
+	MetricsListenAddr string `yaml:"metrics_listen_addr"`
+	// MetricsAuth, when set, requires HTTP Basic Auth on /metrics,
+	// wherever it is served. Unset (the default) leaves it open, as it
+	// has always been. Password can come from
+	// VICTORIA_GATEWAY_METRICS_AUTH_PASSWORD.
+	MetricsAuth *WebhookAuthConfig `yaml:"metrics_auth"`
+	Loki        LokiConfig         `yaml:"loki"`
 	// LogSource, if set, switches which backend summarizeOne fetches an
 	// alert's logs from — CloudWatch Logs Insights or GCP Cloud Logging
 	// instead of the Loki block above. Nil (the default) or
@@ -802,6 +815,12 @@ func (c *Config) Validate() error {
 	if c.WebUIAuth != nil && (c.WebUIAuth.Username == "" || c.WebUIAuth.Password == "") {
 		return fmt.Errorf("webui_auth is set but username/password is empty — set both, or remove the webui_auth block to leave the web pages unauthenticated")
 	}
+	if c.MetricsAuth != nil && (c.MetricsAuth.Username == "" || c.MetricsAuth.Password == "") {
+		return fmt.Errorf("metrics_auth is set but username/password is empty — set both, or remove the metrics_auth block to leave /metrics unauthenticated")
+	}
+	if c.MetricsListenAddr != "" && SameListenAddr(c.MetricsListenAddr, c.ListenAddr) {
+		return fmt.Errorf("metrics_listen_addr %q is the same address as listen_addr — leave metrics_listen_addr unset to serve /metrics on the main port", c.MetricsListenAddr)
+	}
 	if c.RAG != nil && c.RAG.Enabled {
 		if c.RAG.PostgresDSN == "" || c.RAG.EmbeddingEndpoint == "" || c.RAG.EmbeddingModel == "" {
 			return fmt.Errorf("rag.enabled is true but postgres_dsn/embedding_endpoint/embedding_model is missing in config.yaml")
@@ -1358,6 +1377,11 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.WebUIAuth.Password = v
 		}
 	}
+	if cfg.MetricsAuth != nil {
+		if v := os.Getenv("VICTORIA_GATEWAY_METRICS_AUTH_PASSWORD"); v != "" {
+			cfg.MetricsAuth.Password = v
+		}
+	}
 	if cfg.RAG != nil {
 		if v := os.Getenv("VICTORIA_GATEWAY_RAG_POSTGRES_DSN"); v != "" {
 			cfg.RAG.PostgresDSN = v
@@ -1386,4 +1410,27 @@ func EnvName(name string) string {
 		}
 	}
 	return string(b)
+}
+
+// SameListenAddr reports whether two listen addresses would bind the same
+// port on an overlapping interface: an empty address means the default
+// ":8090", and an empty host (all interfaces) overlaps any host.
+func SameListenAddr(a, b string) bool {
+	norm := func(addr string) (host, port string) {
+		if addr == "" {
+			addr = ":8090"
+		}
+		h, p, err := net.SplitHostPort(addr)
+		if err != nil {
+			return addr, ""
+		}
+		return h, p
+	}
+	ah, ap := norm(a)
+	bh, bp := norm(b)
+	if ap != bp {
+		return false
+	}
+	wild := func(h string) bool { return h == "" || h == "0.0.0.0" || h == "::" }
+	return ah == bh || wild(ah) || wild(bh)
 }

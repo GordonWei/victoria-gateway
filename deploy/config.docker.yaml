@@ -33,6 +33,16 @@ listen_addr: ":8090"
 #   username: "ops"
 #   password: "REPLACE-a-real-secret"
 
+# Optional. /metrics is served on the main port without auth by default
+# (unchanged). metrics_listen_addr moves it to a second listener (the main
+# port then 404s it); metrics_auth requires Basic Auth on it wherever it
+# is served. Inside a container, bind a reachable address (":9091"), not
+# 127.0.0.1, or Prometheus outside the container can't scrape it.
+# metrics_listen_addr: ":9091"
+# metrics_auth:
+#   username: "prometheus"
+#   password: "REPLACE-a-real-secret"
+
 loki:
   endpoint: "http://loki:3100"   # Loki's service name on the same docker network
   lookback_sec: 300

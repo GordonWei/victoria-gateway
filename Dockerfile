@@ -8,7 +8,15 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=docker" -o /out/victoria-gateway ./cmd/victoria-gateway/
+# VERSION and COMMIT end up in `victoria-gateway version` and the
+# victoria_gateway_build_info metric. Pass them explicitly, e.g.
+#   docker build --build-arg VERSION=v1.14.0 --build-arg COMMIT=$(git rev-parse --short HEAD) .
+# Not derived from `git describe` here: the build context has no .git, and
+# an untagged commit would describe as vX.Y.Z-N-gSHA anyway. Unset, they
+# fall back to "docker"/"unknown", the same version string as before.
+ARG VERSION=docker
+ARG COMMIT=unknown
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/victoria-gateway ./cmd/victoria-gateway/
 
 # Alpine, not distroless: when this misbehaves in a home lab at 11pm, a
 # `docker exec sh` to poke at the mounted config beats reaching for a debug

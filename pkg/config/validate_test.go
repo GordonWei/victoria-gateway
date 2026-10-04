@@ -2,6 +2,7 @@ package config
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -272,5 +273,50 @@ func TestValidateForServe_OpenAICompatibleWithoutAPIKey(t *testing.T) {
 	c.CloudFallbacks = []*CloudConfig{{Provider: "openai-compatible", Endpoint: "http://ollama:11434", Model: "m2"}}
 	if err := c.ValidateForServe(); err != nil {
 		t.Errorf("with fallback: ValidateForServe = %v, want nil", err)
+	}
+}
+
+func TestSameListenAddr(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{":9091", ":8090", false},
+		{":8090", "", true},
+		{"", "", true},
+		{"127.0.0.1:8090", ":8090", true},
+		{"127.0.0.1:9091", "127.0.0.2:9091", false},
+		{"0.0.0.0:9091", "127.0.0.1:9091", true},
+		{"[::]:9091", "127.0.0.1:9091", true},
+		{"127.0.0.1:9091", ":8090", false},
+	} {
+		if got := SameListenAddr(tc.a, tc.b); got != tc.want {
+			t.Errorf("SameListenAddr(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestValidate_MetricsOptions(t *testing.T) {
+	base := func() *Config {
+		return &Config{Loki: LokiConfig{Endpoint: "http://loki:3100"}, Summarizer: LLMConfig{Endpoint: "http://llm", Model: "m"}}
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatalf("base config invalid: %v", err)
+	}
+	c := base()
+	c.MetricsListenAddr = ":9091"
+	c.MetricsAuth = &WebhookAuthConfig{Username: "prom", Password: "p"}
+	if err := c.Validate(); err != nil {
+		t.Errorf("valid metrics options rejected: %v", err)
+	}
+	c = base()
+	c.MetricsListenAddr = ":8090" // listen_addr unset = :8090
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "metrics_listen_addr") {
+		t.Errorf("same address accepted: %v", err)
+	}
+	c = base()
+	c.MetricsAuth = &WebhookAuthConfig{Username: "prom"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "metrics_auth") {
+		t.Errorf("empty metrics_auth password accepted: %v", err)
 	}
 }
