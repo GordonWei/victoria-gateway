@@ -345,3 +345,28 @@ webhook_async: true
 #       channels: ["critical-ops", "itsm-webhook"]
 #     - default: true
 #       channels: ["critical-ops"]
+
+# Telegram action buttons (v1.14.0): acknowledge / escalate now / silence
+# (at most two hours) on notifications to the top-level telegram chat.
+# Presses are read by long-polling getUpdates (no inbound webhook). Off
+# by default; needs rag.enabled with the audit log on, and the alertmanager
+# block above for the silence button. Use a bot token nothing else polls.
+# See README "Action buttons on Telegram notifications".
+# telegram_actions:
+#   enabled: true
+#   allowed_user_ids: [0]          # REPLACE with Telegram user ids
+#   hmac_secret: ""                # 32+ chars; prefer VICTORIA_GATEWAY_TELEGRAM_ACTIONS_HMAC_SECRET
+#   # button_ttl_sec: 3600
+#   # silence_duration_sec: 3600   # at most 7200
+
+# Read-only MCP server (v1.14.0) for `victoria-gateway mcp`: search,
+# get and list incidents from the RAG store, masked and capped. Off by
+# default; stdio unless the http block is set and --http is passed. See
+# README "Read-only MCP server for agents".
+# mcp:
+#   enabled: true
+#   # max_results: 5
+#   # max_output_bytes: 16384
+#   # http:
+#   #   listen_addr: "127.0.0.1:9300"
+#   #   bearer_token: ""           # 32+ chars; prefer VICTORIA_GATEWAY_MCP_BEARER_TOKEN

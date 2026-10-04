@@ -1985,6 +1985,44 @@ actual datasource in your Grafana — either name/configure your Postgres
 datasource with that UID, or re-point each panel's datasource after
 importing.
 
+*(v1.14.0, unreleased.)* `deploy/grafana-dashboard-metrics.json` is the
+counterpart over `/metrics`, through a Prometheus datasource with UID
+`victoria-gateway-prometheus` and a `job` variable defaulting to
+`victoria-gateway`: running version and commit, up, alerts and errors by
+route, escalations by target (ok, failed, rate limited, no target),
+average durations (whole analysis, local and cloud model, log query, RAG
+search), local model breaker state, notifications by channel, RAG and
+tracker failures, skipped/refused deliveries, and Telegram button
+presses.
+
+`deploy/prometheus-rules.yaml` is a rule group for watching
+victoria-gateway itself (load it with `rule_files:`; it assumes the
+scrape job is named `victoria-gateway`):
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `VictoriaGatewayDown` | the target hasn't answered a scrape for 5 minutes | critical |
+| `VictoriaGatewayMetricsAbsent` | there is no `up` series for the job at all | warning |
+| `VictoriaGatewayVersionChanged` | `build_info` shows a version it didn't show an hour ago | info |
+| `VictoriaGatewayAnalysisErrors` | over 20% of alerts fail before a summary, for 15 minutes | warning |
+| `VictoriaGatewayEscalationFailureRate` | over half of the cloud escalation calls in 30 minutes failed (at least 3) | warning |
+| `VictoriaGatewayEscalationRateLimited` | `escalation.max_per_hour` stopped an escalation in the last hour | info |
+| `VictoriaGatewayNotificationFailures` | any channel's push failed after retries in 15 minutes | critical |
+| `VictoriaGatewayLocalLLMBreakerOpen` | a local backend's breaker stayed open for 10 minutes | warning |
+| `VictoriaGatewayLocalLLMSlow` | the 30-minute average local model call is over twice the 7-day average | warning |
+| `VictoriaGatewayRAGFailures` | RAG capture or search failed, for 15 minutes | warning |
+| `VictoriaGatewayTrackerFailures` | issue creation failed in the last hour | warning |
+| `VictoriaGatewayTelegramButtonRefused` | a button press was refused as not allowed, wrong chat or bad signature | warning |
+
+If your Alertmanager also feeds victoria-gateway, route
+`VictoriaGatewayDown` to a receiver that doesn't depend on it. Local
+model degradation is judged on call latency only: there is no
+tokens-per-second metric yet. A test (`pkg/metrics/deploy_contract_test.go`)
+checks that both files only use metric names `/metrics` really exposes
+and that the rules file has the rule-file structure; it does not parse
+PromQL, so run `promtool check rules deploy/prometheus-rules.yaml` where
+promtool is installed.
+
 ## Read-only MCP server for agents
 
 *(v1.14.0, unreleased.)* `victoria-gateway mcp` serves three read-only
@@ -2142,6 +2180,7 @@ unlabeled `0`.
 | `victoria_gateway_local_llm_skipped_total` (local backend skipped without a chat call) | `backend` (`summarizer` or `summarizer.fallbacks[N]`), `reason` (`probe` or `breaker`) | same |
 | `victoria_gateway_local_llm_breaker_open` (gauge, 1 = open) | `backend` | same; one series per backend with a breaker from startup, none if every breaker is off |
 | `victoria_gateway_mitigation_plan_total` (mitigation plans requested alongside a successful escalation; only `aws-devops-agent` with `mitigation_plan: true` today) | `target`, `result` (`ok`, `none`, `error`) | as for `escalations_total` |
+| `victoria_gateway_telegram_actions_total` (Telegram button presses, v1.14.0) | `action` (`ack`, `escalate`, `silence`, `denied`), `result` (outcome, or the refusal reason for `denied`) | same |
 
 Label values are written with the text format's own escaping (only `\`,
 `"` and newline), so a route, target or channel name comes back from a
@@ -2195,6 +2234,39 @@ unless you opt in:
 - `victoria-gateway mcp`: read-only MCP tools over the RAG store, off
   unless `mcp.enabled: true`, stdio by default, HTTP only with a bearer
   token (**Read-only MCP server for agents**).
+- `deploy/grafana-dashboard-metrics.json` (a dashboard over `/metrics`)
+  and `deploy/prometheus-rules.yaml` (alerts for victoria-gateway itself),
+  plus `victoria_gateway_telegram_actions_total` (**Grafana dashboard**).
+
+Security notes for the two new ways in (both off by default):
+
+- The MCP server is a new path for stored incident text to leave the
+  process. It is read-only, masks credentials on the way out whatever
+  `rag.mask_log_excerpt` says, caps result count and size, audits every
+  call, and on HTTP requires a bearer token; it has no TLS of its own.
+  An agent using it can read anything the tools return, and labelling
+  results as untrusted data lowers, but can't remove, the risk of a
+  stored text steering that agent.
+- The Telegram buttons can spend money (escalate) and hide alerts
+  (silence). Only allowlisted user ids in the configured chat can use
+  them, each button works once and expires, callback data is
+  HMAC-signed and carries no action or target, escalation goes through
+  `escalation.max_per_hour`, a silence lasts at most two hours, and
+  every press, refused or not, is audited. Keep `hmac_secret` and the
+  bot token out of the config file (environment variables), and set
+  `escalation.max_per_hour`.
+
+## Roadmap
+
+Later, not in v1.14.0:
+
+- OpenTelemetry tracing (one trace per alert across the log query,
+  local model, cloud escalation and RAG), as an option that stays off
+  unless an OTLP endpoint is configured, and that records timings and
+  status only, never prompts or log lines.
+- A tokens-per-second metric for the local model, so
+  `VictoriaGatewayLocalLLMSlow` can tell a slower model from longer
+  prompts.
 
 ## Status
 
