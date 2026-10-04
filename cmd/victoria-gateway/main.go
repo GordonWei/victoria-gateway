@@ -310,6 +310,9 @@ func runServe(args []string) {
 	for _, line := range startupNotes(cfg) {
 		fmt.Printf("   %s\n", line)
 	}
+	for _, line := range securityWarnings(cfg) {
+		fmt.Printf("   %s\n", line)
+	}
 
 	// Graceful shutdown: SIGTERM/SIGINT stops accepting new requests,
 	// then waits (bounded) for in-flight analyses — which may be running

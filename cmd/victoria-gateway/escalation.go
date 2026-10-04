@@ -206,6 +206,40 @@ func startupNotes(cfg *config.Config) []string {
 	return notes
 }
 
+// securityWarnings returns startup warnings for default-open settings that
+// become risky in combination. None of them changes behavior — every
+// default stays as it was — they only make the exposure visible:
+//
+//   - a cloud escalation target with no webhook_auth: anyone who can reach
+//     the webhook can make the service spend money (a forged alertname on
+//     always_cloud, or annotations that coax the local model into
+//     escalate: true);
+//   - a cloud escalation target with escalation.max_per_hour at 0
+//     (unlimited): nothing bounds that spend;
+//   - a cloud escalation target with rag.mask_log_excerpt off: log lines
+//     reach the cloud model as they are;
+//   - RAG on with no webui_auth: /incidents and /pending show log
+//     excerpts to anyone who can reach the port.
+func securityWarnings(cfg *config.Config) []string {
+	var w []string
+	ragOn := cfg.RAG != nil && cfg.RAG.Enabled
+	if cfg.Cloud != nil || len(cfg.EscalationTargets) > 0 {
+		if cfg.WebhookAuth == nil {
+			w = append(w, "⚠️  cloud escalation is configured but webhook_auth is not set — anyone who can reach /webhook/alertmanager can trigger paid cloud calls")
+		}
+		if cfg.Escalation.MaxPerHour == 0 {
+			w = append(w, "⚠️  cloud escalation is configured with escalation.max_per_hour 0 (unlimited) — nothing caps how many alerts go to a paid model")
+		}
+		if !ragOn || !cfg.RAG.MaskLogExcerpt {
+			w = append(w, "⚠️  cloud escalation is configured but rag.mask_log_excerpt is off — log lines are sent to the cloud model unmasked (masking needs rag.enabled)")
+		}
+	}
+	if ragOn && cfg.WebUIAuth == nil {
+		w = append(w, "⚠️  rag is enabled but webui_auth is not set — /incidents and /pending show stored log excerpts without authentication")
+	}
+	return w
+}
+
 // defaultShutdownGrace is shutdown_grace_sec's default.
 const defaultShutdownGrace = 5 * time.Minute
 

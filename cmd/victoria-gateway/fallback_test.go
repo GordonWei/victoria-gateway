@@ -506,3 +506,53 @@ func TestProcessAlert_FailureLogged_SyncAndAsync(t *testing.T) {
 		wantContains(t, "log", logs(), `aiops: alert "mystery_alert" failed: alert has neither`)
 	}
 }
+
+// securityWarnings only reports; each case pins exactly which warnings a
+// combination produces, and a config without cloud or RAG gets none.
+func TestSecurityWarnings(t *testing.T) {
+	loki := config.LokiConfig{Endpoint: "http://loki:3100"}
+	auth := &config.WebhookAuthConfig{Username: "u", Password: "p"}
+	const (
+		noWebhookAuth = "webhook_auth is not set"
+		unlimited     = "max_per_hour 0 (unlimited)"
+		unmasked      = "rag.mask_log_excerpt is off"
+		noWebUIAuth   = "webui_auth is not set"
+	)
+	cases := []struct {
+		name string
+		cfg  *config.Config
+		want []string
+	}{
+		{"no cloud, no rag", &config.Config{Loki: loki}, nil},
+		{"legacy cloud, all defaults", &config.Config{Loki: loki, Cloud: &config.CloudConfig{Provider: "gemini"}},
+			[]string{noWebhookAuth, unlimited, unmasked}},
+		{"escalation_targets only, hardened", &config.Config{
+			Loki:              loki,
+			EscalationTargets: map[string]*config.CloudConfig{"aws": {Provider: "bedrock"}},
+			WebhookAuth:       auth,
+			WebUIAuth:         auth,
+			Escalation:        config.EscalationConfig{MaxPerHour: 20},
+			RAG:               &config.RAGConfig{Enabled: true, MaskLogExcerpt: true},
+		}, nil},
+		{"cloud with mask set but rag disabled", &config.Config{
+			Loki: loki, Cloud: &config.CloudConfig{Provider: "gemini"}, WebhookAuth: auth,
+			Escalation: config.EscalationConfig{MaxPerHour: 5},
+			RAG:        &config.RAGConfig{Enabled: false, MaskLogExcerpt: true},
+		}, []string{unmasked}},
+		{"rag without webui_auth, no cloud", &config.Config{Loki: loki, RAG: &config.RAGConfig{Enabled: true}},
+			[]string{noWebUIAuth}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := securityWarnings(tc.cfg)
+			if len(got) != len(tc.want) {
+				t.Fatalf("warnings = %q, want %d matching %q", got, len(tc.want), tc.want)
+			}
+			for i, w := range tc.want {
+				if !strings.Contains(got[i], w) {
+					t.Errorf("warning[%d] = %q, want it to contain %q", i, got[i], w)
+				}
+			}
+		})
+	}
+}

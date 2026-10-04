@@ -351,6 +351,22 @@ A real Alertmanager payload is a few KB even for a large group; the cap
 only keeps a misbehaving client from making the process buffer an
 arbitrarily large body.
 
+### Startup warnings
+
+Several defaults are open on purpose (they suit a private network and an
+operator trying the service out), but some combinations deserve a second
+look. The server prints a `⚠️` line under the startup banner for each of
+these; none of them changes behavior or blocks startup:
+
+| Condition | Why it matters |
+|---|---|
+| A cloud escalation target (`cloud` or `escalation_targets`) and no `webhook_auth` | Anyone who can reach `/webhook/alertmanager` can trigger paid cloud calls (an `always_cloud` alert name, or annotations that talk the local model into `escalate: true`). |
+| A cloud escalation target and `escalation.max_per_hour: 0` (the default, unlimited) | Nothing caps how many alerts go to a paid model in an hour. |
+| A cloud escalation target and `rag.mask_log_excerpt` off (or RAG disabled, which masking needs) | Log lines reach the cloud model as they are. See **What data this stores, and where it goes**. |
+| `rag.enabled: true` and no `webui_auth` | `/incidents` and `/pending` show stored log excerpts to anyone who can reach the port. |
+
+*(v1.14.0, unreleased.)*
+
 ## Maintenance windows
 
 For planned maintenance where you already know alerts will fire and don't
