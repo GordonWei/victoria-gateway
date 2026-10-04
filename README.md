@@ -1934,6 +1934,35 @@ from the config file if you need to override it without editing the file.
 ./victoria-gateway --config ./config.yaml --port 9000
 ```
 
+### Checking a deployment: `victoria-gateway doctor`
+
+*(v1.14.0, unreleased.)* `victoria-gateway doctor [--config path]` loads
+and validates the config the server would use, then checks every
+dependency it names and prints one line each (`OK`, `WARN`, `FAIL`,
+`SKIP`), exiting 1 if anything failed:
+
+| Check | What it does by default |
+|---|---|
+| Config | Loads and validates; each **Startup warnings** condition is a `WARN` |
+| Log sources | Loki: `GET /ready`. CloudWatch / GCP Cloud Logging: `SKIP` unless `--probe-cloud-logs` (a one-minute read-only query) |
+| Local models | `GET /v1/models` on the summarizer and each fallback |
+| Postgres | Connects, checks for the `dup_of` migration and embedding-model drift (`WARN` if either is off) |
+| Embedding | Embeds one fixed string, reports the dimension |
+| Notifications | Telegram: `getMe` (no message sent). Webhook channels: `SKIP` (no side-effect-free probe) |
+| Tracker | Reads the Gitea/GitHub repository's metadata; never creates or edits an issue |
+| Alertmanager | `GET /api/v2/status` (only with an `alertmanager:` block) |
+| Cloud targets | `SKIP` unless `--probe-cloud`, which sends one tiny billed chat request per chat-style target. `aws-devops-agent` and `gcp-cloud-assist` are never probed: any request starts a billed investigation |
+
+`--send-test` additionally pushes a message marked `[TEST]` to every
+notification channel. `--timeout` (default 15s) bounds each check.
+Without those three flags the command has no side effects, and its
+output never contains a secret from the config: tokens, passwords,
+API keys and DSNs are replaced with `****` even inside error messages
+that quote a request URL. In a container:
+`docker compose exec victoria-gateway victoria-gateway doctor`.
+
+### Health and metrics endpoints
+
 `GET /healthz` returns `200 ok` once the process is up — use it for a
 container healthcheck or a quick "is this running" check. A container
 healthcheck only tells the container runtime *on the same host* though —
@@ -2001,6 +2030,23 @@ directory's README for why), a direct translation of the same
 Either path uses the same binary, the same `config.yaml`, and every
 feature above works identically regardless of which one runs it — pick
 whichever matches where you already run things.
+
+## Unreleased: v1.14.0
+
+Not tagged or released yet. Everything below keeps existing behavior
+unless you opt in:
+
+- `victoria-gateway doctor` and `victoria-gateway version` subcommands.
+- `victoria_gateway_build_info{version,commit}` and `VERSION`/`COMMIT`
+  Docker build args (**Build version**).
+- Optional `metrics_listen_addr` and `metrics_auth` (**Securing `/metrics`**).
+- Startup warnings for risky default-open combinations (**Startup warnings**).
+- The prompt fences alert and log text as data, not instructions
+  (changes the prompt text sent to models; see **Triage**).
+- `rag.mask_log_excerpt` also catches credentials with no `key=` in
+  front (**What data this stores, and where it goes**).
+- A leak check for tracked files in CI and as an optional pre-commit
+  hook (`CONTRIBUTING.md`).
 
 ## Status
 

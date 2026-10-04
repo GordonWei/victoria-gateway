@@ -11,7 +11,8 @@
 // records — see sync.go; `victoria-gateway suppression-candidates` prints
 // (never applies) candidate Alertmanager suppression rules derived from
 // confirmed-incident history — see suppression.go; `victoria-gateway
-// version` prints the build's version and commit.
+// version` prints the build's version and commit; `victoria-gateway
+// doctor` checks the config and probes every dependency — see doctor.go.
 package main
 
 import (
@@ -58,6 +59,9 @@ var (
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "doctor":
+			runDoctorCmd(os.Args[2:])
+			return
 		case "version":
 			fmt.Printf("victoria-gateway %s (commit %s)\n", version, commit)
 			return

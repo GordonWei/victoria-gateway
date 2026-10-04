@@ -135,7 +135,18 @@ A config error (missing endpoint, malformed block) exits immediately with a
 curl -i http://localhost:8090/healthz
 ```
 
-Expect `HTTP/1.1 200 OK` with body `ok`.
+Expect `HTTP/1.1 200 OK` with body `ok`. Then check every dependency the
+config names, without sending anything:
+
+```bash
+docker compose exec victoria-gateway victoria-gateway doctor
+```
+
+Expect no `FAIL` lines (exit code 0). `SKIP` is expected for cloud
+targets and webhook channels; add `--send-test` to push a `[TEST]`
+message to each notification channel, `--probe-cloud` to send one tiny
+billed request to each chat-style cloud target. See README "Checking a
+deployment".
 
 ### 2A.6 Verify: a synthetic alert
 
@@ -567,6 +578,7 @@ arrives) before trusting it.
 How to know it actually works, as opposed to merely running:
 
 - [ ] `curl -i http://localhost:8090/healthz` returns `200 ok`.
+- [ ] `victoria-gateway doctor` (inside the container) reports no `FAIL`.
 - [ ] The synthetic POST from 2A.6 returns `202` (async) or `200` with
       `results` (sync), and the container log shows the Loki query, LLM
       call, and Telegram push with no error lines.
@@ -599,6 +611,7 @@ docker build --build-arg VERSION=$(git describe --tags --always) \
   --build-arg COMMIT=$(git rev-parse --short HEAD) -t victoria-gateway:latest .
 docker compose up -d victoria-gateway
 docker compose exec victoria-gateway victoria-gateway version
+docker compose exec victoria-gateway victoria-gateway doctor
 docker compose logs -f victoria-gateway
 ```
 
