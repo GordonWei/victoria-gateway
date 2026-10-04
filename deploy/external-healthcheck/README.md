@@ -20,7 +20,8 @@ operator installing victoria-gateway would look for it.
    isn't the same host/VM as victoria-gateway itself. This was set up
    against a separate home Kubernetes cluster (`kubectl config
    get-contexts` to see what you have); adjust `BASE_URL` in
-   `cronjob.yaml` if victoria-gateway isn't at `192.0.2.6:8090`.
+   `cronjob.yaml` (the `REPLACE-victoria-gateway-host` placeholder) to
+   the address victoria-gateway listens on.
 
 2. Create the namespace:
 

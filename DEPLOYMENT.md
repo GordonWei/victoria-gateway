@@ -545,7 +545,7 @@ one-liner, no application code, and it doesn't touch this repo's config.
 Follow `deploy/external-healthcheck/README.md` end to end on the other
 cluster: apply `namespace.yaml`, create the Telegram Secret imperatively
 (the token must not go into `cronjob.yaml`), adjust `BASE_URL` in
-`cronjob.yaml` if victoria-gateway isn't at `192.0.2.6:8090`, apply the
+`cronjob.yaml` (the `REPLACE-victoria-gateway-host` placeholder), apply the
 CronJob, and run the manual Job it describes once to confirm the check can
 actually reach the service. Test the failure path for real once (point
 `BASE_URL` somewhere unreachable, re-run, confirm the Telegram message

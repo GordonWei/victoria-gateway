@@ -439,11 +439,10 @@ type anthropicResponse struct {
 // --- Gemini Client (default cloud escalation target) ---
 
 // GeminiClient speaks the Google Gemini generateContent API. It's the
-// default cloud escalation target — chosen over Anthropic because this
-// deployment already has other Gemini API usage (see Cowork's
-// call-gemini skill) and reusing that reduces how many separate API
-// keys/billing accounts an operator has to manage for one home-lab
-// service.
+// default cloud escalation target — chosen over Anthropic because a
+// home-lab operator often already has a Gemini API key for other tools,
+// and reusing it reduces how many separate API keys/billing accounts
+// they have to manage for one small service.
 type GeminiClient struct {
 	endpoint string
 	apiKey   string

@@ -1,9 +1,8 @@
 // Package notify is victoria-gateway's notification layer: it takes one
 // analyzed alert's outcome and delivers it to the right place(s). Before
 // this package, delivery was a single hard-coded Telegram push inside the
-// webhook handler; pulling it out gives three things the design doc
-// (_draft_victoria_gateway_next_features.md §3) asked for — multiple
-// channels, label-based routing, and a stable interface the
+// webhook handler; pulling it out gives three things the design called
+// for — multiple channels, label-based routing, and a stable interface the
 // similar-incident rendering can attach to — without the handler knowing
 // any channel's details.
 //

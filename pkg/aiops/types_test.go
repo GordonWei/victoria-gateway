@@ -155,16 +155,16 @@ func TestLogIdentity_ForLogQuery(t *testing.T) {
 		"https://kmp.tw/health":               "kmp.tw",
 		"https://kmp.tw:8443/health?x=1&y=2":  "kmp.tw",
 		"http://user:pw@probe.example:80/p#f": "probe.example",
-		"tcp://203.0.113.5:22":                   "203.0.113.5",
+		"tcp://203.0.113.5:22":                "203.0.113.5",
 		"http://[2001:db8::1]:9115/probe":     "2001:db8::1",
 		"http://[::1]/":                       "::1",
 		// Not URLs with a host: unchanged.
 		"192.0.2.6:9100": "192.0.2.6:9100",
-		"node1:9100":        "node1:9100",
-		"web01":             "web01",
-		"kmp.tw/health":     "kmp.tw/health",
-		"http://":           "http://",
-		"mailto:ops@x":      "mailto:ops@x",
+		"node1:9100":     "node1:9100",
+		"web01":          "web01",
+		"kmp.tw/health":  "kmp.tw/health",
+		"http://":        "http://",
+		"mailto:ops@x":   "mailto:ops@x",
 	}
 	for in, want := range cases {
 		if got := (LogIdentity{Host: in}).ForLogQuery().Host; got != want {

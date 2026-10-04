@@ -38,7 +38,8 @@ spec:
               image: curlimages/curl:8.11.0
               env:
                 - name: BASE_URL
-                  value: "http://192.0.2.6:8090"
+                  # REPLACE with an address this cluster can reach victoria-gateway at.
+                  value: "http://REPLACE-victoria-gateway-host:8090"
                 - name: BOT_TOKEN
                   valueFrom:
                     secretKeyRef:

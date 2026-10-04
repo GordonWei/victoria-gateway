@@ -1,6 +1,5 @@
 // Package aiops implements the AIOps hub: Alertmanager webhook -> Loki log
-// fetch -> local LLM summary. See Cowork/docs/_draft_orch_aiops_hub_1031_plan.md
-// for the overall design and docs/_agent_handoff.md for task assignment.
+// fetch -> local LLM summary. The README describes the overall design.
 //
 // This file defines the shared contract types used across webhook.go,
 // loki.go, and summarize.go. Defining them here (rather than letting each
@@ -80,8 +79,8 @@ func (a Alert) Host() (host string, ok bool) {
 //     `pod` — the most specific selector available, preferred whenever
 //     both are present.
 //   - Workload-level (KubeDeploymentReplicasMismatch,
-//     KubeStatefulSetReplicasMismatch — see homelab-infra
-//     clusters/home/user/) describe a Deployment or
+//     KubeStatefulSetReplicasMismatch, as shipped by kube-state-metrics
+//     alerting rules) describe a Deployment or
 //     StatefulSet object, which kube-state-metrics never attaches a `pod`
 //     label to (there's no single pod the alert is "about"). Falling back
 //     straight to host/instance here would hit the exact meaningless
