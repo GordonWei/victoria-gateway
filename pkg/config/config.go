@@ -617,7 +617,10 @@ type RAGConfig struct {
 
 	// MaskLogExcerpt, when true, redacts substrings that look like
 	// credential assignments (password=, token:, Authorization: Bearer
-	// ...) using pkg/mask.RedactLikelyCredentials — a shape-preserving,
+	// ...) or credentials recognizable without a key (vendor-prefixed
+	// tokens such as AWS key IDs, GitHub/GitLab/Slack/Google tokens, JWTs,
+	// PEM private keys, passwords in URL userinfo) using
+	// pkg/mask.RedactLikelyCredentials — a shape-preserving,
 	// irreversible rewrite. It is applied to what enters the pipeline (log
 	// lines and the alert's summary/description annotations, so the
 	// summarizer and cloud prompts, the embedder and the stored excerpt

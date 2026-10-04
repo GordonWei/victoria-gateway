@@ -754,16 +754,33 @@ text crosses, so each exit is covered:
 | The incoming Alertmanager webhook body, Loki query text, and this process's own log output | No |
 | Records stored **before** you turned the switch on | No — they stay as they were written (retrieved context from them is redacted on its way into a prompt, but the row itself is not rewritten) |
 
-What "redacted" means is narrow: only `key=value` / `key: value`
-assignments whose key looks like a secret (`password`, `passwd`, `pwd`,
-`secret`, `token`, `api_key`, `access_key`, `credential`) and `Bearer
-<token>` values are rewritten, each value replaced by its shape (digits
-→ `0`, lowercase → `a`, uppercase → `A`), so `password=hunter2secret`
-becomes `password=aaaaaa0aaaaaa` and everything else in the line, IPs and
-ports included, is left readable. A secret with no such key next to it (a
-bare API key in a stack trace, a connection string, a JSON field named
-something else) is not caught. It is not a substitute for not logging
-secrets in the first place.
+What "redacted" means is narrow. Two kinds of text are rewritten, each
+value replaced by its shape (digits → `0`, lowercase → `a`, uppercase →
+`A`), so `password=hunter2secret` becomes `password=aaaaaa0aaaaaa` and
+everything else in the line, IPs and ports included, is left readable:
+
+- `key=value` / `key: value` assignments whose key looks like a secret
+  (`password`, `passwd`, `pwd`, `secret`, `token`, `api_key`,
+  `access_key`, `credential`) and `Bearer <token>` values;
+- credentials recognizable without a key, by a fixed prefix or a rigid
+  structure *(v1.14.0, unreleased)*: AWS access key IDs (`AKIA…`,
+  `ASIA…`), GitHub (`ghp_…`, `github_pat_…`), GitLab (`glpat-…`) and
+  Slack (`xoxb-…`, `hooks.slack.com/services/…`) tokens, Google API keys
+  (`AIza…`), `sk-…` style API keys of 20+ characters, Stripe live keys,
+  Telegram bot tokens, JWTs, PEM private key blocks, and the password in
+  URL userinfo (`postgres://user:password@host`, and any other
+  `scheme://user:password@`). The prefix is kept, so you can still tell
+  what kind of credential was there.
+
+Anything recognizable only by looking random (a git SHA, a UUID, a
+request ID) is deliberately left alone, since that is root-cause
+evidence far more often than it is a secret. So a secret with neither a
+telling key nor a known prefix (a bare password in a stack trace, an
+in-house token format, a JSON field named something else) is still not
+caught, and a PEM key split across separate log lines is caught only on
+the line with the `BEGIN` header. Redacting twice gives the same result
+as once. It is not a substitute for not logging secrets in the first
+place.
 
 Embeddings: turning the switch on changes the text that gets embedded,
 but only the characters of a redacted value, so a new incident should

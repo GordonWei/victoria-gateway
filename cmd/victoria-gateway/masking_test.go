@@ -28,10 +28,19 @@ const (
 // maskingLoki serves one log line that carries a credential.
 func maskingLoki(t *testing.T) *httptest.Server {
 	t.Helper()
+	return maskingLokiLine(t, "login failed password="+secretInLog+" from 203.0.113.5")
+}
+
+// maskingLokiLine serves line as the only log line.
+func maskingLokiLine(t *testing.T, line string) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"status":"success","data":{"resultType":"streams","result":[{"stream":{"host":"db1"},"values":[["%d","login failed password=%s from 203.0.113.5"]]}]}}`,
-			time.Now().UnixNano(), secretInLog)
+		body := map[string]any{"status": "success", "data": map[string]any{"resultType": "streams", "result": []map[string]any{{
+			"stream": map[string]string{"host": "db1"},
+			"values": [][]string{{fmt.Sprint(time.Now().UnixNano()), line}},
+		}}}}
+		_ = json.NewEncoder(w).Encode(body)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -96,7 +105,11 @@ type maskingRig struct {
 
 func newMaskingRig(t *testing.T, maskOn bool) *maskingRig {
 	t.Helper()
-	loki := maskingLoki(t)
+	return newMaskingRigWithLoki(t, maskOn, maskingLoki(t))
+}
+
+func newMaskingRigWithLoki(t *testing.T, maskOn bool, loki *httptest.Server) *maskingRig {
+	t.Helper()
 	rig := &maskingRig{llmReqs: &bodyRecorder{}, embReqs: &bodyRecorder{}, cloud: &recordingCloud{}}
 
 	reply, _ := json.Marshal(map[string]any{"summary": "local saw token=" + secretInSummary, "confidence": "high", "escalate": false, "reason": "x"})
@@ -200,4 +213,41 @@ func TestMasking_Off_ByDefault_NothingRewritten(t *testing.T) {
 	wantContains(t, "local model prompt", rig.llmReqs.all(), secretInLog, secretInAnnot)
 	wantContains(t, "stored log excerpt", rig.store.lastPending.LogExcerpt, secretInLog)
 	wantContains(t, "notification summary", res.Summary, secretInSummary)
+}
+
+// Each credential shape that has no "key=" to anchor on is carried
+// through every exit, not just checked in pkg/mask: the local prompt, the
+// embedding input, the stored excerpt and the issue body. The secret
+// parts are assembled from pieces so this file passes cmd/leakcheck.
+func TestMasking_On_PrefixedCredentials_EveryExit(t *testing.T) {
+	cases := []struct{ name, line, secret string }{
+		{"aws key id", "client " + "AK" + "IA" + "QWERTYUIOPASDFGH" + " denied", "QWERTYUIOPASDFGH"},
+		{"github token", "clone with " + "gh" + "p_" + strings.Repeat("Zq7", 12), strings.Repeat("Zq7", 12)},
+		{"jwt", "auth " + "ey" + "JhbGciOiJIUzI1NiJ9." + "ey" + "JzdWIiOiJib2IifQ.Zm9vYmFyYmF6cXV4", "Zm9vYmFyYmF6cXV4"},
+		{"dsn password", "dial postgres://app:Pw9xQ2zz@db:5432/app refused", "Pw9xQ2zz"},
+		{"pem key", "-----BEGIN EC " + "PRIVATE KEY----- MHcCAQEEIBkg4LVWM9nuwNSk", "MHcCAQEEIBkg4LVWM9nuwNSk"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newMaskingRigWithLoki(t, true, maskingLokiLine(t, tc.line))
+			res := rig.h.summarizeOne(maskingAlert())
+			if res.Error != "" {
+				t.Fatalf("res = %+v", res)
+			}
+			assertNone(t, "local model prompt", rig.llmReqs.all(), tc.secret)
+			assertNone(t, "embedding input", rig.embReqs.all(), tc.secret)
+			assertNone(t, "stored log excerpt", rig.store.lastPending.LogExcerpt, tc.secret)
+			if len(rig.tr.bodies) != 1 {
+				t.Fatalf("issues = %d, want 1", len(rig.tr.bodies))
+			}
+			assertNone(t, "issue body", rig.tr.bodies[0], tc.secret)
+
+			// Not vacuous: with the switch off the same secret does reach
+			// the prompt and the stored excerpt.
+			off := newMaskingRigWithLoki(t, false, maskingLokiLine(t, tc.line))
+			off.h.summarizeOne(maskingAlert())
+			wantContains(t, "unmasked prompt", off.llmReqs.all(), tc.secret)
+			wantContains(t, "unmasked excerpt", off.store.lastPending.LogExcerpt, tc.secret)
+		})
+	}
 }

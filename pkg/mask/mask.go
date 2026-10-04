@@ -14,7 +14,10 @@
 // excerpt indiscriminately.
 package mask
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // credentialPattern matches "key=value"/"key: value"-shaped assignments
 // where the key looks like a secret (password, token, api key, secret,
@@ -37,6 +40,50 @@ var credentialPattern = regexp.MustCompile(
 // before credentialPattern so "Authorization: Bearer ..." isn't
 // double-processed (see credentialPattern's doc comment).
 var bearerPattern = regexp.MustCompile(`(?i)\bBearer\s+([A-Za-z0-9\-_.~+/]{8,}=*)`)
+
+// prefixedPatterns catch credentials that carry no "key=" to anchor on
+// but are recognizable by a fixed vendor prefix or a rigid structure. Only
+// such shapes are listed: anything matched by length or randomness alone
+// (git SHAs, UUIDs, request IDs) is root-cause evidence far more often
+// than it is a secret, and masking it would hide the signal this whole
+// feature is careful to keep. Group 1 is kept verbatim (the prefix, so a
+// reader can still tell which kind of credential was there); group 2 is
+// replaced by its Shape. Because a shaped value still has the same
+// prefix and structure, redacting twice gives the same result as once.
+var prefixedPatterns = []*regexp.Regexp{
+	// AWS access key IDs (long-term AKIA, temporary ASIA, and the other
+	// documented unique-ID prefixes).
+	regexp.MustCompile(`\b(AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)([0-9A-Z]{16})\b`),
+	// GitHub tokens: classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained.
+	regexp.MustCompile(`\b(gh[pousr]_)([A-Za-z0-9]{36,})\b`),
+	regexp.MustCompile(`\b(github_pat_)([A-Za-z0-9_]{22,})\b`),
+	// GitLab personal access tokens.
+	regexp.MustCompile(`\b(glpat-)([A-Za-z0-9_-]{20,})`),
+	// Slack tokens.
+	regexp.MustCompile(`\b(xox[abposr]-)([A-Za-z0-9-]{10,})`),
+	// Slack incoming webhook URL path (the path is the credential).
+	regexp.MustCompile(`(hooks\.slack\.com/services/)([A-Za-z0-9/]{20,})`),
+	// Google API keys.
+	regexp.MustCompile(`\b(AIza)([0-9A-Za-z_-]{35})`),
+	// Anthropic / OpenAI style secret keys. The 20-character floor keeps
+	// short "sk-..." identifiers out.
+	regexp.MustCompile(`\b(sk-(?:ant-|proj-)?)([A-Za-z0-9_-]{20,})`),
+	// Stripe secret and restricted keys.
+	regexp.MustCompile(`\b([sr]k_live_)([0-9A-Za-z]{16,})`),
+	// Telegram bot tokens, bare or inside an api.telegram.org/bot<token>/ URL.
+	regexp.MustCompile(`(?:^|[^0-9A-Za-z]|bot)([0-9]{8,10}:)(AA[A-Za-z0-9_-]{33})`),
+	// JWTs: three base64url segments, the first two JSON objects ("eyJ").
+	regexp.MustCompile(`\b(eyJ)([A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})`),
+	// Passwords in URL userinfo: scheme://user:password@host, which is
+	// also how most database DSNs (postgres://, mysql://, redis://,
+	// amqp://, mongodb://) carry them. The user name stays readable.
+	regexp.MustCompile(`(\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]*:)([^/\s@]+)@`),
+}
+
+// pemPrivateKey matches a PEM private key from its BEGIN line through its
+// END line, or, when a log line was cut before the END line, through the
+// end of the text: anything after a private-key header is key material.
+var pemPrivateKey = regexp.MustCompile(`(?s)(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)(.*?)(-----END [A-Z0-9 ]*PRIVATE KEY-----|$)`)
 
 // Shape rewrites s character-by-character: digits become '0', lowercase
 // letters become 'a', uppercase letters become 'A', and every other
@@ -62,7 +109,8 @@ func Shape(s string) string {
 }
 
 // RedactLikelyCredentials scans s for substrings that look like credential
-// assignments or bearer tokens and replaces just the value portion with
+// assignments, bearer tokens, PEM private keys or vendor-prefixed tokens
+// (see prefixedPatterns) and replaces just the value portion with
 // its Shape — the surrounding text (the key name, punctuation, everything
 // else in the log line) is left exactly as-is, so the excerpt stays
 // readable for diagnosing what actually happened. Call sites should only
@@ -77,6 +125,13 @@ func RedactLikelyCredentials(s string) string {
 		valStart, valEnd := loc[2], loc[3]
 		return m[:valStart] + Shape(m[valStart:valEnd]) + m[valEnd:]
 	})
+	s = pemPrivateKey.ReplaceAllStringFunc(s, func(m string) string {
+		loc := pemPrivateKey.FindStringSubmatchIndex(m)
+		return m[:loc[4]] + Shape(m[loc[4]:loc[5]]) + m[loc[5]:]
+	})
+	for _, re := range prefixedPatterns {
+		s = shapeGroup(re, s, 2)
+	}
 	s = credentialPattern.ReplaceAllStringFunc(s, func(m string) string {
 		loc := credentialPattern.FindStringSubmatchIndex(m)
 		if len(loc) < 6 {
@@ -86,4 +141,27 @@ func RedactLikelyCredentials(s string) string {
 		return m[:valStart] + Shape(m[valStart:valEnd]) + m[valEnd:]
 	})
 	return s
+}
+
+// shapeGroup replaces submatch group g of every match of re in s with its
+// Shape, leaving the rest of each match untouched.
+func shapeGroup(re *regexp.Regexp, s string, g int) string {
+	locs := re.FindAllStringSubmatchIndex(s, -1)
+	if locs == nil {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	last := 0
+	for _, loc := range locs {
+		start, end := loc[2*g], loc[2*g+1]
+		if start < 0 {
+			continue
+		}
+		b.WriteString(s[last:start])
+		b.WriteString(Shape(s[start:end]))
+		last = end
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
