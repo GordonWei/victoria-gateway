@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/gordonwei/victoria-gateway/pkg/aiops"
+	"github.com/gordonwei/victoria-gateway/pkg/alertmanager"
 	"github.com/gordonwei/victoria-gateway/pkg/audit"
 	"github.com/gordonwei/victoria-gateway/pkg/config"
 	"github.com/gordonwei/victoria-gateway/pkg/judge"
@@ -194,6 +195,14 @@ func runServe(args []string) {
 	}
 	h.notifier = notifier
 
+	if cfg.TelegramActionsEnabled() {
+		var sil silencer
+		if cfg.Alertmanager != nil {
+			sil = alertmanager.NewClient(alertmanager.Config{Endpoint: cfg.Alertmanager.Endpoint, Username: cfg.Alertmanager.Username, Password: cfg.Alertmanager.Password})
+		}
+		h.tgActions = newTelegramActions(cfg, h, "", sil)
+	}
+
 	if len(cfg.MaintenanceWindows) > 0 {
 		mw, err := maintenance.ParseWindows(cfg.MaintenanceWindows)
 		if err != nil {
@@ -345,6 +354,12 @@ func runServe(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	if h.tgActions != nil {
+		// Stops with ctx: no new presses are taken once shutdown starts.
+		go h.tgActions.run(ctx)
+		fmt.Printf("   telegram_actions: buttons on, polling getUpdates for presses from %d allowed user(s)\n", len(cfg.TelegramActions.AllowedUserIDs))
+	}
+
 	serveErr := make(chan error, 2)
 	go func() { serveErr <- srv.ListenAndServe() }()
 	if metricsSrv != nil {
@@ -432,17 +447,31 @@ func buildNotifier(cfg *config.Config, m *metrics.Counters) (*notify.Router, err
 		if cfg.Telegram.BotToken != "" {
 			if hasExplicitDefault {
 				log.Printf("notify: top-level telegram block ignored — notifications.routes already has a default route")
+				if cfg.TelegramActionsEnabled() {
+					log.Printf("⚠️  telegram_actions: buttons only go on the top-level telegram chat, which is ignored here — no buttons will be shown")
+				}
 			} else {
-				channels = append(channels, notify.NewTelegramChannel(implicitTelegramChannel, cfg.Telegram.BotToken, cfg.Telegram.ChatID))
+				channels = append(channels, implicitTelegram(cfg))
 				routes = append(routes, notify.Route{Default: true, Channels: []string{implicitTelegramChannel}})
 			}
 		}
 	} else if cfg.Telegram.BotToken != "" {
-		channels = append(channels, notify.NewTelegramChannel(implicitTelegramChannel, cfg.Telegram.BotToken, cfg.Telegram.ChatID))
+		channels = append(channels, implicitTelegram(cfg))
 		routes = append(routes, notify.Route{Default: true, Channels: []string{implicitTelegramChannel}})
 	}
 
 	return notify.NewRouter(channels, routes, onResult)
+}
+
+// implicitTelegram builds the channel for the top-level telegram block —
+// the only one telegram_actions puts buttons on, since its bot is the one
+// polled for presses.
+func implicitTelegram(cfg *config.Config) *notify.TelegramChannel {
+	ch := notify.NewTelegramChannel(implicitTelegramChannel, cfg.Telegram.BotToken, cfg.Telegram.ChatID)
+	if cfg.TelegramActionsEnabled() {
+		ch.EnableActions()
+	}
+	return ch
 }
 
 // implicitTelegramChannel names the channel synthesized from the
@@ -568,6 +597,9 @@ type handler struct {
 	escalationMu          sync.Mutex
 	escalationWindowStart time.Time
 	escalationCount       int
+
+	// tgActions is nil unless telegram_actions.enabled — see tgactions.go.
+	tgActions *telegramActions
 }
 
 // recordAudit is a nil-safe wrapper around h.audit.Record — the same
@@ -717,6 +749,10 @@ type alertResult struct {
 	// mitigationNote is the one-line pointer to an escalation's
 	// mitigation plan for notifications (see mitigationNote()).
 	mitigationNote string
+	// escInput is set only when telegram_actions is on and this alert
+	// stayed on a local result with somewhere to escalate to: what the
+	// escalate button reruns.
+	escInput *escalationInput
 }
 
 func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Request) {
@@ -1027,6 +1063,9 @@ func (h *handler) summarizeOne(alert aiops.Alert) (res alertResult) {
 	var issue int64
 	res.pendingID, issue = h.captureIncident(alert, logs, result, res.AnalyzedBy, res.EscalatedTo)
 	res.mitigationNote = h.mitigationNote(res.AlertName, result.Mitigation, issue)
+	if h.tgActions != nil && res.AnalyzedBy == "local" && len(route.escalations) > 0 {
+		res.escInput = &escalationInput{alert: alert, logs: logs, ragContext: ragContext, steps: route.escalations}
+	}
 	return
 }
 
@@ -1282,5 +1321,6 @@ func (h *handler) notifyResult(res alertResult, labels map[string]string) {
 		PendingURL:  pendingURL,
 
 		MitigationNote: res.mitigationNote,
+		Actions:        h.telegramButtons(res, labels),
 	}, labels)
 }

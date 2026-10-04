@@ -219,7 +219,9 @@ func startupNotes(cfg *config.Config) []string {
 //   - a cloud escalation target with rag.mask_log_excerpt off: log lines
 //     reach the cloud model as they are;
 //   - RAG on with no webui_auth: /incidents and /pending show log
-//     excerpts to anyone who can reach the port.
+//     excerpts to anyone who can reach the port;
+//   - telegram_actions on with a cloud target and max_per_hour 0: the
+//     escalate button spends money with no cap.
 func securityWarnings(cfg *config.Config) []string {
 	var w []string
 	ragOn := cfg.RAG != nil && cfg.RAG.Enabled
@@ -236,6 +238,9 @@ func securityWarnings(cfg *config.Config) []string {
 	}
 	if ragOn && cfg.WebUIAuth == nil {
 		w = append(w, "⚠️  rag is enabled but webui_auth is not set — /incidents and /pending show stored log excerpts without authentication")
+	}
+	if cfg.TelegramActionsEnabled() && (cfg.Cloud != nil || len(cfg.EscalationTargets) > 0) && cfg.Escalation.MaxPerHour == 0 {
+		w = append(w, "⚠️  telegram_actions is on with escalation.max_per_hour 0 (unlimited) — the escalate button is not rate limited")
 	}
 	return w
 }

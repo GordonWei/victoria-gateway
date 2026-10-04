@@ -410,6 +410,7 @@ these; none of them changes behavior or blocks startup:
 | A cloud escalation target and `escalation.max_per_hour: 0` (the default, unlimited) | Nothing caps how many alerts go to a paid model in an hour. |
 | A cloud escalation target and `rag.mask_log_excerpt` off (or RAG disabled, which masking needs) | Log lines reach the cloud model as they are. See **What data this stores, and where it goes**. |
 | `rag.enabled: true` and no `webui_auth` | `/incidents` and `/pending` show stored log excerpts to anyone who can reach the port. |
+| `telegram_actions` on, a cloud escalation target, and `escalation.max_per_hour: 0` | The escalate button has no hourly cap either. |
 
 *(v1.14.0, unreleased.)*
 
@@ -892,6 +893,8 @@ authenticated by `webui_auth` the same as `/incidents` and `/pending`:
 | `suppression.apply_silence` | `suppression-candidates --apply-silences --yes` creates a silence |
 | `escalation.trigger` | an alert is handed to a cloud escalation target, with the reason, the target that answered, and `result=ok` / `result=failed error=...` |
 | `escalation.rate_limited` | `escalation.max_per_hour` stopped an escalation that would otherwise have happened |
+| `telegram.ack`, `telegram.escalate`, `telegram.silence` | a Telegram action button was pressed and carried out, with `result=ok` / `rate_limited` / `no_target` / `error`; silence entries carry the Alertmanager silence id. Actor `telegram:<user id>` (v1.14.0, unreleased; see **Action buttons on Telegram notifications**) |
+| `telegram.action_denied` | a button press was refused: `reason=user_not_allowed` / `wrong_chat` / `bad_signature` / `expired` / `already_used` |
 | `mcp.search_incidents`, `mcp.get_incident`, `mcp.list_pending` | an MCP tool was called, including refused calls (`result=invalid`/`not_found`/`error`); search records the query's length, never its text. Actor `mcp:stdio` or `mcp:http` (v1.14.0, unreleased; see **Read-only MCP server**) |
 
 ```yaml
@@ -1902,6 +1905,68 @@ Setup, once, before turning `rag.enabled` on:
 3. Hit `https://api.telegram.org/bot<token>/getUpdates` in a browser or with
    curl. The `chat.id` field in the response is your `chat_id`.
 
+### Action buttons on Telegram notifications
+
+*(v1.14.0, unreleased.)* With `telegram_actions` on, each notification
+to the top-level `telegram` chat carries up to three buttons:
+
+| Button | What it does | Shown when |
+|---|---|---|
+| ✅ 確認 | Posts "<who> 已確認處理 ..." in the chat, so the others know someone has it. It does **not** confirm the incident into RAG: that needs a written resolution, which stays on `/pending/{id}` (or `note`, or the tracker issue). | always |
+| ☁️ 立即升級 | Sends the alert to the route's cloud escalation target(s) now, with the same masked alert, logs and RAG context the local model saw. The result arrives as a new notification. Counts against `escalation.max_per_hour` like any escalation; when the hour's budget is used up the press is refused and the button stays usable for later. | the local model answered and the route has an escalation target |
+| 🔕 靜默 1h | Creates an Alertmanager silence (the same self-expiring kind `suppression-candidates --apply-silences` makes) on `alertname` plus whichever of `host`, `instance`, `namespace`, `pod`, `deployment`, `statefulset` the alert has. | an `alertmanager:` block is configured |
+
+```yaml
+telegram:
+  bot_token: "..."
+  chat_id: -1001234567890
+rag:
+  enabled: true                    # required: every press is audited (audit_log stays on)
+  # ... postgres_dsn / embedding_endpoint / embedding_model as usual
+telegram_actions:
+  enabled: true
+  allowed_user_ids: [123456789]   # Telegram user ids, not usernames; required
+  hmac_secret: ""                  # at least 32 characters, or VICTORIA_GATEWAY_TELEGRAM_ACTIONS_HMAC_SECRET
+  # button_ttl_sec: 3600           # how long buttons work; 60 to 86400
+  # silence_duration_sec: 3600     # 60 to 7200: two hours is the hard cap
+  # poll_timeout_sec: 30           # getUpdates long-poll timeout
+alertmanager:                      # optional; without it there is no silence button
+  endpoint: "http://alertmanager:9093"
+```
+
+How a press is checked, in this order; anything that fails is answered
+with a short refusal, audited as `telegram.action_denied` and counted in
+`victoria_gateway_telegram_actions_total{action="denied"}`, and nothing
+else happens:
+
+1. **The chat.** The press must come from a message in `telegram.chat_id`.
+2. **The person.** `from.id` must be in `allowed_user_ids`. Being in the
+   group is not enough.
+3. **The signature.** A button's callback data is only `v1:<nonce>:<hmac>`:
+   an HMAC-SHA256 over the nonce with `hmac_secret`. Edited or forged
+   data fails here.
+4. **The nonce.** Which action a button is, and which alert it is for,
+   live only in the server's memory under that nonce, with an expiry. The
+   first press uses it up; a second press, a replayed callback or a
+   double click gets "already handled". Buttons expire after
+   `button_ttl_sec`, and all of them stop working on a restart (nothing
+   is persisted).
+
+Presses arrive by long-polling the Bot API's `getUpdates`, so no inbound
+webhook or public URL is opened. Telegram allows one consumer per bot:
+if the same bot token already has a webhook set, or another process
+polls it, `getUpdates` fails with a 409 conflict (logged and retried
+with backoff). Use a bot token that nothing else polls. Buttons go only
+on the top-level `telegram` chat (whose bot is the one polled), not on
+`notifications.channels` of type `telegram`; with a `notifications`
+block that has its own default route, the top-level chat isn't used and
+a startup line says no buttons will be shown. Every carried-out action is
+audited (`telegram.ack` / `telegram.escalate` / `telegram.silence`, actor
+`telegram:<user id>`), and the escalation itself also writes the usual
+`escalation.trigger` / `escalation.rate_limited` entries. Because of
+that, `telegram_actions` needs the audit log: `rag.enabled: true` with
+`rag.audit_log` left on, or the config is rejected at startup.
+
 ### Grafana dashboard
 
 `deploy/grafana-dashboard.json` is a 3-panel dashboard over the `incidents`
@@ -2123,6 +2188,10 @@ unless you opt in:
   front (**What data this stores, and where it goes**).
 - A leak check for tracked files in CI and as an optional pre-commit
   hook (`CONTRIBUTING.md`).
+- Telegram action buttons (acknowledge, escalate now, silence up to two
+  hours) via `getUpdates` long polling, off unless
+  `telegram_actions.enabled: true` (**Action buttons on Telegram
+  notifications**).
 - `victoria-gateway mcp`: read-only MCP tools over the RAG store, off
   unless `mcp.enabled: true`, stdio by default, HTTP only with a bearer
   token (**Read-only MCP server for agents**).

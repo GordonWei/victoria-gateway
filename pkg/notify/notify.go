@@ -54,6 +54,18 @@ type Message struct {
 	// The plan itself stays out of the notification: it's long, and
 	// Telegram caps a message at 4096 characters.
 	MitigationNote string
+
+	// Actions are inline buttons to offer with this message (see
+	// telegram_actions). Only a TelegramChannel with EnableActions renders
+	// them; every other channel ignores them.
+	Actions []Action
+}
+
+// Action is one inline button: the label shown and the opaque, signed
+// callback data the button sends back when pressed.
+type Action struct {
+	Label string
+	Data  string
 }
 
 // SimilarIncident is one past confirmed incident reference attached to a

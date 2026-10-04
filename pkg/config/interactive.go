@@ -176,6 +176,9 @@ func (c *Config) validateTelegramActions() error {
 	if c.Telegram.BotToken == "" || c.Telegram.ChatID == 0 {
 		return fmt.Errorf("telegram_actions.enabled is true but the top-level telegram block has no bot_token/chat_id — buttons are only added to that chat")
 	}
+	if !c.RAG.AuditEnabled() {
+		return fmt.Errorf("telegram_actions.enabled is true but the audit log is off — every button press is audited, so it needs rag.enabled with rag.audit_log on (its default)")
+	}
 	if len(t.AllowedUserIDs) == 0 {
 		return fmt.Errorf("telegram_actions.allowed_user_ids is empty — list the Telegram user ids allowed to press the buttons")
 	}

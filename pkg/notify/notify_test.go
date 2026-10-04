@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -536,5 +537,45 @@ func TestFormatPlainText_MatchesTelegramContentWithoutMarkup(t *testing.T) {
 	}
 	if strings.Contains(got, "<b>") || strings.Contains(got, "&lt;") {
 		t.Errorf("plain text should carry no HTML markup:\n%s", got)
+	}
+}
+
+func TestTelegramChannel_ActionsOnlyWhenEnabled(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	msg := Message{AlertName: "X", Host: "h", Summary: "s", Actions: []Action{{Label: "✅ 確認", Data: "v1:n:m"}, {Label: "🔕", Data: "v1:o:p"}}}
+	plain := NewTelegramChannel("tg", "token", 1)
+	plain.apiBase = srv.URL
+	if err := plain.Send(msg); err != nil {
+		t.Fatal(err)
+	}
+	withButtons := NewTelegramChannel("tg", "token", 1)
+	withButtons.apiBase = srv.URL
+	withButtons.EnableActions()
+	if err := withButtons.Send(msg); err != nil {
+		t.Fatal(err)
+	}
+	if err := withButtons.Send(Message{AlertName: "Y"}); err != nil { // no actions: no markup
+		t.Fatal(err)
+	}
+	if _, ok := bodies[0]["reply_markup"]; ok {
+		t.Error("buttons rendered on a channel without EnableActions (default must be unchanged)")
+	}
+	if _, ok := bodies[2]["reply_markup"]; ok {
+		t.Error("empty reply_markup sent for a message without actions")
+	}
+	kb, _ := json.Marshal(bodies[1]["reply_markup"])
+	if string(kb) != `{"inline_keyboard":[[{"callback_data":"v1:n:m","text":"✅ 確認"},{"callback_data":"v1:o:p","text":"🔕"}]]}` {
+		t.Errorf("reply_markup = %s", kb)
 	}
 }

@@ -136,3 +136,25 @@ func TestCounters_MitigationPlanTotal(t *testing.T) {
 		t.Errorf("TYPE declared %d times", n)
 	}
 }
+
+func TestCounters_TelegramActionsTotal(t *testing.T) {
+	if body := scrapeBody(nil); !strings.Contains(body, "# TYPE victoria_gateway_telegram_actions_total counter\nvictoria_gateway_telegram_actions_total 0\n") {
+		t.Errorf("nil counters should expose an unlabeled 0; got:\n%s", body)
+	}
+	c := &Counters{}
+	c.IncTelegramActionsTotal("ack", "ok")
+	c.IncTelegramActionsTotal("denied", "already_used")
+	c.IncTelegramActionsTotal("denied", "already_used")
+	body := scrapeBody(c)
+	for _, want := range []string{
+		`victoria_gateway_telegram_actions_total{action="ack",result="ok"} 1`,
+		`victoria_gateway_telegram_actions_total{action="denied",result="already_used"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("exposition missing %q; got:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "victoria_gateway_telegram_actions_total 0") {
+		t.Error("unlabeled 0 sample kept alongside labeled ones")
+	}
+}

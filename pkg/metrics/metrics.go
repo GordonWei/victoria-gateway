@@ -65,6 +65,9 @@ type Counters struct {
 	// aws-devops-agent with mitigation_plan on), by outcome.
 	mitigationPlanTotal pairedCounter // target, result
 
+	// Telegram button presses (telegram_actions), by action and result.
+	telegramActionsTotal pairedCounter // action, result
+
 	// Duration observations (sum + count pairs, enough for Grafana to
 	// graph an average) — deliberately not histograms: hand-rolling
 	// buckets buys little for a home-lab service, and this keeps the
@@ -410,6 +413,15 @@ func (c *Counters) IncMitigationPlanTotal(target, result string) {
 	}
 }
 
+// IncTelegramActionsTotal counts one Telegram button press: action is
+// "ack", "escalate", "silence" or "denied"; result is the outcome
+// ("ok", "rate_limited", ...) or, for "denied", the refusal reason.
+func (c *Counters) IncTelegramActionsTotal(action, result string) {
+	if c != nil {
+		c.telegramActionsTotal.inc(action, result)
+	}
+}
+
 func (c *Counters) ObserveLocalLLMDuration(d time.Duration) {
 	if c != nil {
 		c.localLLMDuration.observe(d)
@@ -537,6 +549,23 @@ func (c *Counters) writeMitigationPlan(w io.Writer) {
 	}
 }
 
+// writeTelegramActions writes victoria_gateway_telegram_actions_total,
+// with an unlabeled 0 until the first press like the other counters.
+func (c *Counters) writeTelegramActions(w io.Writer) {
+	if c == nil {
+		c = &Counters{}
+	}
+	const name = "victoria_gateway_telegram_actions_total"
+	_, _ = fmt.Fprintf(w, "# HELP %s Telegram button presses, by action (ack, escalate, silence, or denied) and result (or refusal reason).\n# TYPE %s counter\n", name, name)
+	keys, counts := c.telegramActionsTotal.snapshot()
+	if len(keys) == 0 {
+		_, _ = fmt.Fprintf(w, "%s 0\n", name)
+	}
+	for _, k := range keys {
+		_, _ = fmt.Fprintf(w, "%s{action=\"%s\",result=\"%s\"} %d\n", name, escapeLabelValue(k[0]), escapeLabelValue(k[1]), counts[k])
+	}
+}
+
 // Handler serves the counters at GET /metrics in Prometheus text
 // exposition format. Safe to call on a nil *Counters (renders every
 // counter as 0), matching the Inc methods' nil-safety above.
@@ -567,6 +596,7 @@ func (c *Counters) Handler() http.Handler {
 		}
 		c.writeLocalLLMHealth(w)
 		c.writeMitigationPlan(w)
+		c.writeTelegramActions(w)
 		if c == nil {
 			return
 		}

@@ -76,7 +76,7 @@ func TestMCP_Validate(t *testing.T) {
 }
 
 func validActionsConfig() *Config {
-	c := validConfig()
+	c := ragOnConfig()
 	c.Telegram = TelegramConfig{BotToken: "t", ChatID: -100}
 	c.TelegramActions = &TelegramActionsConfig{Enabled: true, AllowedUserIDs: []int64{42}, HMACSecret: testToken32}
 	return c
@@ -102,6 +102,8 @@ func TestTelegramActions_Validate(t *testing.T) {
 	}{
 		{func(c *Config) { c.Telegram.BotToken = "" }, "no bot_token/chat_id"},
 		{func(c *Config) { c.Telegram.ChatID = 0 }, "no bot_token/chat_id"},
+		{func(c *Config) { c.RAG = nil }, "audit log is off"},
+		{func(c *Config) { off := false; c.RAG.AuditLog = &off }, "audit log is off"},
 		{func(c *Config) { c.TelegramActions.AllowedUserIDs = nil }, "allowed_user_ids is empty"},
 		{func(c *Config) { c.TelegramActions.AllowedUserIDs = []int64{-5} }, "positive"},
 		{func(c *Config) { c.TelegramActions.HMACSecret = "short" }, "hmac_secret"},

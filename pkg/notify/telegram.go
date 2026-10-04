@@ -38,7 +38,20 @@ type TelegramChannel struct {
 	// api.telegram.org, sleep replaces real backoff waits.
 	apiBase string
 	sleep   func(time.Duration)
+
+	// withActions makes Send render Message.Actions as an inline
+	// keyboard. Off unless EnableActions is called, so a channel whose
+	// bot nobody is polling for presses never shows dead buttons.
+	withActions bool
 }
+
+// EnableActions makes this channel attach Message.Actions as inline
+// buttons. Only the channel whose bot telegram_actions polls should have
+// this on.
+func (t *TelegramChannel) EnableActions() { t.withActions = true }
+
+// ActionsEnabled reports whether EnableActions was called.
+func (t *TelegramChannel) ActionsEnabled() bool { return t.withActions }
 
 func NewTelegramChannel(name, botToken string, chatID int64) *TelegramChannel {
 	return &TelegramChannel{
@@ -59,21 +72,38 @@ func (t *TelegramChannel) Name() string { return t.name }
 // request path).
 func (t *TelegramChannel) Send(msg Message) error {
 	text := FormatTelegramText(msg)
+	var markup any
+	if t.withActions && len(msg.Actions) > 0 {
+		markup = inlineKeyboard(msg.Actions)
+	}
 	return withRetry(3, []time.Duration{1 * time.Second, 3 * time.Second}, t.sleep, func() (bool, error) {
-		return t.post(text)
+		return t.post(text, markup)
 	})
+}
+
+// inlineKeyboard lays the buttons out in one row.
+func inlineKeyboard(actions []Action) map[string]any {
+	row := make([]map[string]string, len(actions))
+	for i, a := range actions {
+		row[i] = map[string]string{"text": a.Label, "callback_data": a.Data}
+	}
+	return map[string]any{"inline_keyboard": [][]map[string]string{row}}
 }
 
 // post does one sendMessage attempt. The bool return classifies the
 // failure for withRetry: true means "worth another try" (transport
 // error, 429, 5xx), false means the request itself is bad (Telegram
 // rejects malformed HTML with a 400 and will keep rejecting it).
-func (t *TelegramChannel) post(text string) (retryable bool, err error) {
-	body, err := json.Marshal(map[string]any{
+func (t *TelegramChannel) post(text string, markup any) (retryable bool, err error) {
+	payload := map[string]any{
 		"chat_id":    t.chatID,
 		"text":       text,
 		"parse_mode": "HTML",
-	})
+	}
+	if markup != nil {
+		payload["reply_markup"] = markup
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return false, fmt.Errorf("marshal telegram payload: %w", err)
 	}
