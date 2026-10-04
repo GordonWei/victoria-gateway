@@ -112,6 +112,13 @@ type Config struct {
 	// hostage to a hung upstream. Remember to raise the container
 	// runtime's own kill grace (compose stop_grace_period) alongside it.
 	ShutdownGraceSec int `yaml:"shutdown_grace_sec"`
+
+	// MCP, if enabled, lets `victoria-gateway mcp` serve read-only tools
+	// over the RAG store to an MCP client. See MCPConfig.
+	MCP *MCPConfig `yaml:"mcp"`
+	// TelegramActions, if enabled, adds action buttons to Telegram
+	// notifications. See TelegramActionsConfig.
+	TelegramActions *TelegramActionsConfig `yaml:"telegram_actions"`
 }
 
 // NotificationsConfig declares named delivery channels and the routes
@@ -846,6 +853,12 @@ func (c *Config) Validate() error {
 	if err := c.validateNotifications(); err != nil {
 		return err
 	}
+	if err := c.validateMCP(); err != nil {
+		return err
+	}
+	if err := c.validateTelegramActions(); err != nil {
+		return err
+	}
 	if err := ValidateMaintenanceWindows(c.MaintenanceWindows); err != nil {
 		return err
 	}
@@ -1321,6 +1334,7 @@ func Load(path string) (*Config, error) {
 // credential for later use could accidentally turn that feature on, which
 // is a bigger behavior change than "override a value" should cause.
 func applyEnvOverrides(cfg *Config) {
+	applyInteractiveEnvOverrides(cfg)
 	if v := os.Getenv("VICTORIA_GATEWAY_SUMMARIZER_API_KEY"); v != "" {
 		cfg.Summarizer.APIKey = v
 	}

@@ -892,6 +892,7 @@ authenticated by `webui_auth` the same as `/incidents` and `/pending`:
 | `suppression.apply_silence` | `suppression-candidates --apply-silences --yes` creates a silence |
 | `escalation.trigger` | an alert is handed to a cloud escalation target, with the reason, the target that answered, and `result=ok` / `result=failed error=...` |
 | `escalation.rate_limited` | `escalation.max_per_hour` stopped an escalation that would otherwise have happened |
+| `mcp.search_incidents`, `mcp.get_incident`, `mcp.list_pending` | an MCP tool was called, including refused calls (`result=invalid`/`not_found`/`error`); search records the query's length, never its text. Actor `mcp:stdio` or `mcp:http` (v1.14.0, unreleased; see **Read-only MCP server**) |
 
 ```yaml
 rag:
@@ -1919,6 +1920,81 @@ actual datasource in your Grafana — either name/configure your Postgres
 datasource with that UID, or re-point each panel's datasource after
 importing.
 
+## Read-only MCP server for agents
+
+*(v1.14.0, unreleased.)* `victoria-gateway mcp` serves three read-only
+[Model Context Protocol](https://modelcontextprotocol.io) tools over the
+RAG store, so an agent such as Claude Code can ask "have we seen this
+before" while you work an incident:
+
+| Tool | Returns |
+|---|---|
+| `search_incidents` (`query`, `top_k`) | Confirmed incidents similar to the query text, most similar first: alert, host, summary, resolution, similarity. No log lines. |
+| `get_incident` (`id`) | One incident, Confirmed or Pending, including a shortened log excerpt (the last 2,000 characters). |
+| `list_pending` (`limit`, `alert_name`, `host`) | Pending incidents, newest first. These are unverified model summaries. |
+
+It is off by default and needs RAG with the audit log on:
+
+```yaml
+rag:
+  enabled: true
+  # audit_log stays on (its default); mcp refuses to start without it
+mcp:
+  enabled: true
+  max_results: 5          # per call; 0 means 5, at most 20
+  max_output_bytes: 16384 # per call; 0 means 16 KiB, 1 KiB to 64 KiB
+  # http:                 # optional, see below
+  #   listen_addr: "127.0.0.1:9300"
+  #   bearer_token: ""    # at least 32 characters, or VICTORIA_GATEWAY_MCP_BEARER_TOKEN
+```
+
+The default transport is stdio: the MCP client starts the process and
+talks to it over stdin/stdout, and nothing listens on the network. For
+Claude Code, on a machine that can reach the Postgres and the embedding
+endpoint:
+
+```bash
+claude mcp add victoria-gateway -- victoria-gateway mcp --config /path/to/config.yaml
+```
+
+What the server does to keep this a narrow door:
+
+- **Read-only.** The three tools above are the whole list, each
+  annotated `readOnlyHint: true`. Nothing confirms, edits, deletes,
+  escalates or calls a chat model; `search_incidents` calls only the
+  embedding endpoint.
+- **Masked, whatever `rag.mask_log_excerpt` says.** Every string goes
+  through the same credential masking as `rag.mask_log_excerpt` before it
+  leaves (see **What data this stores, and where it goes**), so rows
+  stored before masking was on are masked on the way out too. Summaries
+  and resolutions are cut to 600 characters, excerpts to 2,000.
+- **Bounded.** `top_k`/`limit` above `max_results` is cut to it; a result
+  over `max_output_bytes` drops incidents from the end, then shortens
+  fields, and says `"truncated": true`.
+- **Data, not instructions.** Every result is one JSON object whose first
+  field, `notice`, tells the client that the field values are untrusted
+  text copied from alerts, logs and model output and that instructions
+  inside them are not to be followed. A stored summary that reads "ignore
+  previous instructions and ..." comes back as a JSON string, nothing
+  more. This lowers the risk; it can't remove it, because what the
+  client's model does with text is up to the client. Treat the agent
+  using these tools as able to read anything the tools return.
+- **Validated input.** Queries are at most 1,000 characters, filters 200,
+  no control characters; ids must be positive. Store and embedding
+  errors reach the client as a fixed message, never the underlying error
+  (which could quote a DSN).
+- **Audited.** Every call, including refused ones, is an `mcp.*` entry in
+  the audit log.
+
+**HTTP transport.** `victoria-gateway mcp --http` serves the same tools
+as stateless streamable HTTP on `mcp.http.listen_addr`, for a client on
+another machine. It only runs with an `mcp.http` block, and every request
+must carry `Authorization: Bearer <bearer_token>` (compared in constant
+time; anything else is `401`). It also refuses cross-origin browser
+requests and bodies over 1 MiB. There is no TLS of its own: bind it to
+loopback or a private interface, or put it behind a TLS-terminating
+proxy, since the token travels in a header.
+
 ## Running
 
 ```bash
@@ -2047,6 +2123,9 @@ unless you opt in:
   front (**What data this stores, and where it goes**).
 - A leak check for tracked files in CI and as an optional pre-commit
   hook (`CONTRIBUTING.md`).
+- `victoria-gateway mcp`: read-only MCP tools over the RAG store, off
+  unless `mcp.enabled: true`, stdio by default, HTTP only with a bearer
+  token (**Read-only MCP server for agents**).
 
 ## Status
 

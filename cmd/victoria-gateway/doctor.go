@@ -599,6 +599,12 @@ func newRedactor(cfg *config.Config) *redactor {
 			add(r.GitHub.WebhookSecret)
 		}
 	}
+	if cfg.MCP != nil && cfg.MCP.HTTP != nil {
+		add(cfg.MCP.HTTP.BearerToken)
+	}
+	if cfg.TelegramActions != nil {
+		add(cfg.TelegramActions.HMACSecret)
+	}
 	// Longest first, so a DSN is replaced whole before its password is.
 	sort.Slice(s, func(i, j int) bool { return len(s[i]) > len(s[j]) })
 	return &redactor{secrets: s}

@@ -507,11 +507,13 @@ func TestRedactor(t *testing.T) {
 		Notifications: &config.NotificationsConfig{Channels: []config.NotifyChannelConfig{
 			{Name: "slack", Type: "webhook", URL: "https://hooks.example.com/services/T1/B2/xyz123", Headers: map[string]string{"Authorization": "Bearer hdr-secret-1"}},
 		}},
+		MCP:             &config.MCPConfig{HTTP: &config.MCPHTTPConfig{BearerToken: "mcp-bearer-plain-value"}},
+		TelegramActions: &config.TelegramActionsConfig{HMACSecret: "button-signing-plain-value"},
 	}
 	red := newRedactor(cfg)
-	in := `Get "https://api.example/bot999:abc%2Fdef+ghi/getMe" | kv-pass-1 | https://hooks.example.com/services/T1/B2/xyz123 | hdr-secret-1 | password=other1234`
+	in := `Get "https://api.example/bot999:abc%2Fdef+ghi/getMe" | kv-pass-1 | https://hooks.example.com/services/T1/B2/xyz123 | hdr-secret-1 | password=other1234 | mcp-bearer-plain-value | button-signing-plain-value`
 	got := red.redact(in)
-	for _, s := range []string{"abc", "kv-pass-1", "xyz123", "hdr-secret-1", "other1234"} {
+	for _, s := range []string{"abc", "kv-pass-1", "xyz123", "hdr-secret-1", "other1234", "mcp-bearer-plain-value", "button-signing-plain-value"} {
 		if strings.Contains(got, s) {
 			t.Errorf("redacted text still contains %q: %s", s, got)
 		}
