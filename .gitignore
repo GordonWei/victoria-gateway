@@ -35,3 +35,7 @@ docs/_agent_handoff.md
 docs/_draft_oss_gap_analysis.md
 docs/_draft_enterprise_features_proposal.md
 docs/_handoff_archive.md
+
+# 通則：本機草稿與審查檔一律不進版控（要公開的草稿請用 `!docs/_draft_xxx.md` 例外）
+docs/_draft_*.md
+docs/_review_*.md
