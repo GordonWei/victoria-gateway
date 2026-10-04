@@ -25,7 +25,7 @@ func newTestClient(t *testing.T, endpoint string, opts ...func(*ClientConfig)) *
 		LogGroupNames: []string{"/test/log-group"},
 		Endpoint:      endpoint,
 		credentialsProvider: credentials.NewStaticCredentialsProvider(
-			"AKIAFAKEFAKEFAKEFAKE", "fakesecretfakesecretfakesecretfakesecret", "",
+			"AKIAFAKEFAKEFAKEFAKE", "fakesecretfakesecretfakesecretfakesecret", "", // leakcheck:allow (fake fixture)
 		),
 	}
 	for _, opt := range opts {

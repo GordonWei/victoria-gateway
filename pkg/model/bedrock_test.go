@@ -19,7 +19,7 @@ func newTestBedrockClient(endpoint string) *BedrockClient {
 		Model:    "anthropic.claude-3-5-sonnet-20241022-v2:0",
 		Endpoint: endpoint,
 		credentialsProvider: credentials.NewStaticCredentialsProvider(
-			"AKIAFAKEFAKEFAKEFAKE", "fakesecretfakesecretfakesecretfakesecret", "",
+			"AKIAFAKEFAKEFAKEFAKE", "fakesecretfakesecretfakesecretfakesecret", "", // leakcheck:allow (fake fixture)
 		),
 	})
 }
@@ -155,7 +155,7 @@ func TestBedrockClient_Available_NetworkFailureIsUnavailable(t *testing.T) {
 		Model:    "anthropic.claude-3-5-sonnet-20241022-v2:0",
 		Endpoint: "http://127.0.0.1:19999", // nothing listening here
 		credentialsProvider: credentials.NewStaticCredentialsProvider(
-			"AKIAFAKEFAKEFAKEFAKE", "fakesecretfakesecretfakesecretfakesecret", "",
+			"AKIAFAKEFAKEFAKEFAKE", "fakesecretfakesecretfakesecretfakesecret", "", // leakcheck:allow (fake fixture)
 		),
 	})
 	if client.Available() {

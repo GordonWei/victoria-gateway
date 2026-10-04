@@ -1,0 +1,15 @@
+#!/bin/sh
+# Git pre-commit hook: refuse a commit whose staged files contain a private
+# IPv4 address, a home-directory path, a credential-shaped string, or a
+# local working note under docs/. The rules are generic shapes only; see
+# internal/leakcheck. CI runs the same check over every tracked file.
+#
+# Install once per clone:
+#   ln -sf ../../scripts/pre-commit .git/hooks/pre-commit
+#
+# A deliberate fixture can opt out per line with the marker
+# "leakcheck:allow". Bypassing the hook (git commit --no-verify) does not
+# bypass CI.
+set -e
+cd "$(git rev-parse --show-toplevel)"
+exec go run ./cmd/leakcheck --staged

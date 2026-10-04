@@ -24,6 +24,11 @@ jobs:
             exit 1
           fi
 
+      - name: leak check
+        # Generic shapes only (private IPs, home paths, credential formats,
+        # docs/_* notes); see internal/leakcheck.
+        run: go run ./cmd/leakcheck
+
       - name: go build
         run: go build ./...
 
