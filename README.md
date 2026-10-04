@@ -373,7 +373,7 @@ the second listener. Inside a container, bind `":9091"` (and publish it)
 rather than `127.0.0.1:9091`, or Prometheus outside the container can't
 reach it. `metrics_listen_addr` on the same address as the main listener
 is a startup error. `/healthz` stays on the main port. Both listeners
-are shut down together on SIGTERM. *(v1.14.0, unreleased.)*
+are shut down together on SIGTERM. *(v1.14.0.)*
 
 ### Build version
 
@@ -395,7 +395,7 @@ Without the build args the image reports `version="docker"`,
 whatever you pass, not derived from git: build the release image with
 the version you intend to tag, verify it on the target, then put the tag
 on that same commit, so `version` matches the tag and `commit` matches
-what's deployed. *(v1.14.0, unreleased.)*
+what's deployed. *(v1.14.0.)*
 
 ### Startup warnings
 
@@ -412,7 +412,7 @@ these; none of them changes behavior or blocks startup:
 | `rag.enabled: true` and no `webui_auth` | `/incidents` and `/pending` show stored log excerpts to anyone who can reach the port. |
 | `telegram_actions` on, a cloud escalation target, and `escalation.max_per_hour: 0` | The escalate button has no hourly cap either. |
 
-*(v1.14.0, unreleased.)*
+*(v1.14.0.)*
 
 ## Maintenance windows
 
@@ -764,7 +764,7 @@ everything else in the line, IPs and ports included, is left readable:
   (`password`, `passwd`, `pwd`, `secret`, `token`, `api_key`,
   `access_key`, `credential`) and `Bearer <token>` values;
 - credentials recognizable without a key, by a fixed prefix or a rigid
-  structure *(v1.14.0, unreleased)*: AWS access key IDs (`AKIA…`,
+  structure *(v1.14.0)*: AWS access key IDs (`AKIA…`,
   `ASIA…`), GitHub (`ghp_…`, `github_pat_…`), GitLab (`glpat-…`) and
   Slack (`xoxb-…`, `hooks.slack.com/services/…`) tokens, Google API keys
   (`AIza…`), `sk-…` style API keys of 20+ characters, Stripe live keys,
@@ -893,9 +893,9 @@ authenticated by `webui_auth` the same as `/incidents` and `/pending`:
 | `suppression.apply_silence` | `suppression-candidates --apply-silences --yes` creates a silence |
 | `escalation.trigger` | an alert is handed to a cloud escalation target, with the reason, the target that answered, and `result=ok` / `result=failed error=...` |
 | `escalation.rate_limited` | `escalation.max_per_hour` stopped an escalation that would otherwise have happened |
-| `telegram.ack`, `telegram.escalate`, `telegram.silence` | a Telegram action button was pressed and carried out, with `result=ok` / `rate_limited` / `no_target` / `error`; silence entries carry the Alertmanager silence id. Actor `telegram:<user id>` (v1.14.0, unreleased; see **Action buttons on Telegram notifications**) |
+| `telegram.ack`, `telegram.escalate`, `telegram.silence` | a Telegram action button was pressed and carried out, with `result=ok` / `rate_limited` / `no_target` / `error`; silence entries carry the Alertmanager silence id. Actor `telegram:<user id>` (v1.14.0; see **Action buttons on Telegram notifications**) |
 | `telegram.action_denied` | a button press was refused: `reason=user_not_allowed` / `wrong_chat` / `bad_signature` / `expired` / `already_used` |
-| `mcp.search_incidents`, `mcp.get_incident`, `mcp.list_pending` | an MCP tool was called, including refused calls (`result=invalid`/`not_found`/`error`); search records the query's length, never its text. Actor `mcp:stdio` or `mcp:http` (v1.14.0, unreleased; see **Read-only MCP server**) |
+| `mcp.search_incidents`, `mcp.get_incident`, `mcp.list_pending` | an MCP tool was called, including refused calls (`result=invalid`/`not_found`/`error`); search records the query's length, never its text. Actor `mcp:stdio` or `mcp:http` (v1.14.0; see **Read-only MCP server**) |
 
 ```yaml
 rag:
@@ -991,7 +991,7 @@ steers the self-reported `escalate`, but no prompt can rule it out;
 `webhook_auth` and `escalation.max_per_hour` are what actually bound who can
 trigger escalations and how many (the server warns at startup when
 either is missing, see **Startup warnings** below). The exact prompt is
-pinned by `pkg/aiops/testdata/prompt.golden`. *(v1.14.0, unreleased.)*
+pinned by `pkg/aiops/testdata/prompt.golden`. *(v1.14.0.)*
 
 Rule (1) exists because small local models aren't reliably calibrated about
 their own confidence — an explicit allowlist you control is deterministic in
@@ -1907,7 +1907,7 @@ Setup, once, before turning `rag.enabled` on:
 
 ### Action buttons on Telegram notifications
 
-*(v1.14.0, unreleased.)* With `telegram_actions` on, each notification
+*(v1.14.0.)* With `telegram_actions` on, each notification
 to the top-level `telegram` chat carries up to three buttons:
 
 | Button | What it does | Shown when |
@@ -1985,7 +1985,7 @@ actual datasource in your Grafana — either name/configure your Postgres
 datasource with that UID, or re-point each panel's datasource after
 importing.
 
-*(v1.14.0, unreleased.)* `deploy/grafana-dashboard-metrics.json` is the
+*(v1.14.0.)* `deploy/grafana-dashboard-metrics.json` is the
 counterpart over `/metrics`, through a Prometheus datasource with UID
 `victoria-gateway-prometheus` and a `job` variable defaulting to
 `victoria-gateway`: running version and commit, up, alerts and errors by
@@ -2025,7 +2025,7 @@ promtool is installed.
 
 ## Read-only MCP server for agents
 
-*(v1.14.0, unreleased.)* `victoria-gateway mcp` serves three read-only
+*(v1.14.0.)* `victoria-gateway mcp` serves three read-only
 [Model Context Protocol](https://modelcontextprotocol.io) tools over the
 RAG store, so an agent such as Claude Code can ask "have we seen this
 before" while you work an incident:
@@ -2115,7 +2115,7 @@ from the config file if you need to override it without editing the file.
 
 ### Checking a deployment: `victoria-gateway doctor`
 
-*(v1.14.0, unreleased.)* `victoria-gateway doctor [--config path]` loads
+*(v1.14.0.)* `victoria-gateway doctor [--config path]` loads
 and validates the config the server would use, then checks every
 dependency it names and prints one line each (`OK`, `WARN`, `FAIL`,
 `SKIP`), exiting 1 if anything failed:
@@ -2211,9 +2211,9 @@ Either path uses the same binary, the same `config.yaml`, and every
 feature above works identically regardless of which one runs it — pick
 whichever matches where you already run things.
 
-## Unreleased: v1.14.0
+## v1.14.0
 
-Not tagged or released yet. Everything below keeps existing behavior
+Released 2026-10-05. Everything below keeps existing behavior
 unless you opt in:
 
 - `victoria-gateway doctor` and `victoria-gateway version` subcommands.
