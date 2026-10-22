@@ -2,6 +2,8 @@ module github.com/gordonwei/victoria-gateway
 
 go 1.25.0
 
+toolchain go1.26.10
+
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/aws/aws-sdk-go-v2 v1.47.0

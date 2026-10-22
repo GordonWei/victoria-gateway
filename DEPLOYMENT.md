@@ -24,9 +24,10 @@ earlier steps.
 
 - [ ] **Docker Compose** (a host already running the monitoring stack) **or
       a Kubernetes cluster** — whichever you're deploying to. Building from
-      source instead of using a container needs Go 1.25+, per `go.mod`;
-      the Dockerfile builds with `golang:1.25` so the container path has no
-      host Go requirement either way.
+      source instead of using a container needs Go 1.25+, per `go.mod`
+      (use 1.26.10 or newer so the binary picks up the `crypto/x509` fix
+      for CVE-2026-111943); the Dockerfile builds with `golang:1.26.10` so
+      the container path has no host Go requirement either way.
 - [ ] **Alertmanager already running** and reachable from that host or
       cluster. This service is an additive webhook receiver; it doesn't
       replace anything in your existing routing.

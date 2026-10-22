@@ -144,7 +144,9 @@ double-processing the same alert.
 
 ## Requirements
 
-- Go 1.25+ (see `go.mod`) to build from source
+- Go 1.25+ (see `go.mod`) to build from source; release binaries and the
+  container image are built with Go 1.26.10 or newer, which carries the
+  `crypto/x509` fix for CVE-2026-111943
 - Docker, only if you're using the container path instead
 - Postgres with the pgvector extension, only if you enable RAG (see below)
 
