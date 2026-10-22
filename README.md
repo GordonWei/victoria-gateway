@@ -385,11 +385,11 @@ They are set at build time:
 
 ```bash
 docker build \
-  --build-arg VERSION=v1.14.0 \
+  --build-arg VERSION=v1.14.1 \
   --build-arg COMMIT=$(git rev-parse --short HEAD) \
-  -t victoria-gateway:v1.14.0 .
+  -t victoria-gateway:v1.14.1 .
 # or, without Docker:
-go build -ldflags "-X main.version=v1.14.0 -X main.commit=$(git rev-parse --short HEAD)" ./cmd/victoria-gateway
+go build -ldflags "-X main.version=v1.14.1 -X main.commit=$(git rev-parse --short HEAD)" ./cmd/victoria-gateway
 ```
 
 Without the build args the image reports `version="docker"`,
@@ -2212,6 +2212,23 @@ directory's README for why), a direct translation of the same
 Either path uses the same binary, the same `config.yaml`, and every
 feature above works identically regardless of which one runs it — pick
 whichever matches where you already run things.
+
+## v1.14.1
+
+Released 2026-10-22. A security rebuild with no behavior changes:
+
+- Release binaries and the container image are built with Go 1.26.10,
+  whose `crypto/x509` rejects certificate chains through the eight
+  compromised eMudhra intermediates (CVE-2026-111943). Go 1.25 is out of
+  support and does not get this fix; `go.mod` keeps `go 1.25.0` and adds
+  `toolchain go1.26.10`, so source builds switch to the fixed toolchain
+  by default.
+- `golang.org/x/text` v0.41.0 (GO-2026-5970, GO-2026-6629, both
+  reachable through the Postgres connection used by RAG) and
+  `golang.org/x/sys` v0.44.0 (GO-2026-5024, Windows only, not called).
+  `govulncheck ./...` reports no vulnerabilities.
+- The runtime image moves from Alpine 3.20, which is past end of life,
+  to 3.23.
 
 ## v1.14.0
 
