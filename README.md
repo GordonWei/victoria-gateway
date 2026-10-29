@@ -603,9 +603,9 @@ first alert.
 What is and is not verified: the rendering is unit-tested against local
 `httptest` servers (a Slack-shaped `{"text": ...}` body and a Teams
 Adaptive Card envelope, including a summary with quotes, newlines and
-angle brackets). **It has not been sent to a real Slack or Teams
-endpoint**, and the two schemas above come from those products'
-documentation, not from a live test, so try each with a throwaway
+angle brackets). Slack has been sent to a real incoming webhook
+(2026-10-04). **Teams has not**: its Adaptive Card schema comes from the
+product documentation, not a live test, so try it with a throwaway
 channel first. Two known rough edges: the text is not escaped for Slack's
 own `&`, `<`, `>` control characters, and a Teams Adaptive Card has a
 message size limit that a very long cloud analysis could exceed.
