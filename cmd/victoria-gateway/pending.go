@@ -197,7 +197,12 @@ type pendingGrouper interface {
 	ListPendingGroups(ctx context.Context, filter rag.ListFilter, limit int) ([]rag.PendingGroup, error)
 	CountPending(ctx context.Context, filter rag.ListFilter) (int, error)
 	GroupMemberIDs(ctx context.Context, repID int64) ([]int64, error)
-	ConfirmPendingGroup(ctx context.Context, ids []int64, resolution string, repID int64) (int, error)
+	ConfirmPendingGroup(ctx context.Context, ids []int64, resolution string, repID int64) ([]int64, error)
+	// GiteaIssuesForIDs maps each id that has a linked tracker issue to
+	// its issue number, for the batch path to close after confirming —
+	// the batch counterpart to the single-record path's GetPending read
+	// of GiteaIssueNumber.
+	GiteaIssuesForIDs(ctx context.Context, ids []int64) (map[int64]int64, error)
 }
 
 type pendingGroupView struct {

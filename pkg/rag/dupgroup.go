@@ -235,8 +235,14 @@ func (s *PGStore) GroupMemberIDs(ctx context.Context, repID int64) ([]int64, err
 }
 
 // ConfirmPendingGroup confirms every still-pending id in ids with the same
-// resolution and points all but repID at repID via dup_of. It returns how
-// many rows it actually confirmed.
+// resolution and points all but repID at repID via dup_of. It returns the
+// ids it actually confirmed (a subset of ids: rows someone else confirmed
+// between page load and submit are left out).
+//
+// Returning the confirmed ids rather than just a count lets the batch web
+// handler close exactly the tracker issues this call moved — and not the
+// ones a concurrent confirm already handled with a (possibly different)
+// resolution. len(result) is the row count callers used to get back.
 //
 // repID must be in ids, or dup_of would point at a row this call did not
 // confirm.
@@ -250,20 +256,20 @@ func (s *PGStore) GroupMemberIDs(ctx context.Context, repID int64) ([]int64, err
 // The representative's own dup_of is cleared, not just left as-is. It may
 // have been set by an earlier batch, and a representative that still
 // points at an older row would take the whole new group out of Search.
-func (s *PGStore) ConfirmPendingGroup(ctx context.Context, ids []int64, resolution string, repID int64) (int, error) {
+func (s *PGStore) ConfirmPendingGroup(ctx context.Context, ids []int64, resolution string, repID int64) ([]int64, error) {
 	if strings.TrimSpace(resolution) == "" {
-		return 0, fmt.Errorf("rag confirm pending group: resolution is required")
+		return nil, fmt.Errorf("rag confirm pending group: resolution is required")
 	}
 	if len(ids) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 	if !containsInt64(ids, repID) {
-		return 0, fmt.Errorf("rag confirm pending group: representative %d is not in the batch", repID)
+		return nil, fmt.Errorf("rag confirm pending group: representative %d is not in the batch", repID)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("rag confirm pending group: begin: %w", err)
+		return nil, fmt.Errorf("rag confirm pending group: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -274,25 +280,25 @@ func (s *PGStore) ConfirmPendingGroup(ctx context.Context, ids []int64, resoluti
 	 RETURNING id
 	`, pqInt64Array(ids), resolution)
 	if err != nil {
-		return 0, fmt.Errorf("rag confirm pending group: update: %w", err)
+		return nil, fmt.Errorf("rag confirm pending group: update: %w", err)
 	}
 	var updated []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
-			return 0, fmt.Errorf("rag confirm pending group: scan: %w", err)
+			return nil, fmt.Errorf("rag confirm pending group: scan: %w", err)
 		}
 		updated = append(updated, id)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return 0, fmt.Errorf("rag confirm pending group: iterate: %w", err)
+		return nil, fmt.Errorf("rag confirm pending group: iterate: %w", err)
 	}
 	_ = rows.Close()
 
 	if len(updated) == 0 {
-		return 0, tx.Commit()
+		return nil, tx.Commit()
 	}
 
 	var dups []int64
@@ -305,19 +311,57 @@ func (s *PGStore) ConfirmPendingGroup(ctx context.Context, ids []int64, resoluti
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE incidents SET dup_of = $2 WHERE id = ANY($1)`,
 			pqInt64Array(dups), repID); err != nil {
-			return 0, fmt.Errorf("rag confirm pending group: mark duplicates: %w", err)
+			return nil, fmt.Errorf("rag confirm pending group: mark duplicates: %w", err)
 		}
 	}
 	if containsInt64(updated, repID) {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE incidents SET dup_of = NULL WHERE id = $1`, repID); err != nil {
-			return 0, fmt.Errorf("rag confirm pending group: clear representative dup_of: %w", err)
+			return nil, fmt.Errorf("rag confirm pending group: clear representative dup_of: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("rag confirm pending group: commit: %w", err)
+		return nil, fmt.Errorf("rag confirm pending group: commit: %w", err)
 	}
-	return len(updated), nil
+	return updated, nil
+}
+
+// GiteaIssuesForIDs returns the tracker issue number for each of the given
+// ids that has a non-zero one, as an id->issue map. Ids with no linked
+// issue (gitea_issue_number NULL or 0) are simply absent from the map, and
+// unknown ids are absent too — a caller iterating the map therefore only
+// ever sees ids it can actually act on.
+//
+// Status-agnostic on purpose: the batch confirm path calls this right
+// after ConfirmPendingGroup has already flipped these rows to 'confirmed',
+// so a status = 'pending' filter here would return nothing. The caller
+// passes only the ids ConfirmPendingGroup reported it just confirmed, so
+// the set is already scoped to this operator's decision.
+func (s *PGStore) GiteaIssuesForIDs(ctx context.Context, ids []int64) (map[int64]int64, error) {
+	out := make(map[int64]int64, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, gitea_issue_number
+		  FROM incidents
+		 WHERE id = ANY($1)
+		   AND gitea_issue_number IS NOT NULL
+		   AND gitea_issue_number <> 0
+	`, pqInt64Array(ids))
+	if err != nil {
+		return nil, fmt.Errorf("rag gitea issues for ids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var id, issue int64
+		if err := rows.Scan(&id, &issue); err != nil {
+			return nil, fmt.Errorf("rag gitea issues for ids scan row: %w", err)
+		}
+		out[id] = issue
+	}
+	return out, rows.Err()
 }
 
 func containsInt64(xs []int64, want int64) bool {

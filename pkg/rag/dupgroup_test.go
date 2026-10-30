@@ -96,13 +96,13 @@ func TestPGStore_ConfirmPendingGroup(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	n, err := store.ConfirmPendingGroup(context.Background(),
+	got, err := store.ConfirmPendingGroup(context.Background(),
 		[]int64{91, 88, 80}, "憑證由 ACM 自動續約，不需人工處理", 91)
 	if err != nil {
 		t.Fatalf("ConfirmPendingGroup: %v", err)
 	}
-	if n != 3 {
-		t.Errorf("confirmed = %d, want 3", n)
+	if len(got) != 3 {
+		t.Errorf("confirmed = %d, want 3", len(got))
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
@@ -129,12 +129,12 @@ func TestPGStore_ConfirmPendingGroup_OnlyMarksRowsItActuallyConfirmed(t *testing
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	n, err := store.ConfirmPendingGroup(context.Background(), []int64{91, 88, 80}, "同上", 91)
+	got, err := store.ConfirmPendingGroup(context.Background(), []int64{91, 88, 80}, "同上", 91)
 	if err != nil {
 		t.Fatalf("ConfirmPendingGroup: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("confirmed = %d, want 2 (88 was already confirmed)", n)
+	if len(got) != 2 {
+		t.Errorf("confirmed = %d, want 2 (88 was already confirmed)", len(got))
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
@@ -150,12 +150,12 @@ func TestPGStore_ConfirmPendingGroup_AllAlreadyConfirmed(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectCommit()
 
-	n, err := store.ConfirmPendingGroup(context.Background(), []int64{91}, "x", 91)
+	got, err := store.ConfirmPendingGroup(context.Background(), []int64{91}, "x", 91)
 	if err != nil {
 		t.Fatalf("ConfirmPendingGroup: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("confirmed = %d, want 0", n)
+	if len(got) != 0 {
+		t.Errorf("confirmed = %d, want 0", len(got))
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
@@ -178,6 +178,45 @@ func TestPGStore_ConfirmPendingGroup_RequiresResolution(t *testing.T) {
 	store, _ := newMockStore(t)
 	if _, err := store.ConfirmPendingGroup(context.Background(), []int64{91}, "   ", 91); err == nil {
 		t.Fatal("blank resolution should be rejected")
+	}
+}
+
+// GiteaIssuesForIDs returns only the ids that actually have a linked issue,
+// as an id->issue map, so the batch confirm path can close exactly those.
+func TestPGStore_GiteaIssuesForIDs(t *testing.T) {
+	store, mock := newMockStore(t)
+	mock.ExpectQuery("SELECT id, gitea_issue_number(.|\n)*gitea_issue_number <> 0").
+		WithArgs("{91,88,80}").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "gitea_issue_number"}).
+			AddRow(int64(91), int64(42)).
+			AddRow(int64(80), int64(7)))
+	// 88 has no linked issue, so it's simply absent from the result.
+
+	got, err := store.GiteaIssuesForIDs(context.Background(), []int64{91, 88, 80})
+	if err != nil {
+		t.Fatalf("GiteaIssuesForIDs: %v", err)
+	}
+	if len(got) != 2 || got[91] != 42 || got[80] != 7 {
+		t.Errorf("got = %v, want {91:42, 80:7}", got)
+	}
+	if _, ok := got[88]; ok {
+		t.Errorf("88 has no linked issue and must not appear: %v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+// No ids means no query at all — an empty IN list would be a needless
+// round trip and some drivers reject ANY('{}') oddly.
+func TestPGStore_GiteaIssuesForIDs_Empty(t *testing.T) {
+	store, _ := newMockStore(t)
+	got, err := store.GiteaIssuesForIDs(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("GiteaIssuesForIDs: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got = %v, want empty", got)
 	}
 }
 

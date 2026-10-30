@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"html/template"
 	"log"
@@ -120,12 +121,13 @@ func (h *handler) handlePendingBatch(w http.ResponseWriter, r *http.Request) {
 			skippedGroups++
 			continue
 		}
-		n, err := grouper.ConfirmPendingGroup(ctx, ids, resolution, repID)
+		confirmedIDs, err := grouper.ConfirmPendingGroup(ctx, ids, resolution, repID)
 		if err != nil {
 			log.Printf("pending batch: confirm group %d: %v", repID, err)
 			failures = append(failures, fmt.Sprintf("#%d 確認失敗", repID))
 			continue
 		}
+		n := len(confirmedIDs)
 		if n == 0 {
 			skippedGroups++
 			continue
@@ -133,6 +135,18 @@ func (h *handler) handlePendingBatch(w http.ResponseWriter, r *http.Request) {
 		confirmedRows += n
 		doneGroups++
 		log.Printf("pending batch: confirmed group rep=%d rows=%d by=%s", repID, n, actor)
+		// Mirror the single-record path (POST /pending/{id}): when the
+		// toggle is on, close the tracker issue linked to every row this
+		// call actually confirmed — the representative and the duplicates
+		// alike, each a real alert that really fired. Same best-effort
+		// contract: the DB confirmation above is the source of truth and
+		// is never rolled back because a tracker call failed; a failure is
+		// logged and the next `sync` tick (or a manual close) reconciles
+		// it. We pass only confirmedIDs — not the group members we looked
+		// up before confirming — so a row a concurrent confirm grabbed
+		// first (with possibly a different resolution) is left for whoever
+		// confirmed it to close, not reclosed with our comment.
+		h.closeBatchIssues(ctx, grouper, confirmedIDs, resolution)
 		// One audit row per group, not per record: the operator made one
 		// decision about one group, and N rows for a single click would
 		// bury every other action under the biggest group. The row count
@@ -151,6 +165,32 @@ func (h *handler) handlePendingBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.renderBatchDone(w, batchDone{Title: "批次確認完成", Message: msg, OK: true})
+}
+
+// closeBatchIssues mirrors the single-record confirm's close-the-issue
+// step for a whole batch group. It's a no-op unless the toggle is on and a
+// tracker is configured, so callers don't have to guard it.
+//
+// ids must be the ids ConfirmPendingGroup reported it actually confirmed.
+// Each tracker failure is logged and otherwise ignored: the DB
+// confirmation already committed is the source of truth, exactly as in
+// POST /pending/{id}. One lookup resolves all the issue numbers at once
+// rather than a GetPending per row (which wouldn't even find them anymore
+// — they're confirmed now, not pending).
+func (h *handler) closeBatchIssues(ctx context.Context, g pendingGrouper, ids []int64, resolution string) {
+	if !h.closeIssueOnWebConfirm || h.tracker == nil || len(ids) == 0 {
+		return
+	}
+	issues, err := g.GiteaIssuesForIDs(ctx, ids)
+	if err != nil {
+		log.Printf("pending batch: confirmed %d rows in DB but failed to look up their issue numbers: %v", len(ids), err)
+		return
+	}
+	for id, number := range issues {
+		if cerr := h.tracker.CloseWithComment(ctx, number, resolution); cerr != nil {
+			log.Printf("pending batch: confirmed id=%d in DB but failed to close issue #%d: %v", id, number, cerr)
+		}
+	}
 }
 
 // batchMessage says what happened, including everything that didn't.

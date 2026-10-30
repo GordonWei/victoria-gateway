@@ -25,6 +25,17 @@ type groupingRAGStore struct {
 	// resolutions records what each group was confirmed with, so a test
 	// can assert every group in one submission got the same text.
 	resolutions map[int64]string
+	// issues maps an incident id to its linked tracker issue number. Only
+	// ids present here have one; GiteaIssuesForIDs returns exactly the
+	// intersection of its argument with this map.
+	issues map[int64]int64
+	// giteaLookupErr, if set, makes GiteaIssuesForIDs fail — used to prove
+	// a lookup failure doesn't undo the DB confirmation.
+	giteaLookupErr error
+	// giteaLookupIDs records the ids passed to GiteaIssuesForIDs, so a
+	// test can assert the batch path only tries to close rows it actually
+	// confirmed.
+	giteaLookupIDs [][]int64
 }
 
 func (g *groupingRAGStore) ListPendingGroups(ctx context.Context, f rag.ListFilter, limit int) ([]rag.PendingGroup, error) {
@@ -43,9 +54,9 @@ func (g *groupingRAGStore) GroupMemberIDs(ctx context.Context, repID int64) ([]i
 	return g.members[repID], nil
 }
 
-func (g *groupingRAGStore) ConfirmPendingGroup(ctx context.Context, ids []int64, resolution string, repID int64) (int, error) {
+func (g *groupingRAGStore) ConfirmPendingGroup(ctx context.Context, ids []int64, resolution string, repID int64) ([]int64, error) {
 	if g.confirmErr != nil {
-		return 0, g.confirmErr
+		return nil, g.confirmErr
 	}
 	if g.confirmed == nil {
 		g.confirmed = map[int64]int{}
@@ -55,7 +66,23 @@ func (g *groupingRAGStore) ConfirmPendingGroup(ctx context.Context, ids []int64,
 	}
 	g.confirmed[repID] = len(ids)
 	g.resolutions[repID] = resolution
-	return len(ids), nil
+	// Echo the ids back as "actually confirmed", matching the real store's
+	// contract: the batch path closes the issues linked to exactly these.
+	return append([]int64(nil), ids...), nil
+}
+
+func (g *groupingRAGStore) GiteaIssuesForIDs(ctx context.Context, ids []int64) (map[int64]int64, error) {
+	g.giteaLookupIDs = append(g.giteaLookupIDs, append([]int64(nil), ids...))
+	if g.giteaLookupErr != nil {
+		return nil, g.giteaLookupErr
+	}
+	out := map[int64]int64{}
+	for _, id := range ids {
+		if n, ok := g.issues[id]; ok && n != 0 {
+			out[id] = n
+		}
+	}
+	return out, nil
 }
 
 func batchTestHandler() (*handler, *groupingRAGStore) {
@@ -105,6 +132,129 @@ func TestHandlePendingBatch_ConfirmsEveryCheckedGroup(t *testing.T) {
 	// to say so, because that's what stops them reaching RAG.
 	if !strings.Contains(body, "4 筆") || !strings.Contains(body, "2 筆標記為同群代表列的重複") {
 		t.Errorf("result should account for both the row count and the duplicates: %s", body)
+	}
+}
+
+// --- batch close-issue tests (the fix this file exercises) ---
+
+// batchCloseHandler builds a handler whose store links the SSLCert group's
+// three rows to issues #42/#43/#44 and the InstanceDown singleton to #50,
+// with a fakeTracker to observe CloseWithComment.
+func batchCloseHandler(toggle bool) (*handler, *groupingRAGStore, *fakeTracker) {
+	h, store := batchTestHandler()
+	store.issues = map[int64]int64{91: 42, 88: 43, 80: 44, 42: 50}
+	tr := &fakeTracker{}
+	h.tracker = tr
+	h.closeIssueOnWebConfirm = toggle
+	return h, store, tr
+}
+
+// The whole point of this change: with the toggle on, confirming a group
+// batch-closes the issue linked to every confirmed row, not just the DB.
+func TestHandlePendingBatch_ClosesIssuesForEveryConfirmedRow(t *testing.T) {
+	h, _, tr := batchCloseHandler(true)
+	w := postBatch(h, url.Values{
+		"rep":        {"91", "42"},
+		"resolution": {"ACM 自動續約，不需處理"},
+	})
+	if !strings.Contains(w.Body.String(), "批次確認完成") {
+		t.Fatalf("expected success page, got: %s", w.Body.String())
+	}
+	// 91's group (91,88,80 -> #42,#43,#44) plus 42's singleton (-> #50).
+	if len(tr.closeCalls) != 4 {
+		t.Fatalf("CloseWithComment called %d times, want 4 (one per linked confirmed row): %+v", len(tr.closeCalls), tr.closeCalls)
+	}
+	closed := map[int64]string{}
+	for _, c := range tr.closeCalls {
+		closed[c.Number] = c.Comment
+	}
+	for _, n := range []int64{42, 43, 44, 50} {
+		if _, ok := closed[n]; !ok {
+			t.Errorf("issue #%d was not closed: %+v", n, tr.closeCalls)
+		}
+		if closed[n] != "ACM 自動續約，不需處理" {
+			t.Errorf("issue #%d closed with wrong comment %q", n, closed[n])
+		}
+	}
+}
+
+// Toggle off (the OSS default) must behave exactly as before: DB only, no
+// tracker calls.
+func TestHandlePendingBatch_DoesNotCloseIssuesWhenToggleOff(t *testing.T) {
+	h, store, tr := batchCloseHandler(false)
+	w := postBatch(h, url.Values{"rep": {"91", "42"}, "resolution": {"x"}})
+	if !strings.Contains(w.Body.String(), "批次確認完成") {
+		t.Fatalf("expected success page, got: %s", w.Body.String())
+	}
+	if len(tr.closeCalls) != 0 {
+		t.Errorf("CloseWithComment must not be called when the toggle is off: %+v", tr.closeCalls)
+	}
+	// DB confirmation still happened.
+	if store.confirmed[91] != 3 || store.confirmed[42] != 1 {
+		t.Errorf("confirmed = %v, want {91:3, 42:1}", store.confirmed)
+	}
+}
+
+// Rows without a linked issue are simply skipped — no spurious close, no
+// error — while rows that do have one in the same batch still close.
+func TestHandlePendingBatch_SkipsRowsWithoutLinkedIssue(t *testing.T) {
+	h, store, tr := batchCloseHandler(true)
+	// Drop the links for 88 and the singleton 42: only 91 and 80 remain.
+	store.issues = map[int64]int64{91: 42, 80: 44}
+	w := postBatch(h, url.Values{"rep": {"91", "42"}, "resolution": {"x"}})
+	if !strings.Contains(w.Body.String(), "批次確認完成") {
+		t.Fatalf("expected success page, got: %s", w.Body.String())
+	}
+	if len(tr.closeCalls) != 2 {
+		t.Fatalf("want 2 closes (only 91 and 80 are linked), got %d: %+v", len(tr.closeCalls), tr.closeCalls)
+	}
+}
+
+// A tracker failure must not roll back the DB confirmation or fail the
+// request — same contract as the single-record path. The other rows in
+// the batch must still get their close attempt.
+func TestHandlePendingBatch_TrackerErrorStillConfirmsInDB(t *testing.T) {
+	h, store, tr := batchCloseHandler(true)
+	tr.closeErr = fmt.Errorf("gitea is down")
+	w := postBatch(h, url.Values{"rep": {"91", "42"}, "resolution": {"x"}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("a tracker failure must not surface as an error: code=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "批次確認完成") {
+		t.Fatalf("DB confirm must be reported as success regardless of tracker outcome: %s", w.Body.String())
+	}
+	if store.confirmed[91] != 3 || store.confirmed[42] != 1 {
+		t.Errorf("DB confirm must proceed regardless of tracker outcome, got %v", store.confirmed)
+	}
+}
+
+// A lookup failure (not a per-issue close failure) is logged and ignored
+// too: the DB is still the source of truth, and the other groups in the
+// submission must still be processed.
+func TestHandlePendingBatch_IssueLookupErrorStillConfirms(t *testing.T) {
+	h, store, _ := batchCloseHandler(true)
+	store.giteaLookupErr = fmt.Errorf("db hiccup")
+	w := postBatch(h, url.Values{"rep": {"91", "42"}, "resolution": {"x"}})
+	if !strings.Contains(w.Body.String(), "批次確認完成") {
+		t.Fatalf("lookup failure must not fail the request: %s", w.Body.String())
+	}
+	if store.confirmed[91] != 3 || store.confirmed[42] != 1 {
+		t.Errorf("DB confirm must proceed, got %v", store.confirmed)
+	}
+}
+
+// The batch path must only try to close issues for rows it actually
+// confirmed — exactly what ConfirmPendingGroup echoed back, not the
+// pre-confirm group it looked up.
+func TestHandlePendingBatch_ClosesOnlyConfirmedRows(t *testing.T) {
+	h, store, _ := batchCloseHandler(true)
+	postBatch(h, url.Values{"rep": {"91"}, "resolution": {"x"}})
+	if len(store.giteaLookupIDs) != 1 {
+		t.Fatalf("GiteaIssuesForIDs called %d times, want 1", len(store.giteaLookupIDs))
+	}
+	got := store.giteaLookupIDs[0]
+	if len(got) != 3 {
+		t.Fatalf("looked up %v, want the 3 confirmed rows of group 91", got)
 	}
 }
 
