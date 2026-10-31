@@ -448,11 +448,11 @@ They are set at build time:
 
 ```bash
 docker build \
-  --build-arg VERSION=v1.14.1 \
+  --build-arg VERSION=v1.15.0 \
   --build-arg COMMIT=$(git rev-parse --short HEAD) \
-  -t victoria-gateway:v1.14.1 .
+  -t victoria-gateway:v1.15.0 .
 # or, without Docker:
-go build -ldflags "-X main.version=v1.14.1 -X main.commit=$(git rev-parse --short HEAD)" ./cmd/victoria-gateway
+go build -ldflags "-X main.version=v1.15.0 -X main.commit=$(git rev-parse --short HEAD)" ./cmd/victoria-gateway
 ```
 
 Without the build args the image reports `version="docker"`,
@@ -2278,6 +2278,33 @@ directory's README for why), a direct translation of the same
 Either path uses the same binary, the same `config.yaml`, and every
 feature above works identically regardless of which one runs it — pick
 whichever matches where you already run things.
+
+## v1.15.0
+
+Released 2026-11-01. New alert inputs and one batch-confirm fix; the
+Alertmanager path is unchanged.
+
+- Two more alert endpoints, both off unless configured (an unconfigured
+  gateway answers them with `404`). Each converts its payload into the
+  same alerts `/webhook/alertmanager` produces, so dedup, log lookup,
+  routing, RAG and notifications behave identically:
+  - `POST /webhook/grafana` takes the Grafana Alerting webhook contact
+    point payload. Labels, annotations, status, start time and fingerprint
+    carry over; Grafana's extra fields (query values, dashboard, panel,
+    silence and image URLs) become `grafana_*` annotations.
+  - `POST /webhook/generic/{name}` takes any JSON body, mapped field by
+    field in `alert_sources.generic` (dot paths, `status_map`, start time
+    formats, static labels). A body that doesn't match the mapping gets
+    `400` with the reason instead of reaching log lookup with an empty
+    host. Fingerprints are prefixed with the source name
+    (`generic:<name>:<id>`), so two senders that both number events from 1
+    never dedup each other.
+- Both new endpoints use the same `webhook_auth` as `/webhook/alertmanager`.
+  See [Alert sources other than Alertmanager](#alert-sources-other-than-alertmanager).
+- Batch-confirming pending incidents on `/pending` now closes the linked
+  tracker issues for every row it actually confirmed, the same way the
+  single-record confirm already did. Rows another confirm handled first are
+  left alone, so their issues are not closed with the wrong resolution.
 
 ## v1.14.1
 
