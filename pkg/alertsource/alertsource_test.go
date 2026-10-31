@@ -148,7 +148,7 @@ func TestGeneric_ZabbixStyleSingleAlert(t *testing.T) {
 	if a.Labels["alertname"] != "High CPU utilization" || a.Labels["host"] != "web-01" || a.Labels["severity"] != "High" || a.Labels["source"] != "zabbix" {
 		t.Errorf("labels: %v", a.Labels)
 	}
-	if a.Status != "firing" || a.Fingerprint != "48213" || a.StartsAt != "2026-10-30T14:05:12Z" {
+	if a.Status != "firing" || a.Fingerprint != "generic:zabbix:48213" || a.StartsAt != "2026-10-30T14:05:12Z" {
 		t.Errorf("status/fingerprint/startsAt: %+v", a)
 	}
 	if a.Annotations["summary"] != "CPU over 90% for 5m" {
@@ -206,7 +206,8 @@ func TestGeneric_RejectsBadInput(t *testing.T) {
 		want string
 	}{
 		"missing alertname": {zabbixCfg(), `{"event":{"status":"PROBLEM","time":"2026.10.30 14:05:12"},"host":{"name":"web-01"}}`, "alertname"},
-		"no identity":       {zabbixCfg(), `{"event":{"status":"PROBLEM","time":"2026.10.30 14:05:12"},"trigger":{"name":"x"}}`, "no host"},
+		"no identity":       {zabbixCfg(), `{"event":{"id":"1","status":"PROBLEM","time":"2026.10.30 14:05:12"},"trigger":{"name":"x"}}`, "no host"},
+		"no fingerprint":    {zabbixCfg(), `{"event":{"status":"PROBLEM","time":"2026.10.30 14:05:12"},"trigger":{"name":"x"},"host":{"name":"h"}}`, "fingerprint"},
 		"unknown status":    {zabbixCfg(), `{"event":{"status":"MAYBE","time":"2026.10.30 14:05:12"},"trigger":{"name":"x"},"host":{"name":"h"}}`, "status"},
 		"bad time":          {zabbixCfg(), `{"event":{"status":"PROBLEM","time":"yesterday"},"trigger":{"name":"x"},"host":{"name":"h"}}`, "starts_at"},
 		"alerts not array":  {datadogCfg(), `{"alerts":{"title":"x"}}`, "alerts_path"},
@@ -255,5 +256,33 @@ func TestLookup(t *testing.T) {
 	}
 	if p.Alerts[0].Labels["alertname"] != "one" || p.Alerts[0].Labels["host"] != "42" {
 		t.Errorf("lookup: %v", p.Alerts[0].Labels)
+	}
+}
+
+func TestGeneric_FingerprintIncludesSourceName(t *testing.T) {
+	body := []byte(`{"event":{"id":"48213","status":"PROBLEM","time":"2026.10.30 14:05:12"},"trigger":{"name":"x"},"host":{"name":"h"}}`)
+	a := zabbixCfg()
+	b := zabbixCfg()
+	b.Name = "zabbix-dr"
+	pa, err := Generic{Cfg: a}.Parse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, err := Generic{Cfg: b}.Parse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pa.Alerts[0].Fingerprint == pb.Alerts[0].Fingerprint {
+		t.Errorf("same event id from two sources must not share a fingerprint: %q", pa.Alerts[0].Fingerprint)
+	}
+
+	min := config.GenericSourceConfig{Name: "one", Fields: config.GenericSourceField{AlertName: "name"}, Labels: map[string]string{"host": "server"}}
+	min2 := min
+	min2.Name = "two"
+	lb := []byte(`{"name":"disk full","server":"db-01"}`)
+	p1, _ := Generic{Cfg: min}.Parse(lb)
+	p2, _ := Generic{Cfg: min2}.Parse(lb)
+	if p1.Alerts[0].Fingerprint == p2.Alerts[0].Fingerprint {
+		t.Errorf("label-hash fingerprints must also differ per source: %q", p1.Alerts[0].Fingerprint)
 	}
 }

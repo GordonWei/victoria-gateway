@@ -85,8 +85,9 @@ type Config struct {
 	// is unchanged. Nil (the default) registers neither endpoint.
 	AlertSources *AlertSourcesConfig `yaml:"alert_sources"`
 
-	// WebhookAsync, when true, makes POST /webhook/alertmanager respond
-	// 202 Accepted immediately after filtering/dedup and run the analyses
+	// WebhookAsync, when true, makes the alert webhooks (POST
+	// /webhook/alertmanager, and /webhook/grafana, /webhook/generic/{name}
+	// when enabled) respond 202 Accepted immediately after filtering/dedup and run the analyses
 	// in the background, instead of holding the connection open until
 	// every alert's Loki+LLM(+cloud) round trip finishes. Alertmanager's
 	// own webhook timeout is far shorter than a minutes-long escalation,
@@ -203,7 +204,8 @@ type MaintenanceWindow struct {
 
 // WebhookAuthConfig, if set, makes the webhook handler require HTTP
 // Basic Auth matching Username/Password on every request. Nothing about
-// POST /webhook/alertmanager is authenticated otherwise — anyone who can
+// the alert webhooks (/webhook/alertmanager, /webhook/grafana,
+// /webhook/generic/{name}) is authenticated otherwise — anyone who can
 // reach the port can trigger a full analysis (an LLM call, possibly a
 // cloud escalation, possibly a filed issue). That's an acceptable
 // default on a private/home network, but it's a real exposure if this

@@ -126,13 +126,20 @@ func (g Generic) alert(item any, now func() time.Time) (aiops.Alert, error) {
 		startsAt = t
 	}
 
+	// The dedup table is shared by every alert input, and sources such as Zabbix
+	// or Datadog number their events with short integers, so the source name is
+	// part of the fingerprint: event 48213 from two sources is two alerts.
 	fp := ""
 	if f.Fingerprint != "" {
-		fp, _ = lookupString(item, f.Fingerprint)
-	}
-	if fp == "" {
+		v, ok := lookupString(item, f.Fingerprint)
+		if !ok || v == "" {
+			return aiops.Alert{}, fmt.Errorf("fingerprint: nothing at %q", f.Fingerprint)
+		}
+		fp = v
+	} else {
 		fp = labelFingerprint(labels)
 	}
+	fp = "generic:" + g.Cfg.Name + ":" + fp
 
 	a := aiops.Alert{
 		Status:      status,

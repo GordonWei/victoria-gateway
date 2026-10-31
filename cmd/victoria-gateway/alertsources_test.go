@@ -128,3 +128,30 @@ func TestAlertSources_UseWebhookAuth(t *testing.T) {
 		t.Errorf("with credentials, bad body: status %d, want 400 (auth passed, parse failed)", rec.Code)
 	}
 }
+
+func TestAlertSources_GenericDedupIsPerSource(t *testing.T) {
+	lokiSrv := newFakeLoki(t)
+	defer lokiSrv.Close()
+	llmSrv := newFakeLLM(t, "磁碟快滿。")
+	defer llmSrv.Close()
+	h := newTestHandler(t, lokiSrv.URL, llmSrv.URL)
+	src := func(name string) config.GenericSourceConfig {
+		return config.GenericSourceConfig{
+			Name:   name,
+			Fields: config.GenericSourceField{AlertName: "trigger.name", Fingerprint: "event.id"},
+			Labels: map[string]string{"host": "host.name"},
+		}
+	}
+	mux := alertSourcesMux(h, &config.AlertSourcesConfig{Generic: []config.GenericSourceConfig{src("zabbix"), src("datadog")}})
+	body := `{"event":{"id":"7"},"trigger":{"name":"disk_full"},"host":{"name":"test-host"}}`
+
+	if rec := post(mux, "/webhook/generic/zabbix", body); !strings.Contains(rec.Body.String(), `"host":"test-host"`) {
+		t.Fatalf("first zabbix alert not processed: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(mux, "/webhook/generic/datadog", body); !strings.Contains(rec.Body.String(), `"host":"test-host"`) {
+		t.Errorf("same event id from another source must not be deduped: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(mux, "/webhook/generic/zabbix/", body); strings.Contains(rec.Body.String(), "test-host") {
+		t.Errorf("resend from the same source (trailing slash) must still be deduped: %d %s", rec.Code, rec.Body.String())
+	}
+}

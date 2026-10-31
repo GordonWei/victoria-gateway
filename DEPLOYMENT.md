@@ -429,7 +429,9 @@ webui_auth:
   password: "REPLACE-a-real-secret"
 ```
 
-`webhook_auth` gates `POST /webhook/alertmanager` and `/maintenance-windows`;
+`webhook_auth` gates the alert webhooks (`POST /webhook/alertmanager`, plus
+`/webhook/grafana` and `/webhook/generic/{name}` when enabled) and
+`/maintenance-windows`;
 the same username/password then goes into Alertmanager's `webhook_configs`
 as `http_config.basic_auth` (exact YAML in
 `deploy/alertmanager_receiver_example.md`), followed by a reload.

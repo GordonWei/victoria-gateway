@@ -123,7 +123,10 @@ alert_sources:
         alertname: trigger.name      # required
         status: event.status         # optional; unset = always firing
         starts_at: event.time        # optional; unset = when the webhook arrived
-        fingerprint: event.id        # optional; unset = hash of the labels
+        fingerprint: event.id        # optional; unset = hash of the labels.
+                                     # Either way the source name is prefixed
+                                     # (generic:zabbix:48213), so the same id
+                                     # from two senders is never deduped together
       status_map: {PROBLEM: firing, OK: resolved}
       starts_at_format: "2006.01.02 15:04:05"   # rfc3339 (default), unix, unix_ms, or a Go layout
       labels:
@@ -139,7 +142,9 @@ array indexes (`tags.0.value`).
 
 **Grafana**: in Grafana, add a contact point of type *Webhook* with URL
 `http://<gateway>:8090/webhook/grafana` and, if `webhook_auth` is set, the
-same username and password under *HTTP Basic Authentication*. Labels,
+same username and password under *HTTP Basic Authentication*. Keep the
+HTTP method on POST (PUT gets `405`) and leave *Custom Payload* off — a
+custom template is no longer this format and gets `400`. Labels,
 annotations, status, start time and fingerprint carry over unchanged.
 Grafana's extra per-alert fields become annotations: `grafana_values`
 (the query values, e.g. `B=44.2394, C=1`), `grafana_dashboard_url`,
@@ -150,7 +155,7 @@ an error entry.
 
 **Generic**: stricter than the other two. If any alert in the body has no
 alertname, a status value that isn't in `status_map`, a start time that
-doesn't parse, or no `host`/`instance`/`namespace`+`pod` label after
+doesn't parse, nothing at a configured `fingerprint` path, or no `host`/`instance`/`namespace`+`pod` label after
 mapping, the whole request gets `400` with the reason, and the gateway
 logs it. A mapping that doesn't match what the sender actually posts is
 a configuration error, and failing loudly beats sending an empty host to
@@ -466,7 +471,7 @@ these; none of them changes behavior or blocks startup:
 
 | Condition | Why it matters |
 |---|---|
-| A cloud escalation target (`cloud` or `escalation_targets`) and no `webhook_auth` | Anyone who can reach `/webhook/alertmanager` can trigger paid cloud calls (an `always_cloud` alert name, or annotations that talk the local model into `escalate: true`). |
+| A cloud escalation target (`cloud` or `escalation_targets`) and no `webhook_auth` | Anyone who can reach the alert webhooks (`/webhook/alertmanager`, and `/webhook/grafana`, `/webhook/generic/{name}` when enabled) can trigger paid cloud calls (an `always_cloud` alert name, or annotations that talk the local model into `escalate: true`). |
 | A cloud escalation target and `escalation.max_per_hour: 0` (the default, unlimited) | Nothing caps how many alerts go to a paid model in an hour. |
 | A cloud escalation target and `rag.mask_log_excerpt` off (or RAG disabled, which masking needs) | Log lines reach the cloud model as they are. See **What data this stores, and where it goes**. |
 | `rag.enabled: true` and no `webui_auth` | `/incidents` and `/pending` show stored log excerpts to anyone who can reach the port. |
@@ -670,13 +675,16 @@ message size limit that a very long cloud analysis could exceed.
 
 #### Getting alerts from something other than Alertmanager
 
-`POST /webhook/alertmanager` is the only alert input, and it speaks the
-Alertmanager webhook format. There is no CloudWatch, EventBridge or
-Datadog receiver, and the intended way to add one is not another
-receiver in this binary but a small translator in front of it, so the
-gateway keeps one input contract. For a CloudWatch alarm that translator
-is typically SNS → a Lambda function (or any small service) that
-rebuilds the alarm as this payload and POSTs it:
+Three inputs are built in: `/webhook/alertmanager`, `/webhook/grafana`
+and `/webhook/generic/{name}` (see [Alert sources other than
+Alertmanager](#alert-sources-other-than-alertmanager)). Most senders that
+POST JSON — Zabbix, Datadog, in-house tools — fit a `generic` mapping
+without any code. A translator in front of the gateway is only needed when
+the sender can't be pointed at a plain JSON webhook. A CloudWatch alarm is
+the usual example: SNS wraps the alarm in its own envelope and first sends
+a subscription confirmation, so it is typically SNS → a Lambda function (or
+any small service) that rebuilds the alarm as this Alertmanager payload and
+POSTs it:
 
 ```json
 {

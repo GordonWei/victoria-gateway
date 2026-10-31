@@ -34,7 +34,7 @@ func registerAlertSources(mux *http.ServeMux, h *handler, ac *config.AlertSource
 		names = append(names, g.Name)
 	}
 	mux.HandleFunc("/webhook/generic/", func(w http.ResponseWriter, r *http.Request) {
-		name := strings.TrimPrefix(r.URL.Path, "/webhook/generic/")
+		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/webhook/generic/"), "/")
 		src, ok := sources[name]
 		if !ok {
 			http.NotFound(w, r)

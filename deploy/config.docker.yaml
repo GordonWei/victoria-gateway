@@ -14,7 +14,8 @@
 
 listen_addr: ":8090"
 
-# Optional. Requires HTTP Basic Auth on /webhook/alertmanager when set —
+# Optional. Requires HTTP Basic Auth on the alert webhooks
+# (/webhook/alertmanager, /webhook/grafana, /webhook/generic/{name}) when set —
 # anyone who can reach this port can otherwise trigger LLM/cloud calls and
 # file tracker issues on your behalf, so set this if the port is reachable
 # from anywhere you don't fully trust. Configure the same username/password

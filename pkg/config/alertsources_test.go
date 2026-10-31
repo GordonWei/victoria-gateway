@@ -19,9 +19,18 @@ func TestValidate_AlertSources(t *testing.T) {
 		"no alertname":     {func(g *GenericSourceConfig) { g.Fields.AlertName = " " }, false, "fields.alertname"},
 		"bad status value": {func(g *GenericSourceConfig) { g.StatusMap = map[string]string{"OK": "ok"} }, false, "status_map"},
 		"bad time format":  {func(g *GenericSourceConfig) { g.StartsAtFormat = "iso" }, false, "starts_at_format"},
-		"go layout ok":     {func(g *GenericSourceConfig) { g.StartsAtFormat = "2006.01.02 15:04:05" }, false, ""},
-		"alertname label":  {func(g *GenericSourceConfig) { g.Labels = map[string]string{"alertname": "x"} }, false, "fields.alertname"},
-		"empty path":       {func(g *GenericSourceConfig) { g.Annotations = map[string]string{"summary": ""} }, false, "annotations"},
+		"go layout ok": {func(g *GenericSourceConfig) {
+			g.StartsAtFormat = "2006.01.02 15:04:05"
+			g.Fields.StartsAt = "event.time"
+		}, false, ""},
+		"status_map without field": {func(g *GenericSourceConfig) { g.StatusMap = map[string]string{"OK": "resolved"} }, false, "fields.status"},
+		"format without field":     {func(g *GenericSourceConfig) { g.StartsAtFormat = "unix" }, false, "fields.starts_at"},
+		"status_map with field": {func(g *GenericSourceConfig) {
+			g.StatusMap = map[string]string{"OK": "resolved"}
+			g.Fields.Status = "event.status"
+		}, false, ""},
+		"alertname label": {func(g *GenericSourceConfig) { g.Labels = map[string]string{"alertname": "x"} }, false, "fields.alertname"},
+		"empty path":      {func(g *GenericSourceConfig) { g.Annotations = map[string]string{"summary": ""} }, false, "annotations"},
 	}
 	for name, c := range cases {
 		g := good

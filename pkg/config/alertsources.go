@@ -60,7 +60,7 @@ type GenericSourceField struct {
 	AlertName   string `yaml:"alertname"`   // required
 	Status      string `yaml:"status"`      // optional: unset means every alert is firing
 	StartsAt    string `yaml:"starts_at"`   // optional: unset means the time the webhook arrived
-	Fingerprint string `yaml:"fingerprint"` // optional: unset means a hash of the label set
+	Fingerprint string `yaml:"fingerprint"` // optional: unset means a hash of the label set; set but missing in the body is an error. The source name is always prefixed (generic:<name>:<value>)
 }
 
 var genericSourceName = regexp.MustCompile(`^[a-z0-9_-]+$`)
@@ -93,6 +93,12 @@ func (a *AlertSourcesConfig) validate() error {
 			if !strings.Contains(f, "2006") {
 				return fmt.Errorf("%s.starts_at_format %q is not rfc3339, unix, unix_ms or a Go time layout (a layout spells the year as 2006)", label, f)
 			}
+		}
+		if len(g.StatusMap) > 0 && strings.TrimSpace(g.Fields.Status) == "" {
+			return fmt.Errorf("%s.status_map is set but fields.status is not, so every alert would be treated as firing", label)
+		}
+		if g.StartsAtFormat != "" && strings.TrimSpace(g.Fields.StartsAt) == "" {
+			return fmt.Errorf("%s.starts_at_format is set but fields.starts_at is not, so the format would never be used", label)
 		}
 		for name, path := range g.Labels {
 			if name == "" || strings.TrimSpace(path) == "" {
