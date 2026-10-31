@@ -98,6 +98,64 @@ request. `resolved` deliveries are never analyzed — they just clear the
 dedup entry for that fingerprint so a genuinely new firing of the same
 alert isn't mistaken for a duplicate.
 
+### Alert sources other than Alertmanager
+
+Two more endpoints can be turned on under `alert_sources`. Each converts
+its payload into the same alerts `/webhook/alertmanager` produces, so
+everything after that (dedup, log lookup, routing, RAG, notifications) is
+identical. Neither is registered unless configured — an unconfigured
+gateway answers both paths with `404`.
+
+| Endpoint | Sender | Enable with |
+|---|---|---|
+| `POST /webhook/alertmanager` | Prometheus Alertmanager (always on) | — |
+| `POST /webhook/grafana` | Grafana Alerting webhook contact point | `alert_sources.grafana.enabled: true` |
+| `POST /webhook/generic/{name}` | Anything that POSTs JSON (Zabbix, Datadog, in-house tools) | one `alert_sources.generic` entry per sender |
+
+```yaml
+alert_sources:
+  grafana:
+    enabled: true
+  generic:
+    - name: zabbix                   # -> POST /webhook/generic/zabbix
+      alerts_path: ""                # empty: the body is one alert; "$.alerts": an array
+      fields:
+        alertname: trigger.name      # required
+        status: event.status         # optional; unset = always firing
+        starts_at: event.time        # optional; unset = when the webhook arrived
+        fingerprint: event.id        # optional; unset = hash of the labels
+      status_map: {PROBLEM: firing, OK: resolved}
+      starts_at_format: "2006.01.02 15:04:05"   # rfc3339 (default), unix, unix_ms, or a Go layout
+      labels:
+        host: host.name              # map host, or namespace + pod, so logs can be found
+        severity: trigger.severity
+      annotations:
+        summary: trigger.description
+      static_labels: {source: zabbix}
+```
+
+Paths walk the JSON with dots, an optional leading `$.`, and numbers for
+array indexes (`tags.0.value`).
+
+**Grafana**: in Grafana, add a contact point of type *Webhook* with URL
+`http://<gateway>:8090/webhook/grafana` and, if `webhook_auth` is set, the
+same username and password under *HTTP Basic Authentication*. Labels,
+annotations, status, start time and fingerprint carry over unchanged.
+Grafana's extra per-alert fields become annotations: `grafana_values`
+(the query values, e.g. `B=44.2394, C=1`), `grafana_dashboard_url`,
+`grafana_panel_url`, `grafana_silence_url`, `grafana_image_url`. As with
+Alertmanager, the alert rule needs a `host`/`instance` label (or
+`namespace`+`pod`) for logs to be found; an alert without one comes back as
+an error entry.
+
+**Generic**: stricter than the other two. If any alert in the body has no
+alertname, a status value that isn't in `status_map`, a start time that
+doesn't parse, or no `host`/`instance`/`namespace`+`pod` label after
+mapping, the whole request gets `400` with the reason, and the gateway
+logs it. A mapping that doesn't match what the sender actually posts is
+a configuration error, and failing loudly beats sending an empty host to
+log lookup.
+
 ### Identifying what an alert is about
 
 Alerts arrive from two different worlds here, and they don't share a label
@@ -334,7 +392,7 @@ with the same API key used for `cloud.api_key`.
 
 ### Securing the webhook
 
-`/webhook/alertmanager` has no auth by default (matching Alertmanager's own
+`/webhook/alertmanager` (and `/webhook/grafana`, `/webhook/generic/{name}` when enabled) has no auth by default (matching Alertmanager's own
 default-open `webhook_configs`), which is fine if it's only reachable from a
 private network you already trust. If it's exposed more broadly, add
 `webhook_auth` to require HTTP Basic Auth:

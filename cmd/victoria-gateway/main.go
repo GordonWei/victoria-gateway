@@ -292,6 +292,7 @@ func runServe(args []string) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook/alertmanager", h.handleAlertmanagerWebhook)
+	registerAlertSources(mux, h, cfg.AlertSources)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -756,6 +757,16 @@ type alertResult struct {
 }
 
 func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Request) {
+	h.handleAlertWebhook(w, r, "alertmanager", aiops.ParseWebhook)
+}
+
+// handleAlertWebhook is the shared body of every alert webhook endpoint:
+// auth, body cap, parse, then the dedup/fan-out below. parse is the only
+// thing that differs per source (see pkg/alertsource); source names it in
+// the log line a rejected non-Alertmanager payload gets, since those come
+// from a field mapping an operator wrote and a 400 alone gives the sender
+// little to go on.
+func (h *handler) handleAlertWebhook(w http.ResponseWriter, r *http.Request, source string, parse func([]byte) (*aiops.WebhookPayload, error)) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -781,8 +792,11 @@ func (h *handler) handleAlertmanagerWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	payload, err := aiops.ParseWebhook(body)
+	payload, err := parse(body)
 	if err != nil {
+		if source != "alertmanager" {
+			log.Printf("webhook/%s: rejected payload: %v", source, err)
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

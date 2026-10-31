@@ -1,0 +1,5 @@
+{
+  "event": {"id": "48213", "status": "PROBLEM", "time": "2026.10.30 14:05:12"},
+  "trigger": {"name": "High CPU utilization", "severity": "High", "description": "CPU over 90% for 5m"},
+  "host": {"name": "web-01", "ip": "192.0.2.10"}
+}

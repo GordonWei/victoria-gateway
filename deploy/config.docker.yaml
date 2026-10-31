@@ -23,6 +23,26 @@ listen_addr: ":8090"
 #   username: "alertmanager"
 #   password: "REPLACE-a-real-secret"
 
+# Optional. Accept alerts from senders other than Alertmanager; each one is
+# converted to the same alerts /webhook/alertmanager produces. Nothing below
+# is registered unless enabled here. Same webhook_auth as above. See the
+# README's "Alert sources other than Alertmanager" section.
+# alert_sources:
+#   grafana:
+#     enabled: true          # POST /webhook/grafana (Grafana webhook contact point)
+#   generic:
+#     - name: zabbix         # POST /webhook/generic/zabbix
+#       fields:
+#         alertname: trigger.name
+#         status: event.status
+#         starts_at: event.time
+#       status_map: {PROBLEM: firing, OK: resolved}
+#       starts_at_format: "2006.01.02 15:04:05"
+#       labels:
+#         host: host.name    # needed so the alert's logs can be found
+#       annotations:
+#         summary: trigger.description
+
 # Optional. Requires HTTP Basic Auth on the web pages instead
 # (/incidents, /pending, /maintenance-windows) — separate from
 # webhook_auth above since the caller there is a human browser, not

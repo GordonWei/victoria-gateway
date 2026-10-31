@@ -1,0 +1,8 @@
+{
+  "alerts": [
+    {"title": "Disk almost full", "transition": "Triggered", "date": 1793433600000, "id": "dd-1",
+     "tags": {"host": "db-01", "env": "prod"}, "body": "disk /var at 95%"},
+    {"title": "Pod restarting", "transition": "Recovered", "date": 1793433660000, "id": "dd-2",
+     "tags": {"kube_namespace": "shop", "pod_name": "cart-7d9f"}, "body": "restart count back to 0"}
+  ]
+}

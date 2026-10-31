@@ -76,6 +76,14 @@ type Config struct {
 	// a safe default this package can pick for them.
 	WebUIAuth          *WebhookAuthConfig  `yaml:"webui_auth"`
 	MaintenanceWindows []MaintenanceWindow `yaml:"maintenance_windows"` // optional: suppress or mute alerts during scheduled windows
+	// AlertSources, if set, adds webhook endpoints that accept alert
+	// formats other than Alertmanager's: POST /webhook/grafana for Grafana
+	// Alerting's webhook contact point, and POST /webhook/generic/{name}
+	// for any JSON body described by a field mapping. Each one converts
+	// its payload into the same alerts /webhook/alertmanager produces, so
+	// everything downstream (dedup, log fetch, routing, RAG, notifications)
+	// is unchanged. Nil (the default) registers neither endpoint.
+	AlertSources *AlertSourcesConfig `yaml:"alert_sources"`
 
 	// WebhookAsync, when true, makes POST /webhook/alertmanager respond
 	// 202 Accepted immediately after filtering/dedup and run the analyses
@@ -860,6 +868,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := ValidateMaintenanceWindows(c.MaintenanceWindows); err != nil {
+		return err
+	}
+	if err := c.AlertSources.validate(); err != nil {
 		return err
 	}
 	return nil
